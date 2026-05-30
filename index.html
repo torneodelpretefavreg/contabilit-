@@ -580,16 +580,208 @@
   ::-webkit-scrollbar-thumb { background: var(--rule-2); border-radius: 5px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
 
-  /* === RESPONSIVE === */
-  @media (max-width: 900px) {
+  /* === MOBILE: bottone menu hamburger === */
+  .menu-btn {
+    display: none;
+    background: transparent;
+    color: #f0eee7;
+    border: 1px solid #3a3a3a;
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    padding: 0;
+  }
+  .menu-btn:hover { background: #2d2d2d; }
+  .sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(20,20,20,0.4);
+    z-index: 90;
+    animation: fadeIn 0.15s ease-out;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  /* === RESPONSIVE: mobile === */
+  @media (max-width: 768px) {
+    body { font-size: 14px; }
+
+    .topbar {
+      padding: 10px 14px;
+      gap: 10px;
+      flex-wrap: nowrap;
+    }
+    .topbar h1 {
+      font-size: 15px;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .topbar h1 .sub { display: none; }
+    .topbar .badge { display: none; }
+    .topbar select {
+      font-size: 13px;
+      padding: 6px 8px;
+      max-width: 110px;
+    }
+    .topbar button.icon-btn {
+      font-size: 11px;
+      padding: 5px 8px;
+    }
+    .topbar .desktop-only { display: none; }
+    .menu-btn { display: inline-flex; }
+
+    /* Sidebar diventa drawer */
     .layout { flex-direction: column; }
-    .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 12px; overflow-x: auto; }
-    .sidebar .section-label { display: none; }
-    .navlink { padding: 6px 10px; font-size: 12px; white-space: nowrap; }
-    .main { padding: 18px; }
-    .form-row { grid-template-columns: 1fr; gap: 6px; }
-    .form-row label { font-size: 11px; }
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      width: 75%;
+      max-width: 280px;
+      z-index: 100;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      padding: 20px 14px;
+      overflow-y: auto;
+      transform: translateX(-100%);
+      transition: transform 0.22s ease-out;
+      box-shadow: 0 0 30px rgba(0,0,0,0.15);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar.open ~ .sidebar-backdrop { display: block; }
+    .sidebar .section-label { display: block; margin-top: 14px; }
+    .sidebar .section-label:first-child { margin-top: 0; }
+    .navlink {
+      padding: 10px 14px;
+      font-size: 14px;
+    }
+
+    /* Main */
+    .main {
+      padding: 14px;
+      width: 100%;
+    }
+
+    /* Page head */
+    .page-head {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
     .page-head h2 { font-size: 22px; }
+    .page-head .sub { font-size: 12px; }
+
+    /* KPI grid: 2 colonne su mobile */
+    .kpi-grid {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .kpi {
+      padding: 12px 14px;
+    }
+    .kpi .label { font-size: 9.5px; margin-bottom: 4px; }
+    .kpi .value { font-size: 20px; }
+    .kpi .hint { font-size: 10.5px; }
+
+    /* Liquidità grid: 2 colonne */
+    .liq-grid {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .liq-card { padding: 12px 14px; }
+    .liq-card .saldo { font-size: 18px; }
+    .liq-card .name { font-size: 10px; }
+    .liq-card .delta { font-size: 10px; }
+
+    /* Form: una colonna, label sopra */
+    .form-row {
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    .form-row label { font-size: 12px; font-weight: 600; color: var(--ink); }
+    input, select, textarea {
+      font-size: 16px !important;  /* iOS no-zoom su focus */
+      padding: 10px 12px;
+    }
+
+    /* Tipo switch */
+    .tipo-switch button { font-size: 12px; padding: 9px 6px; }
+
+    /* Filtri: full-width stack */
+    .filters {
+      gap: 8px;
+    }
+    .filters input, .filters select {
+      max-width: none;
+      width: 100%;
+      font-size: 13.5px !important;
+    }
+    .filters .label { width: 100%; margin-bottom: -4px; }
+
+    /* Tabelle: scroll fluido, font più compatto */
+    .tbl-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border-radius: 8px;
+    }
+    table.tbl { font-size: 12px; min-width: 600px; }
+    table.tbl th { padding: 8px 10px; font-size: 9.5px; }
+    table.tbl td { padding: 8px 10px; }
+    table.tbl td.num, table.tbl th.num { font-size: 11.5px; }
+
+    /* Modal: quasi fullscreen su mobile */
+    .modal-bg { padding: 0; align-items: flex-end; }
+    .modal {
+      max-width: 100%;
+      width: 100%;
+      max-height: 95vh;
+      border-radius: 14px 14px 0 0;
+    }
+    .modal-head { padding: 14px 18px; }
+    .modal-head h3 { font-size: 16px; }
+    .modal-body { padding: 16px 18px; }
+    .modal-foot { padding: 12px 18px; }
+
+    /* Card */
+    .card { padding: 16px; }
+
+    /* Cespiti & SP/CE: niente più 2 colonne affiancate */
+    div[style*="grid-template-columns: 1fr 1fr"] {
+      grid-template-columns: 1fr !important;
+    }
+
+    /* Topbar selettore stagione: pillola compatta */
+    .topbar select { min-width: 0; }
+
+    /* Login card */
+    .login-card { padding: 28px 22px; }
+    .login-card .logo { font-size: 19px; }
+
+    /* Buttons */
+    .btn { padding: 10px 14px; font-size: 13.5px; }
+    .btn.sm { padding: 6px 10px; font-size: 12px; }
+
+    /* Toast */
+    .toast {
+      bottom: 16px;
+      right: 16px;
+      left: 16px;
+      text-align: center;
+    }
+  }
+
+  /* === RESPONSIVE: very small (iPhone SE etc) === */
+  @media (max-width: 380px) {
+    .kpi-grid { grid-template-columns: 1fr; }
+    .liq-grid { grid-template-columns: 1fr; }
+    .kpi .value { font-size: 22px; }
   }
 </style>
 </head>
@@ -602,7 +794,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.4.0";
+const APP_VERSION = "3.5.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -908,7 +1100,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
       )}
       <div className="form-row">
         <label>Importo €  <span className="req">*</span></label>
-        <input type="number" step="0.01" min="0" value={importo} onChange={e => setImporto(e.target.value)} required />
+        <input type="number" inputMode="decimal" step="0.01" min="0" value={importo} onChange={e => setImporto(e.target.value)} required />
       </div>
       <div className="form-row">
         <label>Descrizione</label>
@@ -2921,23 +3113,23 @@ function CespiteForm({ cespite, onSave, onCancel }) {
             </div>
             <div className="form-row">
               <label>Anno acquisto</label>
-              <input type="number" value={annoInizio} onChange={e => setAnnoInizio(e.target.value)} min="2000" max="2100"/>
+              <input type="number" inputMode="decimal" value={annoInizio} onChange={e => setAnnoInizio(e.target.value)} min="2000" max="2100"/>
             </div>
             <div className="form-row">
               <label>Costo storico €</label>
-              <input type="number" step="0.01" value={costo} onChange={e => setCosto(e.target.value)}/>
+              <input type="number" inputMode="decimal" step="0.01" value={costo} onChange={e => setCosto(e.target.value)}/>
             </div>
             <div className="form-row">
               <label>Aliquota %</label>
-              <input type="number" step="0.01" value={aliquota} onChange={e => setAliquota(e.target.value)} placeholder="es. 20 per 20%"/>
+              <input type="number" inputMode="decimal" step="0.01" value={aliquota} onChange={e => setAliquota(e.target.value)} placeholder="es. 20 per 20%"/>
             </div>
             <div className="form-row">
               <label>Quota esercizio</label>
-              <input type="number" step="0.01" value={quota} onChange={e => setQuota(e.target.value)}/>
+              <input type="number" inputMode="decimal" step="0.01" value={quota} onChange={e => setQuota(e.target.value)}/>
             </div>
             <div className="form-row">
               <label>Fondo ammortamento</label>
-              <input type="number" step="0.01" value={fondo} onChange={e => setFondo(e.target.value)}/>
+              <input type="number" inputMode="decimal" step="0.01" value={fondo} onChange={e => setFondo(e.target.value)}/>
             </div>
             <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
               <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
@@ -3264,9 +3456,9 @@ function SquadraForm({ squadra, onSave, onCancel }) {
           <form className="form-grid" onSubmit={submit}>
             <div className="form-row"><label>Codice team <span className="req">*</span></label><input type="text" value={team} onChange={e => setTeam(e.target.value)} placeholder="es. TEAM 17" required/></div>
             <div className="form-row"><label>Nome squadra</label><input type="text" value={nome} onChange={e => setNome(e.target.value)} placeholder="es. FANALINO FC"/></div>
-            <div className="form-row"><label>N. giocatori</label><input type="number" min="0" value={nGiocatori} onChange={e => setNGiocatori(e.target.value)}/></div>
-            <div className="form-row"><label>Quota iscrizione €</label><input type="number" step="0.01" value={qIscr} onChange={e => setQIscr(e.target.value)}/></div>
-            <div className="form-row"><label>Quota assicurazione €</label><input type="number" step="0.01" value={qAssic} onChange={e => setQAssic(e.target.value)}/></div>
+            <div className="form-row"><label>N. giocatori</label><input type="number" inputMode="decimal" min="0" value={nGiocatori} onChange={e => setNGiocatori(e.target.value)}/></div>
+            <div className="form-row"><label>Quota iscrizione €</label><input type="number" inputMode="decimal" step="0.01" value={qIscr} onChange={e => setQIscr(e.target.value)}/></div>
+            <div className="form-row"><label>Quota assicurazione €</label><input type="number" inputMode="decimal" step="0.01" value={qAssic} onChange={e => setQAssic(e.target.value)}/></div>
             <div className="form-row"><label>Totale</label><div className="mono" style={{fontWeight:700, fontSize:16}}>{fmtEuro(totale)}</div></div>
             <div className="form-row"><label>Riscosso?</label><label style={{display:"flex", alignItems:"center", gap:8}}><input type="checkbox" checked={riscosso} onChange={e => setRiscosso(e.target.checked)}/> Quota già incassata</label></div>
             <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
@@ -3313,10 +3505,10 @@ function SerataForm({ serata, onSave, onCancel }) {
           <form className="form-grid" onSubmit={submit}>
             <div className="form-row"><label>Data <span className="req">*</span></label><input type="date" value={data} onChange={e => setData(e.target.value)} required/></div>
             <div className="form-row"><label>Note</label><input type="text" value={note} onChange={e => setNote(e.target.value)} placeholder="es. Finale, semifinale, serata 3..."/></div>
-            <div className="form-row"><label>Incasso Cash €</label><input type="number" step="0.01" min="0" value={cash} onChange={e => setCash(e.target.value)}/></div>
-            <div className="form-row"><label>Incasso POS €</label><input type="number" step="0.01" min="0" value={pos} onChange={e => setPos(e.target.value)}/></div>
-            <div className="form-row"><label>Incasso PayPal €</label><input type="number" step="0.01" min="0" value={paypal} onChange={e => setPaypal(e.target.value)}/></div>
-            <div className="form-row"><label>Incasso Satispay €</label><input type="number" step="0.01" min="0" value={satispay} onChange={e => setSatispay(e.target.value)}/></div>
+            <div className="form-row"><label>Incasso Cash €</label><input type="number" inputMode="decimal" step="0.01" min="0" value={cash} onChange={e => setCash(e.target.value)}/></div>
+            <div className="form-row"><label>Incasso POS €</label><input type="number" inputMode="decimal" step="0.01" min="0" value={pos} onChange={e => setPos(e.target.value)}/></div>
+            <div className="form-row"><label>Incasso PayPal €</label><input type="number" inputMode="decimal" step="0.01" min="0" value={paypal} onChange={e => setPaypal(e.target.value)}/></div>
+            <div className="form-row"><label>Incasso Satispay €</label><input type="number" inputMode="decimal" step="0.01" min="0" value={satispay} onChange={e => setSatispay(e.target.value)}/></div>
             <div className="form-row"><label>Totale serata</label><div className="mono" style={{fontWeight:700, fontSize:16}}>{fmtEuro(totale)}</div></div>
             <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
               <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
@@ -3448,7 +3640,7 @@ function ContoForm({ conto, existingCodes, onSave, onCancel }) {
           <form className="form-grid" onSubmit={submit}>
             <div className="form-row">
               <label>Codice <span className="req">*</span></label>
-              <input type="number" value={codice} onChange={e => setCodice(e.target.value)} disabled={!isNew} required />
+              <input type="number" inputMode="decimal" value={codice} onChange={e => setCodice(e.target.value)} disabled={!isNew} required />
             </div>
             <div className="form-row">
               <label>Nome <span className="req">*</span></label>
@@ -3496,6 +3688,7 @@ function App() {
   const [stagioniDisponibili, setStagioniDisponibili] = useState([STAGIONE_DEFAULT]);
   const [page, setPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const { conti, movimenti, cespiti, saldiIniziali, loading, seedStagione } = useFirebaseData(stagione);
 
@@ -3618,17 +3811,23 @@ function App() {
   return (
     <div className="app">
       <div className="topbar">
+        <button className="menu-btn" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Menu">☰</button>
         <h1>Futsal Fabbrico ASD <span className="sub">— Contabilità</span></h1>
-        <span className="badge">Stagione</span>
+        <span className="badge desktop-only">Stagione</span>
         <select value={stagione} onChange={e => setStagione(e.target.value)}>
           {stagioniDisponibili.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
-        <button className="icon-btn" onClick={newStagione}>+ Nuova stagione</button>
+        <button className="icon-btn desktop-only" onClick={newStagione}>+ Nuova stagione</button>
         <button className="icon-btn" onClick={() => { sessionStorage.removeItem(SESSION_KEY); setLogged(false); }}>Esci</button>
       </div>
 
       <div className="layout">
-        <nav className="sidebar">
+        <nav className={"sidebar " + (sidebarOpen ? "open" : "")} onClick={(e) => {
+          // chiudo sidebar quando si clicca un navlink (mobile)
+          if (e.target.tagName === "BUTTON" && e.target.classList.contains("navlink")) {
+            setSidebarOpen(false);
+          }
+        }}>
           <div className="section-label">Operatività</div>
           <button className={"navlink " + (page==="dashboard"?"active":"")} onClick={() => setPage("dashboard")}><span className="ico">◆</span> Dashboard</button>
           <button className={"navlink " + (page==="nuovo"?"active":"")} onClick={() => setPage("nuovo")}><span className="ico">+</span> Nuovo movimento</button>
@@ -3649,6 +3848,7 @@ function App() {
           <button className={"navlink " + (page==="cespiti"?"active":"")} onClick={() => setPage("cespiti")}><span className="ico">▣</span> Cespiti</button>
           <button className={"navlink " + (page==="torneo"?"active":"")} onClick={() => setPage("torneo")}><span className="ico">★</span> Torneo</button>
         </nav>
+        {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}></div>}
 
         <main className="main">
           {loading ? (
