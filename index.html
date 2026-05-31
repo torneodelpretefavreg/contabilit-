@@ -794,7 +794,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.5.0";
+const APP_VERSION = "3.6.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2740,7 +2740,7 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
 // ============================================================
 // PAGINA: EXPORT
 // ============================================================
-function PageExport({ conti, movimenti, saldiIniziali, stagione }) {
+function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
   const [busy, setBusy] = useState(false);
   const [lastAction, setLastAction] = useState(null);
 
@@ -2751,80 +2751,66 @@ function PageExport({ conti, movimenti, saldiIniziali, stagione }) {
     return m;
   }, [conti]);
 
-  const exportExcel = () => {
-    setBusy(true);
-    try {
-      const wb = XLSX.utils.book_new();
+  // === UTILITY DI CALCOLO (condivisi tra export) ===
+  const dati = useMemo(() => {
+    const scritture = generaLibroGiornale(movimenti, saldiIniziali, contiMap);
+    const mastrini = calcolaMastrini(scritture).map(x => ({
+      ...x,
+      categoria: contiMap[x.codice]?.categoria || "",
+      prospetto: contiMap[x.codice]?.prospetto || "",
+    })).sort((a,b) => a.codice - b.codice);
 
-      // 1. Movimenti
-      const movRows = movimenti.map(m => ({
-        Tipo: m.tipo,
-        Data: m.data,
-        Mese: m.mese,
-        "Conto liquidità": contiMap[m.contoLiquidita]?.nome.trim() || "?",
-        "Conto destinazione": m.contoLiquiditaDest ? contiMap[m.contoLiquiditaDest]?.nome.trim() : "",
-        "Conto P.d.C.": m.contoPdC ? `${m.contoPdC} ${contiMap[m.contoPdC]?.nome.trim() || ""}` : "",
-        Categoria: m.categoria,
-        BU: m.bu,
-        Importo: m.importo,
-        Descrizione: m.descrizione,
-        Importato: m.importato ? "Sì" : "",
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(movRows), "Movimenti");
+    const totD = mastrini.reduce((s,m) => s + m.dare, 0);
+    const totA = mastrini.reduce((s,m) => s + m.avere, 0);
 
-      // 2. Libro Giornale
-      const scritture = generaLibroGiornale(movimenti, saldiIniziali, contiMap);
-      const lgRows = [];
-      scritture.forEach((s, idx) => {
-        s.righe.forEach((r, ri) => {
-          lgRows.push({
-            Data: ri === 0 ? s.data : "",
-            Codice: r.codice,
-            Conto: r.nome.trim(),
-            Descrizione: ri === 0 ? s.descrizione : "",
-            Dare: r.dare > 0 ? r.dare : "",
-            Avere: r.avere > 0 ? r.avere : "",
-          });
-        });
-      });
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(lgRows), "Libro Giornale");
+    const spVoci = mastrini.filter(m => (m.prospetto === "SP" || m.prospetto === "SP/CE") && m.saldo !== 0);
+    const ceVoci = mastrini.filter(m => (m.prospetto === "CE" || m.prospetto === "SP/CE") && m.saldo !== 0);
+    const ricavi = mastrini.filter(m => m.categoria === "RICAVI").reduce((s,m)=> s + m.avere - m.dare, 0);
+    const costi = mastrini.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).reduce((s,m)=> s + m.dare - m.avere, 0);
+    const utile = ricavi - costi;
+    const attivo = spVoci.filter(m => m.saldo > 0).reduce((s,m) => s+m.saldo, 0);
+    const passivo = spVoci.filter(m => m.saldo < 0).reduce((s,m) => s-m.saldo, 0);
 
-      // 3. Bilancio Verifica
-      const mastrini = calcolaMastrini(scritture).map(x => ({
-        Codice: x.codice,
-        Conto: x.nome.trim(),
-        Categoria: contiMap[x.codice]?.categoria || "",
-        Prospetto: contiMap[x.codice]?.prospetto || "",
-        Dare: x.dare,
-        Avere: x.avere,
-        Saldo: x.dare - x.avere,
-      })).sort((a,b) => a.Codice - b.Codice);
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mastrini), "Bilancio Verifica");
+    // RF
+    const rfEntrate = {}, rfUscite = {};
+    movimenti.forEach(m => {
+      const cat = m.categoria || "(senza categoria)";
+      const mese = m.mese || "?";
+      if (m.tipo === "entrata") {
+        if (!rfEntrate[cat]) rfEntrate[cat] = {};
+        rfEntrate[cat][mese] = (rfEntrate[cat][mese] || 0) + m.importo;
+      } else if (m.tipo === "uscita") {
+        if (!rfUscite[cat]) rfUscite[cat] = {};
+        rfUscite[cat][mese] = (rfUscite[cat][mese] || 0) + m.importo;
+      }
+    });
 
-      // 4. Piano dei Conti
-      const pdcRows = conti.sort((a,b)=>a.codice-b.codice).map(c => ({
-        Codice: c.codice, Nome: c.nome.trim(), Eccedenza: c.eccedenza, Prospetto: c.prospetto, Categoria: c.categoria
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pdcRows), "Piano dei Conti");
+    return { scritture, mastrini, totD, totA, spVoci, ceVoci, ricavi, costi, utile, attivo, passivo, rfEntrate, rfUscite };
+  }, [movimenti, saldiIniziali, contiMap]);
 
-      XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagione}.xlsx`);
-      setLastAction("Excel esportato");
-    } catch(e) {
-      alert("Errore export Excel: " + e.message);
-    } finally {
-      setBusy(false);
-    }
+  // === HELPER: header pagina PDF ===
+  const addHeader = (doc, titoloDoc, pageNum, totPages) => {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.text("FUTSAL FABBRICO ASD", 14, 12);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(100);
+    doc.text(titoloDoc, 14, 17);
+    doc.text(`Stagione ${stagione}`, doc.internal.pageSize.width - 14, 12, { align: "right" });
+    doc.text(`pag. ${pageNum}/${totPages}`, doc.internal.pageSize.width - 14, 17, { align: "right" });
+    doc.setDrawColor(180);
+    doc.line(14, 20, doc.internal.pageSize.width - 14, 20);
+    doc.setTextColor(0);
   };
 
-  const exportPDF = () => {
+  // === EXPORT: BILANCIO DI VERIFICA (PDF) ===
+  const exportBilancioPDF = () => {
     setBusy(true);
     try {
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-      const scritture = generaLibroGiornale(movimenti, saldiIniziali, contiMap);
-      const mastrini = calcolaMastrini(scritture).filter(m => m.dare > 0 || m.avere > 0).sort((a,b)=>a.codice-b.codice);
 
-      // Intestazione
       doc.setFont("helvetica", "bold");
       doc.setFontSize(16);
       doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
@@ -2836,22 +2822,20 @@ function PageExport({ conti, movimenti, saldiIniziali, stagione }) {
       doc.text(`Generato il ${new Date().toLocaleDateString("it-IT")} alle ${new Date().toLocaleTimeString("it-IT")}`, 105, 31, { align: "center" });
       doc.setTextColor(0);
 
-      // Tabella mastrini
-      const rows = mastrini.map(m => [
+      const mastriniAttivi = dati.mastrini.filter(m => m.dare > 0 || m.avere > 0);
+      const rows = mastriniAttivi.map(m => [
         String(m.codice).padStart(2,"0"),
         m.nome.trim(),
-        contiMap[m.codice]?.categoria || "",
+        m.categoria,
         m.dare > 0 ? m.dare.toFixed(2) : "",
         m.avere > 0 ? m.avere.toFixed(2) : "",
-        Math.abs(m.dare - m.avere).toFixed(2) + (m.dare - m.avere < 0 ? " A" : m.dare - m.avere > 0 ? " D" : "")
+        Math.abs(m.saldo).toFixed(2) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : "")
       ]);
-      const totD = mastrini.reduce((s,m)=>s+m.dare,0);
-      const totA = mastrini.reduce((s,m)=>s+m.avere,0);
       rows.push([
         "", { content: "TOTALI", styles: { fontStyle: "bold" } }, "",
-        { content: totD.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: totA.toFixed(2), styles: { fontStyle: "bold" } },
-        Math.abs(totD-totA) < 0.01 ? "✓" : (totD-totA).toFixed(2),
+        { content: dati.totD.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: dati.totA.toFixed(2), styles: { fontStyle: "bold" } },
+        Math.abs(dati.totD - dati.totA) < 0.01 ? "✓" : (dati.totD - dati.totA).toFixed(2),
       ]);
 
       doc.autoTable({
@@ -2860,21 +2844,622 @@ function PageExport({ conti, movimenti, saldiIniziali, stagione }) {
         body: rows,
         styles: { fontSize: 8, cellPadding: 1.5 },
         headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
-        columnStyles: {
-          0: { cellWidth: 12, halign: "center" },
-          3: { cellWidth: 24, halign: "right" },
-          4: { cellWidth: 24, halign: "right" },
-          5: { cellWidth: 26, halign: "right" },
-        },
+        columnStyles: { 0: { cellWidth: 12, halign: "center" }, 3: { cellWidth: 24, halign: "right" }, 4: { cellWidth: 24, halign: "right" }, 5: { cellWidth: 26, halign: "right" } },
       });
 
-      doc.save(`Bilancio_FutsalFabbrico_${stagione}.pdf`);
-      setLastAction("PDF esportato");
-    } catch(e) {
-      alert("Errore export PDF: " + e.message);
-    } finally {
-      setBusy(false);
-    }
+      doc.save(`Bilancio_Verifica_${stagione}.pdf`);
+      setLastAction("Bilancio di Verifica esportato");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // === EXPORT: CONTO ECONOMICO (PDF) ===
+  const exportCEPDF = () => {
+    setBusy(true);
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+      doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
+      doc.setFontSize(11); doc.setFont("helvetica", "normal");
+      doc.text(`Conto Economico · Stagione ${stagione}`, 105, 25, { align: "center" });
+      doc.setFontSize(9); doc.setTextColor(100);
+      doc.text(`Al ${new Date().toLocaleDateString("it-IT")}`, 105, 31, { align: "center" });
+      doc.setTextColor(0);
+
+      const ricaviRows = dati.ceVoci.filter(m => m.categoria === "RICAVI").map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), (m.avere - m.dare).toFixed(2)
+      ]);
+      const costiRows = dati.ceVoci.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), (m.dare - m.avere).toFixed(2)
+      ]);
+
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("RICAVI", 14, 40);
+      doc.autoTable({
+        startY: 43,
+        head: [["Cod.", "Voce", "Importo"]],
+        body: [...ricaviRows, [{content:"Totale Ricavi", colSpan:2, styles:{fontStyle:"bold"}}, {content: dati.ricavi.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]],
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0: { cellWidth: 14, halign: "center" }, 2: { cellWidth: 32, halign: "right" } },
+      });
+
+      let y2 = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("COSTI", 14, y2);
+      doc.autoTable({
+        startY: y2 + 3,
+        head: [["Cod.", "Voce", "Importo"]],
+        body: [...costiRows, [{content:"Totale Costi", colSpan:2, styles:{fontStyle:"bold"}}, {content: dati.costi.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]],
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0: { cellWidth: 14, halign: "center" }, 2: { cellWidth: 32, halign: "right" } },
+      });
+
+      let y3 = doc.lastAutoTable.finalY + 12;
+      doc.setFontSize(13); doc.setFont("helvetica","bold");
+      doc.setFillColor(26, 26, 26); doc.rect(14, y3 - 5, doc.internal.pageSize.width - 28, 10, "F");
+      doc.setTextColor(255);
+      doc.text("RISULTATO D'ESERCIZIO", 16, y3 + 2);
+      doc.text(`€ ${dati.utile.toFixed(2)}  (${dati.utile >= 0 ? "Utile" : "Perdita"})`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
+      doc.setTextColor(0);
+
+      doc.save(`Conto_Economico_${stagione}.pdf`);
+      setLastAction("Conto Economico esportato");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // === EXPORT: STATO PATRIMONIALE (PDF) ===
+  const exportSPPDF = () => {
+    setBusy(true);
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+      doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
+      doc.setFontSize(11); doc.setFont("helvetica", "normal");
+      doc.text(`Stato Patrimoniale · Stagione ${stagione}`, 105, 25, { align: "center" });
+      doc.setFontSize(9); doc.setTextColor(100);
+      doc.text(`Al ${new Date().toLocaleDateString("it-IT")}`, 105, 31, { align: "center" });
+      doc.setTextColor(0);
+
+      const attive = dati.spVoci.filter(m => m.saldo > 0).map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, m.saldo.toFixed(2)
+      ]);
+      const passive = dati.spVoci.filter(m => m.saldo < 0).map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, (-m.saldo).toFixed(2)
+      ]);
+
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("ATTIVITÀ", 14, 40);
+      doc.autoTable({
+        startY: 43,
+        head: [["Cod.", "Voce", "Categoria", "Importo"]],
+        body: [...attive, [{content:"Totale Attivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: dati.attivo.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]],
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0: { cellWidth: 14, halign: "center" }, 3: { cellWidth: 32, halign: "right" } },
+      });
+
+      let y2 = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("PASSIVITÀ E PATRIMONIO NETTO", 14, y2);
+      doc.autoTable({
+        startY: y2 + 3,
+        head: [["Cod.", "Voce", "Categoria", "Importo"]],
+        body: [...passive, [{content:"Totale Passivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: dati.passivo.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]],
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0: { cellWidth: 14, halign: "center" }, 3: { cellWidth: 32, halign: "right" } },
+      });
+
+      let y3 = doc.lastAutoTable.finalY + 12;
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.setFillColor(26, 26, 26); doc.rect(14, y3 - 5, doc.internal.pageSize.width - 28, 10, "F");
+      doc.setTextColor(255);
+      doc.text("ATTIVO NETTO", 16, y3 + 2);
+      doc.text(`€ ${(dati.attivo - dati.passivo).toFixed(2)}`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
+      doc.setTextColor(0);
+
+      doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
+      setLastAction("Stato Patrimoniale esportato");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // === EXPORT: RENDICONTO FINANZIARIO (PDF) ===
+  const exportRFPDF = () => {
+    setBusy(true);
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+      doc.text("FUTSAL FABBRICO ASD", 148, 14, { align: "center" });
+      doc.setFontSize(10); doc.setFont("helvetica", "normal");
+      doc.text(`Rendiconto Finanziario · Stagione ${stagione}`, 148, 20, { align: "center" });
+      doc.setFontSize(8); doc.setTextColor(100);
+      doc.text(`Generato il ${new Date().toLocaleDateString("it-IT")}`, 148, 25, { align: "center" });
+      doc.setTextColor(0);
+
+      const buildRfTable = (titolo, mappa, color, startY) => {
+        const rows = Object.entries(mappa).sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
+          const r = [cat];
+          let tot = 0;
+          MESI.forEach(m => {
+            r.push(mesi[m] ? mesi[m].toFixed(2) : "");
+            tot += mesi[m] || 0;
+          });
+          r.push(tot.toFixed(2));
+          return r;
+        });
+        // Totale
+        const totMese = {};
+        MESI.forEach(m => totMese[m] = 0);
+        Object.values(mappa).forEach(r => {
+          Object.entries(r).forEach(([m,v]) => { if (totMese[m] !== undefined) totMese[m] += v; });
+        });
+        const totGen = Object.values(totMese).reduce((s,v) => s+v, 0);
+        rows.push([
+          {content:"TOTALE", styles:{fontStyle:"bold"}},
+          ...MESI.map(m => ({content: totMese[m] ? totMese[m].toFixed(2) : "", styles:{fontStyle:"bold"}})),
+          {content: totGen.toFixed(2), styles:{fontStyle:"bold", fillColor: color === "verde" ? [230,240,232] : [251,236,236]}}
+        ]);
+
+        doc.setFontSize(10); doc.setFont("helvetica","bold");
+        doc.text(titolo, 14, startY);
+        doc.autoTable({
+          startY: startY + 2,
+          head: [["Categoria", ...MESI.map(m => m.slice(0,3)), "Totale"]],
+          body: rows,
+          styles: { fontSize: 7, cellPadding: 1.2 },
+          headStyles: { fillColor: color === "verde" ? [45, 94, 62] : [181, 67, 67], textColor: 240, fontStyle: "bold", fontSize: 7 },
+          columnStyles: { 0: { cellWidth: 38 } },
+        });
+        return doc.lastAutoTable.finalY;
+      };
+
+      const y1 = buildRfTable("ENTRATE per categoria e mese", dati.rfEntrate, "verde", 32);
+      buildRfTable("USCITE per categoria e mese", dati.rfUscite, "rosso", y1 + 10);
+
+      doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
+      setLastAction("Rendiconto Finanziario esportato");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // === EXPORT: CESPITI (PDF) ===
+  const exportCespitiPDF = () => {
+    setBusy(true);
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+      doc.text("FUTSAL FABBRICO ASD", 148, 14, { align: "center" });
+      doc.setFontSize(10); doc.setFont("helvetica", "normal");
+      doc.text(`Libro Cespiti & Ammortamenti · Stagione ${stagione}`, 148, 20, { align: "center" });
+
+      const totCosto = cespiti.reduce((s,c) => s + (c.costo_storico || 0), 0);
+      const totFondo = cespiti.reduce((s,c) => s + (c.fondo_ammortamento || 0), 0);
+      const totQuota = cespiti.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
+
+      const rows = cespiti.map(c => [
+        c.conto || "",
+        c.classe || "",
+        c.n_beni || "",
+        c.anno_inizio || "",
+        (c.costo_storico || 0).toFixed(2),
+        c.aliquota ? ((c.aliquota * 100).toFixed(0) + "%") : "",
+        (c.quota_esercizio || 0).toFixed(2),
+        (c.fondo_ammortamento || 0).toFixed(2),
+        ((c.costo_storico || 0) - (c.fondo_ammortamento || 0)).toFixed(2),
+      ]);
+      rows.push([
+        {content:"TOTALI", colSpan:4, styles:{fontStyle:"bold"}},
+        {content: totCosto.toFixed(2), styles:{fontStyle:"bold"}},
+        "",
+        {content: totQuota.toFixed(2), styles:{fontStyle:"bold"}},
+        {content: totFondo.toFixed(2), styles:{fontStyle:"bold"}},
+        {content: (totCosto - totFondo).toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}},
+      ]);
+
+      doc.autoTable({
+        startY: 30,
+        head: [["Conto/Bene", "Classe", "N°", "Anno", "Costo storico", "Aliq.", "Quota es.", "Fondo amm.to", "Val. netto"]],
+        body: rows,
+        styles: { fontSize: 8, cellPadding: 1.5 },
+        headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 4:{halign:"right"}, 5:{halign:"center"}, 6:{halign:"right"}, 7:{halign:"right"}, 8:{halign:"right"} },
+      });
+
+      doc.save(`Cespiti_${stagione}.pdf`);
+      setLastAction("Cespiti esportati");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // === EXPORT: PACCHETTO COMPLETO PDF ===
+  const exportPacchettoCompleto = () => {
+    setBusy(true);
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const W = doc.internal.pageSize.width;
+      const H = doc.internal.pageSize.height;
+
+      // === FRONTESPIZIO ===
+      doc.setFillColor(26, 26, 26); doc.rect(0, 0, W, 60, "F");
+      doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(22);
+      doc.text("FUTSAL FABBRICO ASD", W/2, 28, { align: "center" });
+      doc.setFontSize(13); doc.setFont("helvetica", "normal");
+      doc.text("Bilancio Contabile Completo", W/2, 40, { align: "center" });
+      doc.setFontSize(11); doc.setTextColor(180);
+      doc.text(`Stagione ${stagione}`, W/2, 50, { align: "center" });
+      doc.setTextColor(0);
+
+      doc.setFontSize(10); doc.setFont("helvetica", "normal");
+      doc.text("Documento generato automaticamente", W/2, 80, { align: "center" });
+      doc.text(`il ${new Date().toLocaleDateString("it-IT", { day:"2-digit", month:"long", year:"numeric" })} alle ${new Date().toLocaleTimeString("it-IT", { hour:"2-digit", minute:"2-digit" })}`, W/2, 86, { align: "center" });
+
+      // Indice
+      doc.setFontSize(12); doc.setFont("helvetica","bold");
+      doc.text("Indice del documento", 30, 115);
+      doc.setFontSize(10); doc.setFont("helvetica","normal");
+      const indice = [
+        "1.  Bilancio di Verifica",
+        "2.  Stato Patrimoniale",
+        "3.  Conto Economico",
+        "4.  Rendiconto Finanziario",
+        "5.  Libro Cespiti",
+        "6.  Elenco Movimenti",
+      ];
+      indice.forEach((s, i) => doc.text(s, 35, 125 + i * 7));
+
+      // KPI di sintesi nel frontespizio
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("Dati di sintesi", 30, 185);
+      doc.setFontSize(9); doc.setFont("helvetica","normal");
+      const kpi = [
+        ["Ricavi", `€ ${dati.ricavi.toFixed(2)}`],
+        ["Costi", `€ ${dati.costi.toFixed(2)}`],
+        ["Utile/Perdita d'esercizio", `€ ${dati.utile.toFixed(2)}`],
+        ["Attività totali", `€ ${dati.attivo.toFixed(2)}`],
+        ["Passività totali", `€ ${dati.passivo.toFixed(2)}`],
+        ["N. movimenti registrati", `${movimenti.length}`],
+        ["N. conti movimentati", `${dati.mastrini.filter(m => m.dare > 0 || m.avere > 0).length}`],
+      ];
+      kpi.forEach(([k,v], i) => {
+        doc.text(k, 35, 195 + i * 6);
+        doc.text(v, W - 35, 195 + i * 6, { align: "right" });
+      });
+
+      doc.setFontSize(8); doc.setTextColor(120);
+      doc.text("Generato da App Contabilità Futsal Fabbrico ASD", W/2, H - 12, { align: "center" });
+      doc.setTextColor(0);
+
+      // === 1. BILANCIO DI VERIFICA ===
+      doc.addPage();
+      doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+      doc.text("1. Bilancio di Verifica", 14, 18);
+      doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
+
+      const mastriniAttivi = dati.mastrini.filter(m => m.dare > 0 || m.avere > 0);
+      const bilancioRows = mastriniAttivi.map(m => [
+        String(m.codice).padStart(2,"0"),
+        m.nome.trim(),
+        m.categoria,
+        m.dare > 0 ? m.dare.toFixed(2) : "",
+        m.avere > 0 ? m.avere.toFixed(2) : "",
+        Math.abs(m.saldo).toFixed(2) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : "")
+      ]);
+      bilancioRows.push([
+        "", {content:"TOTALI", styles:{fontStyle:"bold"}}, "",
+        {content: dati.totD.toFixed(2), styles:{fontStyle:"bold"}},
+        {content: dati.totA.toFixed(2), styles:{fontStyle:"bold"}},
+        Math.abs(dati.totD - dati.totA) < 0.01 ? "✓" : (dati.totD - dati.totA).toFixed(2),
+      ]);
+      doc.autoTable({
+        startY: 25,
+        head: [["Cod.", "Conto", "Categoria", "Dare", "Avere", "Saldo"]],
+        body: bilancioRows,
+        styles: { fontSize: 8, cellPadding: 1.5 },
+        headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0:{cellWidth:12, halign:"center"}, 3:{cellWidth:24, halign:"right"}, 4:{cellWidth:24, halign:"right"}, 5:{cellWidth:26, halign:"right"} },
+      });
+
+      // === 2. STATO PATRIMONIALE ===
+      doc.addPage();
+      doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+      doc.text("2. Stato Patrimoniale", 14, 18);
+      doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
+
+      doc.setFontSize(11); doc.text("Attività", 14, 30);
+      const attivoRows = dati.spVoci.filter(m => m.saldo > 0).map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, m.saldo.toFixed(2)
+      ]);
+      attivoRows.push([{content:"Totale Attivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: dati.attivo.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]);
+      doc.autoTable({
+        startY: 33,
+        head: [["Cod.", "Voce", "Categoria", "Importo"]],
+        body: attivoRows,
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0:{cellWidth:14, halign:"center"}, 3:{cellWidth:32, halign:"right"} },
+      });
+
+      let y_sp = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("Passività e Patrimonio Netto", 14, y_sp);
+      const passivoRows = dati.spVoci.filter(m => m.saldo < 0).map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, (-m.saldo).toFixed(2)
+      ]);
+      passivoRows.push([{content:"Totale Passivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: dati.passivo.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]);
+      doc.autoTable({
+        startY: y_sp + 3,
+        head: [["Cod.", "Voce", "Categoria", "Importo"]],
+        body: passivoRows,
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0:{cellWidth:14, halign:"center"}, 3:{cellWidth:32, halign:"right"} },
+      });
+
+      let y_an = doc.lastAutoTable.finalY + 8;
+      doc.setFillColor(26,26,26); doc.rect(14, y_an - 5, W - 28, 10, "F");
+      doc.setTextColor(255); doc.setFontSize(11);
+      doc.text("ATTIVO NETTO", 16, y_an + 2);
+      doc.text(`€ ${(dati.attivo - dati.passivo).toFixed(2)}`, W - 16, y_an + 2, { align: "right" });
+      doc.setTextColor(0);
+
+      // === 3. CONTO ECONOMICO ===
+      doc.addPage();
+      doc.setFont("helvetica","bold"); doc.setFontSize(14);
+      doc.text("3. Conto Economico", 14, 18);
+      doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
+
+      doc.setFontSize(11); doc.text("Ricavi", 14, 30);
+      const ricaviRows = dati.ceVoci.filter(m => m.categoria === "RICAVI").map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), (m.avere - m.dare).toFixed(2)
+      ]);
+      ricaviRows.push([{content:"Totale Ricavi", colSpan:2, styles:{fontStyle:"bold"}}, {content: dati.ricavi.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]);
+      doc.autoTable({
+        startY: 33,
+        head: [["Cod.", "Voce", "Importo"]],
+        body: ricaviRows,
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0:{cellWidth:14, halign:"center"}, 2:{cellWidth:32, halign:"right"} },
+      });
+
+      let y_ce = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text("Costi", 14, y_ce);
+      const costiRows = dati.ceVoci.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), (m.dare - m.avere).toFixed(2)
+      ]);
+      costiRows.push([{content:"Totale Costi", colSpan:2, styles:{fontStyle:"bold"}}, {content: dati.costi.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]);
+      doc.autoTable({
+        startY: y_ce + 3,
+        head: [["Cod.", "Voce", "Importo"]],
+        body: costiRows,
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0:{cellWidth:14, halign:"center"}, 2:{cellWidth:32, halign:"right"} },
+      });
+
+      let y_ut = doc.lastAutoTable.finalY + 8;
+      doc.setFillColor(26,26,26); doc.rect(14, y_ut - 5, W - 28, 10, "F");
+      doc.setTextColor(255); doc.setFontSize(11);
+      doc.text("RISULTATO D'ESERCIZIO", 16, y_ut + 2);
+      doc.text(`€ ${dati.utile.toFixed(2)}  (${dati.utile >= 0 ? "Utile" : "Perdita"})`, W - 16, y_ut + 2, { align: "right" });
+      doc.setTextColor(0);
+
+      // === 4. RENDICONTO FINANZIARIO (landscape) ===
+      doc.addPage("a4", "landscape");
+      const Wl = doc.internal.pageSize.width;
+      doc.setFont("helvetica","bold"); doc.setFontSize(14);
+      doc.text("4. Rendiconto Finanziario", 14, 14);
+      doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
+
+      const buildRfRowsPack = (mappa) => {
+        const rows = Object.entries(mappa).sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
+          const r = [cat];
+          let tot = 0;
+          MESI.forEach(m => { r.push(mesi[m] ? mesi[m].toFixed(2) : ""); tot += mesi[m] || 0; });
+          r.push(tot.toFixed(2));
+          return r;
+        });
+        const totMese = {}; MESI.forEach(m => totMese[m] = 0);
+        Object.values(mappa).forEach(r => Object.entries(r).forEach(([m,v]) => { if (totMese[m] !== undefined) totMese[m] += v; }));
+        const totGen = Object.values(totMese).reduce((s,v) => s+v, 0);
+        rows.push([{content:"TOTALE", styles:{fontStyle:"bold"}}, ...MESI.map(m => ({content: totMese[m] ? totMese[m].toFixed(2) : "", styles:{fontStyle:"bold"}})), {content: totGen.toFixed(2), styles:{fontStyle:"bold"}}]);
+        return rows;
+      };
+
+      doc.setFontSize(10); doc.text("Entrate", 14, 23);
+      doc.autoTable({
+        startY: 25,
+        head: [["Categoria", ...MESI.map(m => m.slice(0,3)), "Tot"]],
+        body: buildRfRowsPack(dati.rfEntrate),
+        styles: { fontSize: 7, cellPadding: 1 },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold", fontSize: 7 },
+        columnStyles: { 0: { cellWidth: 35 } },
+      });
+      let y_rf = doc.lastAutoTable.finalY + 6;
+      doc.setFontSize(10); doc.setFont("helvetica","bold"); doc.text("Uscite", 14, y_rf);
+      doc.autoTable({
+        startY: y_rf + 2,
+        head: [["Categoria", ...MESI.map(m => m.slice(0,3)), "Tot"]],
+        body: buildRfRowsPack(dati.rfUscite),
+        styles: { fontSize: 7, cellPadding: 1 },
+        headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold", fontSize: 7 },
+        columnStyles: { 0: { cellWidth: 35 } },
+      });
+
+      // === 5. CESPITI (landscape) ===
+      doc.addPage("a4", "landscape");
+      doc.setFont("helvetica","bold"); doc.setFontSize(14);
+      doc.text("5. Libro Cespiti", 14, 14);
+      doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
+
+      const totCosto = cespiti.reduce((s,c) => s + (c.costo_storico || 0), 0);
+      const totFondo = cespiti.reduce((s,c) => s + (c.fondo_ammortamento || 0), 0);
+      const totQuota = cespiti.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
+      const cespitiRows = cespiti.map(c => [
+        c.conto || "", c.classe || "", c.n_beni || "", c.anno_inizio || "",
+        (c.costo_storico || 0).toFixed(2),
+        c.aliquota ? ((c.aliquota * 100).toFixed(0) + "%") : "",
+        (c.quota_esercizio || 0).toFixed(2),
+        (c.fondo_ammortamento || 0).toFixed(2),
+        ((c.costo_storico || 0) - (c.fondo_ammortamento || 0)).toFixed(2),
+      ]);
+      cespitiRows.push([
+        {content:"TOTALI", colSpan:4, styles:{fontStyle:"bold"}},
+        {content: totCosto.toFixed(2), styles:{fontStyle:"bold"}}, "",
+        {content: totQuota.toFixed(2), styles:{fontStyle:"bold"}},
+        {content: totFondo.toFixed(2), styles:{fontStyle:"bold"}},
+        {content: (totCosto - totFondo).toFixed(2), styles:{fontStyle:"bold"}}
+      ]);
+      doc.autoTable({
+        startY: 22,
+        head: [["Conto/Bene", "Classe", "N°", "Anno", "Costo storico", "Aliq.", "Quota es.", "Fondo amm.to", "Val. netto"]],
+        body: cespitiRows,
+        styles: { fontSize: 8, cellPadding: 1.5 },
+        headStyles: { fillColor: [26,26,26], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 4:{halign:"right"}, 5:{halign:"center"}, 6:{halign:"right"}, 7:{halign:"right"}, 8:{halign:"right"} },
+      });
+
+      // === 6. ELENCO MOVIMENTI ===
+      doc.addPage("a4", "landscape");
+      doc.setFont("helvetica","bold"); doc.setFontSize(14);
+      doc.text("6. Elenco Movimenti", 14, 14);
+      doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
+
+      const movRows = movimenti
+        .sort((a,b) => (a.data || "").localeCompare(b.data || ""))
+        .map(m => [
+          m.tipo,
+          m.data || "",
+          (m.contoLiquidita && contiMap[m.contoLiquidita]?.nome.trim()) || "—",
+          m.tipo === "giroconto" ? (contiMap[m.contoLiquiditaDest]?.nome.trim() || "—") : (m.contoPdC ? `${m.contoPdC} ${contiMap[m.contoPdC]?.nome.trim() || ""}` : ""),
+          m.categoria || "",
+          m.bu || "",
+          m.importo.toFixed(2),
+          (m.descrizione || "").slice(0, 70),
+        ]);
+      doc.autoTable({
+        startY: 22,
+        head: [["Tipo", "Data", "Liquidità", "Contropartita", "Categoria", "BU", "Importo", "Descrizione"]],
+        body: movRows,
+        styles: { fontSize: 7, cellPadding: 1 },
+        headStyles: { fillColor: [26,26,26], textColor: 240, fontStyle: "bold", fontSize: 7 },
+        columnStyles: { 6: { halign: "right" } },
+      });
+
+      // === FOOTER su tutte le pagine ===
+      const totPages = doc.internal.getNumberOfPages();
+      for (let i = 1; i <= totPages; i++) {
+        doc.setPage(i);
+        if (i > 1) {  // non sul frontespizio
+          doc.setFontSize(8); doc.setTextColor(120);
+          doc.text(`Futsal Fabbrico ASD · Stagione ${stagione}`, 14, doc.internal.pageSize.height - 8);
+          doc.text(`pag. ${i}/${totPages}`, doc.internal.pageSize.width - 14, doc.internal.pageSize.height - 8, { align: "right" });
+        }
+      }
+
+      doc.save(`Bilancio_Completo_FutsalFabbrico_${stagione}.pdf`);
+      setLastAction("📦 Pacchetto completo PDF esportato");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // === EXPORT: EXCEL COMPLETO ===
+  const exportExcel = () => {
+    setBusy(true);
+    try {
+      const wb = XLSX.utils.book_new();
+
+      // 1. Movimenti
+      const movRows = movimenti.map(m => ({
+        Tipo: m.tipo, Data: m.data, Mese: m.mese,
+        "Conto liquidità": (m.contoLiquidita && contiMap[m.contoLiquidita]?.nome.trim()) || "",
+        "Conto destinazione": m.contoLiquiditaDest ? contiMap[m.contoLiquiditaDest]?.nome.trim() : "",
+        "Conto P.d.C.": m.contoPdC ? `${m.contoPdC} ${contiMap[m.contoPdC]?.nome.trim() || ""}` : "",
+        Categoria: m.categoria, BU: m.bu, Importo: m.importo,
+        Descrizione: m.descrizione, Importato: m.importato ? "Sì" : "",
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(movRows), "Movimenti");
+
+      // 2. Libro Giornale
+      const lgRows = [];
+      dati.scritture.forEach(s => {
+        s.righe.forEach((r, ri) => {
+          lgRows.push({
+            Data: ri === 0 ? s.data : "",
+            Codice: r.codice, Conto: r.nome.trim(),
+            Descrizione: ri === 0 ? s.descrizione : "",
+            Dare: r.dare > 0 ? r.dare : "",
+            Avere: r.avere > 0 ? r.avere : "",
+          });
+        });
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(lgRows), "Libro Giornale");
+
+      // 3. Bilancio Verifica
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        dati.mastrini.filter(m => m.dare > 0 || m.avere > 0).map(x => ({
+          Codice: x.codice, Conto: x.nome.trim(), Categoria: x.categoria, Prospetto: x.prospetto,
+          Dare: x.dare, Avere: x.avere, Saldo: x.saldo,
+        }))
+      ), "Bilancio Verifica");
+
+      // 4. Rendiconto Finanziario - Entrate
+      const rfRows = (mappa) => {
+        return Object.entries(mappa).sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
+          const row = { Categoria: cat };
+          MESI.forEach(m => { row[m] = mesi[m] || 0; });
+          row["Totale"] = Object.values(mesi).reduce((s,v) => s+v, 0);
+          return row;
+        });
+      };
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfRows(dati.rfEntrate)), "RF Entrate");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfRows(dati.rfUscite)), "RF Uscite");
+
+      // 5. Cespiti
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        cespiti.map(c => ({
+          Conto: c.conto, Classe: c.classe, "N. beni": c.n_beni, "Anno acquisto": c.anno_inizio,
+          "Costo storico": c.costo_storico, "Aliquota": c.aliquota, "Quota esercizio": c.quota_esercizio,
+          "Fondo amm.to": c.fondo_ammortamento, "Valore netto": (c.costo_storico || 0) - (c.fondo_ammortamento || 0),
+        }))
+      ), "Cespiti");
+
+      // 6. Piano dei Conti
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        conti.sort((a,b)=>a.codice-b.codice).map(c => ({
+          Codice: c.codice, Nome: c.nome.trim(), Eccedenza: c.eccedenza, Prospetto: c.prospetto, Categoria: c.categoria
+        }))
+      ), "Piano dei Conti");
+
+      // 7. SP/CE riepilogo
+      const speceRows = [
+        { Sezione: "RICAVI", Voce: "Totale Ricavi", Importo: dati.ricavi },
+        { Sezione: "COSTI", Voce: "Totale Costi", Importo: dati.costi },
+        { Sezione: "RISULTATO", Voce: "Utile/Perdita", Importo: dati.utile },
+        { Sezione: "SP", Voce: "Totale Attivo", Importo: dati.attivo },
+        { Sezione: "SP", Voce: "Totale Passivo", Importo: dati.passivo },
+        { Sezione: "SP", Voce: "Attivo Netto", Importo: dati.attivo - dati.passivo },
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(speceRows), "Sintesi SP-CE");
+
+      XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagione}.xlsx`);
+      setLastAction("Excel completo esportato");
+    } catch(e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -2886,21 +3471,64 @@ function PageExport({ conti, movimenti, saldiIniziali, stagione }) {
         </div>
       </div>
 
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:14}}>
+      {/* PACCHETTO COMPLETO in evidenza */}
+      <div className="card" style={{marginBottom:20, border:"2px solid var(--accent)", background:"linear-gradient(135deg, var(--accent-soft) 0%, var(--panel) 100%)"}}>
+        <div style={{display:"flex", alignItems:"baseline", gap:10, marginBottom:6}}>
+          <h3 className="card-title" style={{margin:0, fontSize:18}}>📦 Pacchetto completo PDF</h3>
+          <span className="pill" style={{background:"var(--accent)", borderColor:"var(--accent)", color:"#fff", fontSize:10}}>CONSIGLIATO</span>
+        </div>
+        <p style={{fontSize:13, color:"var(--ink-2)", margin:"0 0 14px"}}>
+          Un unico PDF con frontespizio, indice, e tutti i prospetti contabili: Bilancio di Verifica, Stato Patrimoniale, Conto Economico, Rendiconto Finanziario, Cespiti, Elenco Movimenti.
+          <br/>
+          <strong>Ideale per la chiusura annuale e la presentazione al direttivo.</strong>
+        </p>
+        <button className="btn accent" onClick={exportPacchettoCompleto} disabled={busy}>{busy ? "Generando…" : "Scarica pacchetto completo"}</button>
+      </div>
+
+      <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"24px 0 12px"}}>Documenti singoli</h3>
+
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))", gap:14}}>
+        <div className="card">
+          <h3 className="card-title">⚖ Bilancio di Verifica</h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Tutti i conti con DARE, AVERE e saldo. Verifica della quadratura.
+          </p>
+          <button className="btn" onClick={exportBilancioPDF} disabled={busy}>PDF</button>
+        </div>
+        <div className="card">
+          <h3 className="card-title">📊 Conto Economico</h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Ricavi, Costi e Risultato d'esercizio della stagione.
+          </p>
+          <button className="btn" onClick={exportCEPDF} disabled={busy}>PDF</button>
+        </div>
+        <div className="card">
+          <h3 className="card-title">🏛 Stato Patrimoniale</h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Attività, Passività e Patrimonio Netto.
+          </p>
+          <button className="btn" onClick={exportSPPDF} disabled={busy}>PDF</button>
+        </div>
+        <div className="card">
+          <h3 className="card-title">💧 Rendiconto Finanziario</h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Entrate e uscite per categoria e mese (formato A4 orizzontale).
+          </p>
+          <button className="btn" onClick={exportRFPDF} disabled={busy}>PDF</button>
+        </div>
+        <div className="card">
+          <h3 className="card-title">▣ Libro Cespiti</h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Beni con costo, ammortamenti e valore netto contabile.
+          </p>
+          <button className="btn" onClick={exportCespitiPDF} disabled={busy}>PDF</button>
+        </div>
         <div className="card">
           <h3 className="card-title">📊 Excel completo</h3>
-          <p style={{fontSize:13, color:"var(--ink-2)", marginTop:0}}>
-            File <code>.xlsx</code> con 4 fogli: Movimenti, Libro Giornale, Bilancio di Verifica, Piano dei Conti.
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            File <code>.xlsx</code> con 7 fogli: tutti i dati editabili.
           </p>
-          <button className="btn accent" onClick={exportExcel} disabled={busy}>{busy ? "Esportando…" : "Scarica Excel"}</button>
-        </div>
-
-        <div className="card">
-          <h3 className="card-title">📄 Bilancio PDF</h3>
-          <p style={{fontSize:13, color:"var(--ink-2)", marginTop:0}}>
-            PDF formale del Bilancio di Verifica, formato A4 con intestazione Futsal Fabbrico ASD.
-          </p>
-          <button className="btn accent" onClick={exportPDF} disabled={busy}>{busy ? "Esportando…" : "Scarica PDF"}</button>
+          <button className="btn" onClick={exportExcel} disabled={busy}>XLSX</button>
         </div>
       </div>
 
@@ -3864,7 +4492,7 @@ function App() {
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} />}
               {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
-              {page === "export" && <PageExport conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} />}
+              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
             </>
