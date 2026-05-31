@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.13.1";
+const APP_VERSION = "3.13.2";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2918,32 +2918,55 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
     return [...set].sort();
   }, [contiMap]);
 
-  // Matrice contoPdC × mese
+  // Matrice contoPdC × mese — calcolo saldo NETTO contabile (variazione partita doppia)
+  // Per ogni movimento determino se va in DARE o AVERE del conto P.d.C.
+  // Entrata su PdC: DARE liquidità / AVERE PdC → conto va in AVERE
+  // Uscita su PdC:  DARE PdC / AVERE liquidità → conto va in DARE
+  // Il segno "naturale" del conto determina come visualizzo:
+  //  - Conti DARE (costi, immobilizzazioni, crediti): saldo positivo = DARE - AVERE
+  //  - Conti AVERE (ricavi, debiti, PN): saldo positivo = AVERE - DARE
   const tabella = useMemo(() => {
-    const matrice = {}; // {contoPdC: {mese: importo}}
+    const matrice = {}; // {contoPdC: {mese: variazione netta}}
     const dettagli = {}; // {contoPdC: {mese: [movimenti]}}
 
     movimenti.forEach(m => {
       if (!m.contoPdC) return;
-      const segno = (m.tipo === "entrata") ? "entrata" : (m.tipo === "uscita") ? "uscita" : null;
-      if (!segno) return;
-      if (vista !== "tutti" && vista !== segno + "s" && vista !== segno) {
-        // vista="uscite" → mostra solo uscite ecc.
-        if (vista === "uscite" && segno !== "uscita") return;
-        if (vista === "entrate" && segno !== "entrata") return;
-      }
+      if (m.tipo !== "entrata" && m.tipo !== "uscita") return;
+
+      // Filtro per vista
+      const segno = m.tipo;
+      if (vista === "uscite" && segno !== "uscita") return;
+      if (vista === "entrate" && segno !== "entrata") return;
+
       const cod = m.contoPdC;
       const mese = m.mese || "?";
+      const conto = contiMap[cod];
       if (!matrice[cod]) matrice[cod] = {};
       if (!dettagli[cod]) dettagli[cod] = {};
       if (!dettagli[cod][mese]) dettagli[cod][mese] = [];
-      matrice[cod][mese] = (matrice[cod][mese] || 0) + m.importo;
+
+      // Calcolo la variazione "in segno naturale del conto"
+      // Conti eccedenza DARE: entrata in AVERE = negativo, uscita in DARE = positivo
+      // Conti eccedenza AVERE: entrata in AVERE = positivo, uscita in DARE = negativo
+      const eccedenza = (conto?.eccedenza || "DARE").toUpperCase();
+      const isAvereNaturale = eccedenza.includes("AVERE") && !eccedenza.includes("DARE/AVERE");
+
+      let variazione;
+      if (m.tipo === "entrata") {
+        // entrata: il conto va in AVERE
+        variazione = isAvereNaturale ? m.importo : -m.importo;
+      } else {
+        // uscita: il conto va in DARE
+        variazione = isAvereNaturale ? -m.importo : m.importo;
+      }
+
+      matrice[cod][mese] = (matrice[cod][mese] || 0) + variazione;
       dettagli[cod][mese].push(m);
     });
     return { matrice, dettagli };
-  }, [movimenti, vista]);
+  }, [movimenti, vista, contiMap]);
 
-  // Filtra per categoria
+  // Filtra per categoria (e nasconde conti con saldo netto zero)
   const contiFiltrati = useMemo(() => {
     return Object.entries(tabella.matrice)
       .filter(([cod]) => {
@@ -2956,7 +2979,8 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
         categoria: contiMap[cod]?.categoria || "",
         mesi,
         totale: Object.values(mesi).reduce((s,v) => s+v, 0),
-      }));
+      }))
+      .filter(c => Math.abs(c.totale) > 0.01); // nascondo conti con saldo netto zero
   }, [tabella, filterCategoria, contiMap]);
 
   const totGenerale = contiFiltrati.reduce((s,c) => s + c.totale, 0);
@@ -2964,9 +2988,9 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
   // Sort
   const contiOrdinati = useMemo(() => {
     const arr = [...contiFiltrati];
-    if (sortBy === "totale") arr.sort((a,b) => b.totale - a.totale);
+    if (sortBy === "totale") arr.sort((a,b) => Math.abs(b.totale) - Math.abs(a.totale));
     else if (sortBy === "nome") arr.sort((a,b) => a.nome.localeCompare(b.nome));
-    else if (sortBy === "impatto") arr.sort((a,b) => b.totale - a.totale);
+    else if (sortBy === "impatto") arr.sort((a,b) => Math.abs(b.totale) - Math.abs(a.totale));
     else arr.sort((a,b) => a.codice - b.codice);
     return arr;
   }, [contiFiltrati, sortBy]);
@@ -3044,8 +3068,11 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
           </thead>
           <tbody>
             {contiOrdinati.map(c => {
-              const pct = totGenerale > 0 ? (c.totale / totGenerale * 100) : 0;
-              const classCol = vista === "entrate" ? "pos" : vista === "uscite" ? "neg" : "";
+              const pct = totGenerale !== 0 ? Math.abs(c.totale / totGenerale * 100) : 0;
+              // Determina colore in base alla natura del conto
+              const ecc = (contiMap[c.codice]?.eccedenza || "DARE").toUpperCase();
+              const isAvereNat = ecc.includes("AVERE") && !ecc.includes("DARE/AVERE");
+              const naturaCol = isAvereNat ? "pos" : "neg"; // ricavi/debiti = verde, costi/imm = rosso
               return (
                 <tr key={c.codice}>
                   <td style={{position:"sticky", left:0, background:"var(--panel)"}}>
@@ -3055,15 +3082,23 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
                     </div>
                     {c.categoria && <div style={{fontSize:10.5, color:"var(--ink-3)", marginTop:1}}>{c.categoria}</div>}
                   </td>
-                  {MESI.map(m => (
-                    <td key={m} className={"num " + classCol}
-                        style={c.mesi[m] ? {cursor:"pointer", textDecoration:"underline dotted"} : {}}
-                        onClick={() => c.mesi[m] && apriDrill(c, m)}
-                        title={c.mesi[m] ? "Click per dettagli" : ""}>
-                      {c.mesi[m] ? fmt(c.mesi[m]) : ""}
-                    </td>
-                  ))}
-                  <td className="num" style={{fontWeight:700}}>{fmt(c.totale)}</td>
+                  {MESI.map(m => {
+                    const v = c.mesi[m];
+                    if (!v) return <td key={m} className="num"></td>;
+                    // Mostro segno se valore negativo (= movimento contro natura del conto)
+                    const cellClass = v < 0 ? "neg" : naturaCol;
+                    return (
+                      <td key={m} className={"num " + cellClass}
+                          style={{cursor:"pointer", textDecoration:"underline dotted"}}
+                          onClick={() => apriDrill(c, m)}
+                          title="Click per dettagli">
+                        {v < 0 ? "−" + fmt(Math.abs(v)) : fmt(v)}
+                      </td>
+                    );
+                  })}
+                  <td className={"num " + (c.totale < 0 ? "neg" : naturaCol)} style={{fontWeight:700}}>
+                    {c.totale < 0 ? "−" + fmt(Math.abs(c.totale)) : fmt(c.totale)}
+                  </td>
                   <td className="num" style={{fontWeight:600, color: pct > 20 ? "var(--accent-ink)" : "var(--ink-2)"}}>
                     {pct.toFixed(1)}%
                   </td>
@@ -3081,7 +3116,7 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
       </div>
 
       <div style={{marginTop:18, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12, color:"var(--ink-2)"}}>
-        <strong>💡 Suggerimento.</strong> Filtra per categoria (es. "COSTI") per concentrarti su un sottoinsieme. La percentuale è calcolata sul totale visibile (rispetta i filtri). Click su una cella per vedere le singole transazioni che la compongono.
+        <strong>💡 Come leggere.</strong> I valori mostrano il <strong>saldo contabile netto</strong> del conto (DARE − AVERE per costi/immobilizzazioni/crediti; AVERE − DARE per ricavi/debiti/PN). Un saldo zero significa che il conto si è chiuso (es. debito aperto e pagato nello stesso periodo). Filtra per categoria per concentrarti su un sottoinsieme. La percentuale è calcolata sul totale visibile. Click su una cella per vedere le singole transazioni che la compongono.
       </div>
 
       {drillDown && (
