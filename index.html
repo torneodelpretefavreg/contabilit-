@@ -16,6 +16,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
 <style>
   :root {
@@ -794,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.6.0";
+const APP_VERSION = "3.7.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2738,6 +2739,640 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
 }
 
 // ============================================================
+// PAGINA: CONTROLLER (contabilità analitica)
+// ============================================================
+function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) {
+  const [tab, setTab] = useState("bu");
+  const [budget, setBudget] = useState({});
+  const [budgetEditing, setBudgetEditing] = useState(null);
+
+  const contiMap = useMemo(() => {
+    const m = {};
+    conti.forEach(c => { m[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome }; });
+    return m;
+  }, [conti]);
+
+  // Carica budget da Firebase
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const ref = db.ref(`stagioni/${stagione}/budget`);
+    const cb = ref.on("value", snap => setBudget(snap.val() || {}));
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  // ============== ANALISI PER BU ==============
+  const analisiBU = useMemo(() => {
+    const bu = {};
+    BUSINESS_UNITS.forEach(b => { bu[b] = { ricavi: 0, costi: 0, n_mov: 0, ricaviCat: {}, costiCat: {} }; });
+    movimenti.forEach(m => {
+      const b = m.bu || "GENERAL";
+      if (!bu[b]) bu[b] = { ricavi: 0, costi: 0, n_mov: 0, ricaviCat: {}, costiCat: {} };
+      bu[b].n_mov++;
+      const cat = m.categoria || "(senza categoria)";
+      if (m.tipo === "entrata") {
+        bu[b].ricavi += m.importo;
+        bu[b].ricaviCat[cat] = (bu[b].ricaviCat[cat] || 0) + m.importo;
+      } else if (m.tipo === "uscita") {
+        bu[b].costi += m.importo;
+        bu[b].costiCat[cat] = (bu[b].costiCat[cat] || 0) + m.importo;
+      }
+    });
+    Object.values(bu).forEach(b => {
+      b.margine = b.ricavi - b.costi;
+      b.margineP = b.ricavi > 0 ? (b.margine / b.ricavi * 100) : 0;
+    });
+    return bu;
+  }, [movimenti]);
+
+  const totaleRicavi = Object.values(analisiBU).reduce((s,b) => s + b.ricavi, 0);
+  const totaleCosti = Object.values(analisiBU).reduce((s,b) => s + b.costi, 0);
+
+  // Chart BU
+  const buChartRef = useRef(null);
+  useEffect(() => {
+    if (tab !== "bu" || !buChartRef.current) return;
+    const ctx = buChartRef.current.getContext("2d");
+    const chart = new window.Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: BUSINESS_UNITS,
+        datasets: [
+          { label: "Ricavi", data: BUSINESS_UNITS.map(b => analisiBU[b].ricavi), backgroundColor: "#2d5e3e", borderRadius: 4 },
+          { label: "Costi", data: BUSINESS_UNITS.map(b => analisiBU[b].costi), backgroundColor: "#b54343", borderRadius: 4 },
+          { label: "Margine", data: BUSINESS_UNITS.map(b => analisiBU[b].margine), backgroundColor: "#b8954b", borderRadius: 4 },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "bottom", labels: { font: { size: 11 } } } },
+        scales: {
+          y: { beginAtZero: true, ticks: { font: { size: 10 }, callback: v => "€ " + v.toLocaleString("it-IT") } },
+          x: { ticks: { font: { size: 11 } } }
+        }
+      }
+    });
+    return () => chart.destroy();
+  }, [tab, analisiBU]);
+
+  // ============== BUDGET VS ACTUAL ==============
+  const categorieUsate = useMemo(() => {
+    const set = new Set();
+    movimenti.forEach(m => { if (m.categoria) set.add(m.categoria); });
+    Object.keys(budget).forEach(c => set.add(c));
+    return [...set].sort();
+  }, [movimenti, budget]);
+
+  const actualPerCategoria = useMemo(() => {
+    const r = {};
+    movimenti.forEach(m => {
+      const cat = m.categoria || "(senza categoria)";
+      if (!r[cat]) r[cat] = { ricavi: 0, costi: 0 };
+      if (m.tipo === "entrata") r[cat].ricavi += m.importo;
+      else if (m.tipo === "uscita") r[cat].costi += m.importo;
+    });
+    return r;
+  }, [movimenti]);
+
+  // % avanzamento stagione (su 12 mesi sett-ago)
+  const avanzamentoStagione = useMemo(() => {
+    const ora = new Date();
+    const annoStag = Number(stagione.split("-")[0]);
+    const inizio = new Date(annoStag, 8, 1); // 1 settembre
+    const fine = new Date(annoStag + 1, 7, 31); // 31 agosto
+    const totMs = fine - inizio;
+    const trascorsoMs = Math.max(0, Math.min(totMs, ora - inizio));
+    return Math.round((trascorsoMs / totMs) * 100);
+  }, [stagione]);
+
+  const saveBudget = async (categoria, dati) => {
+    try {
+      await db.ref(`stagioni/${stagione}/budget/${categoria.replace(/[.#$/\[\]]/g, '_')}`).set(dati);
+      onToast("Budget salvato");
+      setBudgetEditing(null);
+    } catch(e) { alert("Errore: " + e.message); }
+  };
+
+  const removeBudget = async (categoria) => {
+    if (!confirm(`Rimuovere il budget per "${categoria}"?`)) return;
+    await db.ref(`stagioni/${stagione}/budget/${categoria.replace(/[.#$/\[\]]/g, '_')}`).remove();
+    onToast("Budget rimosso");
+  };
+
+  // ============== TREND TEMPORALE ==============
+  const trendMensile = useMemo(() => {
+    const m = {};
+    MESI.forEach(me => { m[me] = { ricavi: 0, costi: 0 }; });
+    movimenti.forEach(mov => {
+      const me = mov.mese;
+      if (!m[me]) return;
+      if (mov.tipo === "entrata") m[me].ricavi += mov.importo;
+      else if (mov.tipo === "uscita") m[me].costi += mov.importo;
+    });
+    // cumulato
+    let cumR = 0, cumC = 0;
+    const data = MESI.map(me => {
+      cumR += m[me].ricavi;
+      cumC += m[me].costi;
+      return {
+        mese: me,
+        ricavi: m[me].ricavi,
+        costi: m[me].costi,
+        margine: m[me].ricavi - m[me].costi,
+        cumRicavi: cumR,
+        cumCosti: cumC,
+        cumMargine: cumR - cumC,
+      };
+    });
+    return data;
+  }, [movimenti]);
+
+  const trendChartRef = useRef(null);
+  useEffect(() => {
+    if (tab !== "trend" || !trendChartRef.current) return;
+    const ctx = trendChartRef.current.getContext("2d");
+    const chart = new window.Chart(ctx, {
+      type: "line",
+      data: {
+        labels: MESI.map(m => m.slice(0,3)),
+        datasets: [
+          { label: "Ricavi cumulati", data: trendMensile.map(t => t.cumRicavi), borderColor: "#2d5e3e", backgroundColor: "rgba(45,94,62,0.1)", fill: true, tension: 0.3, borderWidth: 2 },
+          { label: "Costi cumulati", data: trendMensile.map(t => t.cumCosti), borderColor: "#b54343", backgroundColor: "rgba(181,67,67,0.1)", fill: true, tension: 0.3, borderWidth: 2 },
+          { label: "Margine cumulato", data: trendMensile.map(t => t.cumMargine), borderColor: "#b8954b", backgroundColor: "transparent", borderWidth: 2.5, borderDash: [4,4], tension: 0.3 },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "bottom", labels: { font: { size: 11 } } } },
+        scales: {
+          y: { ticks: { font: { size: 10 }, callback: v => "€ " + v.toLocaleString("it-IT") } },
+          x: { ticks: { font: { size: 10 } } }
+        }
+      }
+    });
+    return () => chart.destroy();
+  }, [tab, trendMensile]);
+
+  // Variazione mese-su-mese
+  const variazioni = useMemo(() => {
+    return trendMensile.map((m, i) => {
+      if (i === 0) return { ...m, varRicavi: null, varCosti: null };
+      const prev = trendMensile[i-1];
+      return {
+        ...m,
+        varRicavi: prev.ricavi > 0 ? ((m.ricavi - prev.ricavi) / prev.ricavi * 100) : null,
+        varCosti: prev.costi > 0 ? ((m.costi - prev.costi) / prev.costi * 100) : null,
+      };
+    });
+  }, [trendMensile]);
+
+  // Proiezione fine stagione
+  const proiezione = useMemo(() => {
+    const mesiAttivi = trendMensile.filter(m => m.ricavi > 0 || m.costi > 0);
+    if (mesiAttivi.length === 0) return { ricavi: 0, costi: 0, utile: 0, valido: false };
+    const mediaR = mesiAttivi.reduce((s,m) => s + m.ricavi, 0) / mesiAttivi.length;
+    const mediaC = mesiAttivi.reduce((s,m) => s + m.costi, 0) / mesiAttivi.length;
+    const mesiRestanti = 12 - mesiAttivi.length;
+    const cumR = trendMensile.reduce((s,m) => s + m.ricavi, 0);
+    const cumC = trendMensile.reduce((s,m) => s + m.costi, 0);
+    return {
+      ricavi: cumR + mediaR * mesiRestanti,
+      costi: cumC + mediaC * mesiRestanti,
+      utile: (cumR + mediaR * mesiRestanti) - (cumC + mediaC * mesiRestanti),
+      mesiAttivi: mesiAttivi.length,
+      mesiRestanti,
+      valido: true,
+    };
+  }, [trendMensile]);
+
+  // ============== CASH FLOW FORECAST ==============
+  const cashFlow = useMemo(() => {
+    // Saldo attuale
+    const saldoAttuale = Object.values(CONTI_LIQUIDITA).reduce((s,c) => {
+      let saldo = saldiIniziali[c.codice] || 0;
+      movimenti.forEach(m => {
+        if (m.tipo === "entrata" && m.contoLiquidita === c.codice) saldo += m.importo;
+        else if (m.tipo === "uscita" && m.contoLiquidita === c.codice) saldo -= m.importo;
+        else if (m.tipo === "giroconto") {
+          if (m.contoLiquidita === c.codice) saldo -= m.importo;
+          if (m.contoLiquiditaDest === c.codice) saldo += m.importo;
+        }
+      });
+      return s + saldo;
+    }, 0);
+
+    // Burn rate: media uscite ultimi 3 mesi non vuoti
+    const mesiAttivi = trendMensile.filter(m => m.costi > 0);
+    const ultimi3 = mesiAttivi.slice(-3);
+    const burnRate = ultimi3.length > 0 ? ultimi3.reduce((s,m) => s + m.costi, 0) / ultimi3.length : 0;
+    const inflowRate = ultimi3.length > 0 ? ultimi3.reduce((s,m) => s + m.ricavi, 0) / ultimi3.length : 0;
+
+    // Forecast prossimi 3 mesi
+    const oggi = new Date();
+    const meseCorrente = oggi.getMonth();
+    const forecast = [];
+    let saldoProiez = saldoAttuale;
+    for (let i = 1; i <= 3; i++) {
+      const d = new Date(oggi.getFullYear(), meseCorrente + i, 1);
+      const idx = (d.getMonth() + 4) % 12;
+      saldoProiez += inflowRate - burnRate;
+      forecast.push({
+        mese: MESI[idx],
+        anno: d.getFullYear(),
+        ricaviStim: inflowRate,
+        costiStim: burnRate,
+        saldoStim: saldoProiez,
+      });
+    }
+
+    // Mesi critici (sotto 1000€)
+    const critici = forecast.filter(f => f.saldoStim < 1000);
+
+    // Punto pareggio (mese in cui ricavi cumulati ≥ costi cumulati)
+    let pareggio = null;
+    for (let m of trendMensile) {
+      if (m.cumRicavi >= m.cumCosti && m.cumRicavi > 0) {
+        pareggio = m.mese;
+        break;
+      }
+    }
+
+    return { saldoAttuale, burnRate, inflowRate, forecast, critici, pareggio };
+  }, [movimenti, saldiIniziali, trendMensile]);
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Controller</h2>
+          <div className="sub">Analitica · Budget · Trend · Cash flow</div>
+        </div>
+      </div>
+
+      <div className="tipo-switch" style={{maxWidth:680, marginBottom:20, gridTemplateColumns:"repeat(4, 1fr)"}}>
+        <button type="button" className={tab === "bu" ? "active entrata" : ""} onClick={() => setTab("bu")}>📊 Centri costo</button>
+        <button type="button" className={tab === "budget" ? "active entrata" : ""} onClick={() => setTab("budget")}>🎯 Budget</button>
+        <button type="button" className={tab === "trend" ? "active entrata" : ""} onClick={() => setTab("trend")}>📈 Trend</button>
+        <button type="button" className={tab === "cash" ? "active entrata" : ""} onClick={() => setTab("cash")}>💸 Cash Flow</button>
+      </div>
+
+      {/* ===== TAB 1: BU ===== */}
+      {tab === "bu" && (
+        <div>
+          <div className="kpi-grid">
+            {BUSINESS_UNITS.map(b => {
+              const d = analisiBU[b];
+              const peso = totaleRicavi > 0 ? (d.ricavi / totaleRicavi * 100) : 0;
+              return (
+                <div key={b} className="kpi">
+                  <div className="label">{b}</div>
+                  <div className="value" style={{fontSize:22}}>{fmtEuro(d.margine)}</div>
+                  <div className="hint">
+                    R {fmt(d.ricavi)} · C {fmt(d.costi)}<br/>
+                    Margine {d.margineP.toFixed(1)}% · Peso {peso.toFixed(1)}%
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="card" style={{marginTop:18, padding:14}}>
+            <h3 className="card-title">Confronto Ricavi/Costi/Margine per BU</h3>
+            <div style={{height:260, position:"relative"}}>
+              <canvas ref={buChartRef}></canvas>
+            </div>
+          </div>
+
+          <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"24px 0 12px"}}>Ripartizione per categoria</h3>
+          {BUSINESS_UNITS.map(b => {
+            const d = analisiBU[b];
+            if (d.ricavi === 0 && d.costi === 0) return null;
+            return (
+              <div key={b} className="card" style={{marginBottom:14}}>
+                <h3 className="card-title">{b} <span style={{color:"var(--ink-3)", fontSize:13, fontWeight:400}}>· margine {fmtEuro(d.margine)} ({d.margineP.toFixed(1)}%)</span></h3>
+                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
+                  <div>
+                    <div style={{fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--ink-3)", fontWeight:600, marginBottom:6}}>Ricavi · {fmtEuro(d.ricavi)}</div>
+                    <table className="tbl" style={{fontSize:12}}>
+                      <tbody>
+                        {Object.entries(d.ricaviCat).sort(([,a],[,b])=>b-a).map(([cat,v]) => (
+                          <tr key={cat}><td>{cat}</td><td className="num pos">{fmt(v)}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div>
+                    <div style={{fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--ink-3)", fontWeight:600, marginBottom:6}}>Costi · {fmtEuro(d.costi)}</div>
+                    <table className="tbl" style={{fontSize:12}}>
+                      <tbody>
+                        {Object.entries(d.costiCat).sort(([,a],[,b])=>b-a).map(([cat,v]) => (
+                          <tr key={cat}><td>{cat}</td><td className="num neg">{fmt(v)}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ===== TAB 2: BUDGET ===== */}
+      {tab === "budget" && (
+        <div>
+          <div className="kpi-grid">
+            <div className="kpi accent">
+              <div className="label">Avanzamento stagione</div>
+              <div className="value">{avanzamentoStagione}%</div>
+              <div className="hint">su 12 mesi (set-ago)</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Categorie a budget</div>
+              <div className="value">{Object.keys(budget).length}</div>
+              <div className="hint">di {categorieUsate.length} usate</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Budget Ricavi tot.</div>
+              <div className="value" style={{color:"var(--accent)"}}>{fmtEuro(Object.values(budget).reduce((s,b) => s + (b.ricavi || 0), 0))}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Budget Costi tot.</div>
+              <div className="value" style={{color:"var(--danger)"}}>{fmtEuro(Object.values(budget).reduce((s,b) => s + (b.costi || 0), 0))}</div>
+            </div>
+          </div>
+
+          <div style={{marginTop:18, display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10}}>
+            <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:0}}>Budget vs Actual per categoria</h3>
+            <button className="btn accent sm" onClick={() => setBudgetEditing({ categoria: "", ricavi: "", costi: "", nuovo: true })}>+ Aggiungi voce budget</button>
+          </div>
+
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Categoria</th>
+                  <th>Tipo</th>
+                  <th className="num">Budget</th>
+                  <th className="num">Actual</th>
+                  <th className="num">Δ assoluto</th>
+                  <th className="num">Δ %</th>
+                  <th style={{width:60}}>Stato</th>
+                  <th style={{width:90}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {categorieUsate.map(cat => {
+                  const catKey = cat.replace(/[.#$/\[\]]/g, '_');
+                  const b = budget[catKey] || {};
+                  const a = actualPerCategoria[cat] || { ricavi: 0, costi: 0 };
+                  const isRicavo = (b.ricavi || 0) > 0 || (a.ricavi > 0 && !(b.costi > 0));
+                  const budVal = isRicavo ? (b.ricavi || 0) : (b.costi || 0);
+                  const actVal = isRicavo ? a.ricavi : a.costi;
+                  if (budVal === 0 && actVal === 0) return null;
+                  const delta = actVal - budVal;
+                  const deltaP = budVal > 0 ? (delta / budVal * 100) : null;
+                  // semaforo: per ricavi voglio actual >= budget*(% avanzamento), per costi voglio actual <= budget*(% avanzamento)
+                  const target = budVal * (avanzamentoStagione / 100);
+                  let stato = "🟢";
+                  if (budVal > 0) {
+                    if (isRicavo) {
+                      if (actVal < target * 0.7) stato = "🔴";
+                      else if (actVal < target * 0.95) stato = "🟡";
+                    } else {
+                      if (actVal > budVal) stato = "🔴";
+                      else if (actVal > budVal * 0.9) stato = "🟡";
+                    }
+                  } else {
+                    stato = "—"; // senza budget non c'è stato
+                  }
+                  return (
+                    <tr key={cat}>
+                      <td style={{fontWeight:500}}>{cat}</td>
+                      <td><span className={"pill " + (isRicavo ? "entrata" : "uscita")}>{isRicavo ? "Ricavo" : "Costo"}</span></td>
+                      <td className="num">{budVal > 0 ? fmt(budVal) : <span style={{color:"var(--ink-3)"}}>—</span>}</td>
+                      <td className="num">{fmt(actVal)}</td>
+                      <td className={"num " + (delta > 0 ? (isRicavo ? "pos" : "neg") : (isRicavo ? "neg" : "pos"))}>
+                        {budVal > 0 ? (delta > 0 ? "+" : "") + fmt(delta) : "—"}
+                      </td>
+                      <td className="num">{deltaP !== null ? (deltaP > 0 ? "+" : "") + deltaP.toFixed(1) + "%" : "—"}</td>
+                      <td style={{fontSize:18, textAlign:"center"}}>{stato}</td>
+                      <td>
+                        <div style={{display:"flex", gap:4}}>
+                          <button className="btn ghost sm" onClick={() => setBudgetEditing({ categoria: cat, ricavi: b.ricavi || "", costi: b.costi || "" })}>✎</button>
+                          {budVal > 0 && <button className="btn danger sm" onClick={() => removeBudget(cat)}>🗑</button>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{marginTop:14, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12, color:"var(--ink-2)"}}>
+            <strong>💡 Come leggere lo stato.</strong> Il semaforo confronta l'actual con il <em>target proporzionato all'avanzamento stagione</em> ({avanzamentoStagione}%). Per i <strong>ricavi</strong>: 🟢 in linea o sopra · 🟡 leggermente sotto · 🔴 sotto del 30%+. Per i <strong>costi</strong>: 🟢 entro budget · 🟡 vicino al limite · 🔴 sforato.
+          </div>
+
+          {budgetEditing && (
+            <div className="modal-bg" onClick={() => setBudgetEditing(null)}>
+              <div className="modal" onClick={e => e.stopPropagation()}>
+                <div className="modal-head">
+                  <h3>{budgetEditing.nuovo ? "Nuovo budget" : "Modifica budget"}</h3>
+                  <button className="btn ghost sm" onClick={() => setBudgetEditing(null)}>✕</button>
+                </div>
+                <div className="modal-body">
+                  <form className="form-grid" onSubmit={e => {
+                    e.preventDefault();
+                    if (!budgetEditing.categoria.trim()) return alert("Categoria obbligatoria");
+                    saveBudget(budgetEditing.categoria.trim(), {
+                      categoria: budgetEditing.categoria.trim(),
+                      ricavi: Number(budgetEditing.ricavi) || 0,
+                      costi: Number(budgetEditing.costi) || 0,
+                    });
+                  }}>
+                    <div className="form-row">
+                      <label>Categoria</label>
+                      {budgetEditing.nuovo ? (
+                        <input type="text" value={budgetEditing.categoria} onChange={e => setBudgetEditing({...budgetEditing, categoria: e.target.value})} placeholder="es. SPONSOR FUTSAL" list="cat-suggestions" required/>
+                      ) : (
+                        <div style={{fontWeight:600}}>{budgetEditing.categoria}</div>
+                      )}
+                      <datalist id="cat-suggestions">
+                        {categorieUsate.map(c => <option key={c} value={c}/>)}
+                      </datalist>
+                    </div>
+                    <div className="form-row">
+                      <label>Budget Ricavi €</label>
+                      <input type="number" inputMode="decimal" step="0.01" min="0" value={budgetEditing.ricavi} onChange={e => setBudgetEditing({...budgetEditing, ricavi: e.target.value})} placeholder="0"/>
+                    </div>
+                    <div className="form-row">
+                      <label>Budget Costi €</label>
+                      <input type="number" inputMode="decimal" step="0.01" min="0" value={budgetEditing.costi} onChange={e => setBudgetEditing({...budgetEditing, costi: e.target.value})} placeholder="0"/>
+                    </div>
+                    <div style={{fontSize:11.5, color:"var(--ink-3)", padding:"8px 0"}}>
+                      Lascia a 0 il campo che non si applica (es. se è una categoria di costo, lascia Ricavi=0).
+                    </div>
+                    <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+                      <button type="button" className="btn ghost" onClick={() => setBudgetEditing(null)}>Annulla</button>
+                      <button type="submit" className="btn accent">Salva</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== TAB 3: TREND ===== */}
+      {tab === "trend" && (
+        <div>
+          <div className="kpi-grid">
+            <div className="kpi accent">
+              <div className="label">Proiezione fine stagione</div>
+              <div className="value">{proiezione.valido ? fmtEuro(proiezione.utile) : "—"}</div>
+              <div className="hint">{proiezione.valido ? `utile/perdita stimato (media ${proiezione.mesiAttivi} mesi)` : "dati insufficienti"}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Ricavi proiez.</div>
+              <div className="value" style={{color:"var(--accent)", fontSize:22}}>{proiezione.valido ? fmtEuro(proiezione.ricavi) : "—"}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Costi proiez.</div>
+              <div className="value" style={{color:"var(--danger)", fontSize:22}}>{proiezione.valido ? fmtEuro(proiezione.costi) : "—"}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Mesi rimanenti</div>
+              <div className="value">{proiezione.valido ? proiezione.mesiRestanti : "—"}</div>
+              <div className="hint">su 12</div>
+            </div>
+          </div>
+
+          <div className="card" style={{marginTop:18, padding:14}}>
+            <h3 className="card-title">Trend cumulato stagione</h3>
+            <div style={{height:280, position:"relative"}}>
+              <canvas ref={trendChartRef}></canvas>
+            </div>
+          </div>
+
+          <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"24px 0 12px"}}>Dettaglio mensile</h3>
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Mese</th>
+                  <th className="num">Ricavi</th>
+                  <th className="num">Δ %</th>
+                  <th className="num">Costi</th>
+                  <th className="num">Δ %</th>
+                  <th className="num">Margine</th>
+                  <th className="num">Cum. Ricavi</th>
+                  <th className="num">Cum. Costi</th>
+                  <th className="num">Cum. Margine</th>
+                </tr>
+              </thead>
+              <tbody>
+                {variazioni.map(m => (
+                  <tr key={m.mese}>
+                    <td style={{textTransform:"capitalize", fontWeight:500}}>{m.mese}</td>
+                    <td className="num pos">{m.ricavi > 0 ? fmt(m.ricavi) : "—"}</td>
+                    <td className={"num " + (m.varRicavi > 0 ? "pos" : m.varRicavi < 0 ? "neg" : "")}>
+                      {m.varRicavi !== null ? (m.varRicavi > 0 ? "+" : "") + m.varRicavi.toFixed(0) + "%" : "—"}
+                    </td>
+                    <td className="num neg">{m.costi > 0 ? fmt(m.costi) : "—"}</td>
+                    <td className={"num " + (m.varCosti > 0 ? "neg" : m.varCosti < 0 ? "pos" : "")}>
+                      {m.varCosti !== null ? (m.varCosti > 0 ? "+" : "") + m.varCosti.toFixed(0) + "%" : "—"}
+                    </td>
+                    <td className={"num " + (m.margine < 0 ? "neg" : m.margine > 0 ? "pos" : "")} style={{fontWeight:600}}>
+                      {m.margine !== 0 ? fmt(m.margine) : "—"}
+                    </td>
+                    <td className="num">{fmt(m.cumRicavi)}</td>
+                    <td className="num">{fmt(m.cumCosti)}</td>
+                    <td className={"num " + (m.cumMargine < 0 ? "neg" : "pos")} style={{fontWeight:600}}>{fmt(m.cumMargine)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ===== TAB 4: CASH FLOW ===== */}
+      {tab === "cash" && (
+        <div>
+          <div className="kpi-grid">
+            <div className="kpi accent">
+              <div className="label">Liquidità attuale</div>
+              <div className="value">{fmtEuro(cashFlow.saldoAttuale)}</div>
+              <div className="hint">Totale tutti i conti</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Burn rate mensile</div>
+              <div className="value" style={{color:"var(--danger)"}}>{fmtEuro(cashFlow.burnRate)}</div>
+              <div className="hint">Media uscite ultimi 3 mesi</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Inflow rate mensile</div>
+              <div className="value" style={{color:"var(--accent)"}}>{fmtEuro(cashFlow.inflowRate)}</div>
+              <div className="hint">Media entrate ultimi 3 mesi</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Punto di pareggio</div>
+              <div className="value" style={{fontSize:20, textTransform:"capitalize"}}>{cashFlow.pareggio || "non raggiunto"}</div>
+              <div className="hint">mese in cui ricavi ≥ costi cum.</div>
+            </div>
+          </div>
+
+          <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"24px 0 12px"}}>Forecast prossimi 3 mesi</h3>
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Mese</th>
+                  <th className="num">Ricavi stimati</th>
+                  <th className="num">Costi stimati</th>
+                  <th className="num">Variazione netta</th>
+                  <th className="num">Saldo previsto</th>
+                  <th style={{width:80}}>Rischio</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cashFlow.forecast.map((f, i) => {
+                  const rischio = f.saldoStim < 500 ? "🔴 Alto" : f.saldoStim < 2000 ? "🟡 Medio" : "🟢 Basso";
+                  return (
+                    <tr key={i}>
+                      <td style={{textTransform:"capitalize", fontWeight:500}}>{f.mese} {f.anno}</td>
+                      <td className="num pos">{fmt(f.ricaviStim)}</td>
+                      <td className="num neg">{fmt(f.costiStim)}</td>
+                      <td className={"num " + (f.ricaviStim - f.costiStim < 0 ? "neg" : "pos")} style={{fontWeight:500}}>
+                        {(f.ricaviStim - f.costiStim >= 0 ? "+" : "") + fmt(f.ricaviStim - f.costiStim)}
+                      </td>
+                      <td className={"num " + (f.saldoStim < 0 ? "neg" : "")} style={{fontWeight:600}}>{fmt(f.saldoStim)}</td>
+                      <td style={{fontSize:11}}>{rischio}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {cashFlow.critici.length > 0 && (
+            <div style={{marginTop:18, padding:"14px 18px", background:"#fbecec", border:"1px solid #f1d6d6", borderRadius:8, fontSize:13, color:"var(--danger)"}}>
+              <strong>⚠️ Attenzione liquidità.</strong> In {cashFlow.critici.length} {cashFlow.critici.length === 1 ? "mese" : "mesi"} dei prossimi 3 la liquidità prevista scenderebbe sotto i 1.000 €. Pianifica entrate aggiuntive o riduci spese discrezionali.
+            </div>
+          )}
+
+          <div style={{marginTop:18, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12, color:"var(--ink-2)"}}>
+            <strong>💡 Come funziona il forecast.</strong> Si basa sulla media dei <strong>ricavi/costi degli ultimi 3 mesi non vuoti</strong>. Non considera la stagionalità (es. iscrizioni concentrate in autunno), quindi è più affidabile a metà stagione che a inizio/fine. Per una previsione più precisa, registra costantemente i movimenti e usa gli snapshot mensili.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // PAGINA: EXPORT
 // ============================================================
 function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
@@ -4469,6 +5104,7 @@ function App() {
           <button className={"navlink " + (page==="bilancio"?"active":"")} onClick={() => setPage("bilancio")}><span className="ico">⚖</span> Bilancio Verifica</button>
           <button className={"navlink " + (page==="rf"?"active":"")} onClick={() => setPage("rf")}><span className="ico">≋</span> Rendiconto Fin.</button>
           <button className={"navlink " + (page==="pivot"?"active":"")} onClick={() => setPage("pivot")}><span className="ico">⊞</span> Pivot Conti</button>
+          <button className={"navlink " + (page==="controller"?"active":"")} onClick={() => setPage("controller")}><span className="ico">🎯</span> Controller</button>
           <button className={"navlink " + (page==="snapshot"?"active":"")} onClick={() => setPage("snapshot")}><span className="ico">📸</span> Snapshot mensili</button>
           <button className={"navlink " + (page==="export"?"active":"")} onClick={() => setPage("export")}><span className="ico">↧</span> Export</button>
 
@@ -4491,6 +5127,7 @@ function App() {
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} />}
               {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
+              {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
