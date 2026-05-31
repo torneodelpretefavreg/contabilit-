@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.10.0";
+const APP_VERSION = "3.11.1";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1268,6 +1268,14 @@ function PageDashboard({ conti, movimenti, saldiIniziali }) {
 // PAGINA: NUOVO MOVIMENTO
 // ============================================================
 function PageNuovo({ conti, stagione, onSaved, onCancel }) {
+  const [cespitoFromMov, setCespitoFromMov] = useState(null);
+
+  const contiMap = useMemo(() => {
+    const m = {};
+    conti.forEach(c => { m[c.codice] = c; });
+    return m;
+  }, [conti]);
+
   const handleSave = async (payload) => {
     if (!firebaseReady) return alert("Firebase non configurato");
     try {
@@ -1276,11 +1284,47 @@ function PageNuovo({ conti, stagione, onSaved, onCancel }) {
       Object.keys(dati).forEach(k => { if (dati[k] === undefined) dati[k] = null; });
       const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
       await ref.set(dati);
-      onSaved("Movimento registrato");
+
+      // Detect immobilizzazione: se è un'uscita su conto categoria IMM.MATERIALI o IMM.IMMATERIALI
+      const conto = contiMap[payload.contoPdC];
+      const isImm = payload.tipo === "uscita" && conto &&
+                    ["IMM. MATERIALI", "IMM. IMMATERIALI"].includes(conto.categoria);
+      if (isImm) {
+        // Apro modale per aggiungere al libro cespiti
+        setCespitoFromMov({
+          conto: conto.nome.trim(),
+          classe: conto.categoria === "IMM. MATERIALI" ? "IMMOBILIZZAZIONI MATERIALI" : "IMMOBILIZZAZIONI IMMATERIALI",
+          n_beni: 1,
+          anno_inizio: payload.data ? new Date(payload.data).getFullYear() : new Date().getFullYear(),
+          costo_storico: payload.importo,
+          aliquota: 0.10, // default 10%
+          quota_esercizio: 0,
+          fondo_ammortamento: 0,
+          descrizione_origine: payload.descrizione || "",
+        });
+      } else {
+        onSaved("Movimento registrato");
+      }
     } catch(e) {
       alert("Errore: " + e.message);
     }
   };
+
+  const handleSaveCespite = async (datiCespite) => {
+    try {
+      // Pulisco undefined
+      const cleaned = {...datiCespite};
+      Object.keys(cleaned).forEach(k => { if (cleaned[k] === undefined) cleaned[k] = null; });
+      // Calcolo quota esercizio = costo * aliquota
+      cleaned.quota_esercizio = (cleaned.costo_storico || 0) * (cleaned.aliquota || 0);
+      // Push come nuovo cespite
+      const ref = db.ref(`stagioni/${stagione}/cespiti`).push();
+      await ref.set(cleaned);
+      setCespitoFromMov(null);
+      onSaved("Movimento e cespite registrati");
+    } catch(e) { alert("Errore cespite: " + e.message); }
+  };
+
   return (
     <div>
       <div className="page-head">
@@ -1292,7 +1336,115 @@ function PageNuovo({ conti, stagione, onSaved, onCancel }) {
       <div className="card" style={{maxWidth:760}}>
         <MovimentoForm conti={conti} onSave={handleSave} onCancel={onCancel} />
       </div>
+
+      {cespitoFromMov && (
+        <div className="modal-bg" onClick={() => { setCespitoFromMov(null); onSaved("Movimento registrato"); }}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>✨ Aggiungi al Libro Cespiti?</h3>
+              <button className="btn ghost sm" onClick={() => { setCespitoFromMov(null); onSaved("Movimento registrato"); }}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{marginBottom:14, padding:"10px 14px", background:"var(--accent-soft)", border:"1px solid #c8d8ce", borderRadius:8, fontSize:12.5, color:"var(--accent-ink)"}}>
+                Hai registrato un'uscita su un conto immobilizzazione. Vuoi aggiungerlo anche al Libro Cespiti (per ammortamento)? I campi sono pre-compilati col movimento appena registrato — verifica e modifica se serve.
+              </div>
+              <CespiteFormQuick cespite={cespitoFromMov} onSave={handleSaveCespite} onSkip={() => { setCespitoFromMov(null); onSaved("Movimento registrato (cespite non aggiunto)"); }} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+// Form rapido per aggiungere cespite dopo movimento
+function CespiteFormQuick({ cespite, onSave, onSkip }) {
+  const [data, setData] = useState({
+    conto: cespite.conto,
+    classe: cespite.classe,
+    n_beni: cespite.n_beni,
+    costo_unitario: cespite.costo_storico, // unit = costo totale all'inizio (n=1)
+    anno_inizio: cespite.anno_inizio,
+    costo_storico: cespite.costo_storico,
+    aliquota: cespite.aliquota,
+    quota_esercizio: 0,
+    fondo_ammortamento: 0,
+  });
+  const [lastChange, setLastChange] = useState("totale");
+
+  // Auto-calcolo costo unitario / totale in base a cosa cambia
+  useEffect(() => {
+    const n = Number(data.n_beni) || 1;
+    if (lastChange === "unit") {
+      setData(d => ({...d, costo_storico: Math.round(Number(d.costo_unitario) * n * 100) / 100}));
+    } else if (lastChange === "totale") {
+      setData(d => ({...d, costo_unitario: n > 0 ? Math.round(Number(d.costo_storico) / n * 100) / 100 : 0}));
+    } else if (lastChange === "n") {
+      setData(d => ({...d, costo_storico: Math.round(Number(d.costo_unitario) * n * 100) / 100}));
+    }
+  // eslint-disable-next-line
+  }, [data.costo_unitario, data.costo_storico, data.n_beni]);
+
+  const submit = (e) => {
+    e.preventDefault();
+    onSave({
+      ...data,
+      n_beni: Number(data.n_beni),
+      anno_inizio: Number(data.anno_inizio),
+      costo_unitario: Number(data.costo_unitario) || 0,
+      costo_storico: Number(data.costo_storico),
+      aliquota: Number(data.aliquota)
+    });
+  };
+  return (
+    <form onSubmit={submit} className="form-grid">
+      <div className="form-row">
+        <label>Conto / Nome bene</label>
+        <input type="text" value={data.conto} onChange={e => setData({...data, conto: e.target.value})} required/>
+      </div>
+      <div className="form-row">
+        <label>Classe</label>
+        <input type="text" value={data.classe} onChange={e => setData({...data, classe: e.target.value})}/>
+      </div>
+      <div className="form-row" style={{gridTemplateColumns: "1fr 1fr 1fr", gap: 10}}>
+        <div>
+          <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>N° beni</label>
+          <input type="number" inputMode="decimal" min="1" step="1" value={data.n_beni}
+            onChange={e => { setData({...data, n_beni: e.target.value}); setLastChange("n"); }}/>
+        </div>
+        <div>
+          <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Costo unitario €</label>
+          <input type="number" inputMode="decimal" step="0.01" value={data.costo_unitario}
+            onChange={e => { setData({...data, costo_unitario: e.target.value}); setLastChange("unit"); }}/>
+        </div>
+        <div>
+          <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Costo totale €</label>
+          <input type="number" inputMode="decimal" step="0.01" value={data.costo_storico}
+            onChange={e => { setData({...data, costo_storico: e.target.value}); setLastChange("totale"); }}
+            style={{background:"var(--panel-2)", fontWeight:600}}/>
+        </div>
+      </div>
+      <div style={{fontSize:11, color:"var(--ink-3)", padding:"2px 0 8px"}}>
+        💡 Se hai più beni con costo unitario, inserisci N° beni e Costo unitario: il totale si aggiorna in automatico.
+      </div>
+      <div className="form-row" style={{gridTemplateColumns: "1fr 1fr", gap: 10}}>
+        <div>
+          <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Anno inizio</label>
+          <input type="number" inputMode="decimal" value={data.anno_inizio} onChange={e => setData({...data, anno_inizio: e.target.value})}/>
+        </div>
+        <div>
+          <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Aliquota (0.10 = 10%)</label>
+          <input type="number" inputMode="decimal" step="0.01" min="0" max="1" value={data.aliquota} onChange={e => setData({...data, aliquota: e.target.value})}/>
+        </div>
+      </div>
+      <div style={{fontSize:11, color:"var(--ink-3)", padding:"6px 0"}}>
+        Quota ammortamento esercizio (auto): {(Number(data.costo_storico || 0) * Number(data.aliquota || 0)).toFixed(2)} €
+      </div>
+      <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+        <button type="button" className="btn ghost" onClick={onSkip}>Non aggiungere</button>
+        <button type="submit" className="btn accent">Aggiungi cespite</button>
+      </div>
+    </form>
   );
 }
 
@@ -1408,7 +1560,13 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
         return (m.descrizione || "").toLowerCase().includes(t)
           || (m.categoria || "").toLowerCase().includes(t);
       })
-      .sort((a,b) => (b.data || "").localeCompare(a.data || ""));
+      .sort((a,b) => {
+        // ordinamento primario: data decrescente
+        const dataCmp = (b.data || "").localeCompare(a.data || "");
+        if (dataCmp !== 0) return dataCmp;
+        // ordinamento secondario: creatoIl ascendente (cronologia inserimento)
+        return (a.creatoIl || "").localeCompare(b.creatoIl || "");
+      });
   }, [movimenti, filterTipo, filterMese, filterBu, filterText, filterOrigine]);
 
   const handleEdit = async (payload) => {
@@ -1758,7 +1916,14 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
   });
 
   // Ordina per data
-  scritture.sort((a, b) => (a.data || "").localeCompare(b.data || ""));
+  scritture.sort((a, b) => {
+    const dataCmp = (a.data || "").localeCompare(b.data || "");
+    if (dataCmp !== 0) return dataCmp;
+    // a parità data: ordino per creatoIl ascendente
+    const movA = movimenti.find(m => m._id === a.movId);
+    const movB = movimenti.find(m => m._id === b.movId);
+    return (movA?.creatoIl || "").localeCompare(movB?.creatoIl || "");
+  });
   return scritture;
 }
 
@@ -4487,6 +4652,7 @@ function PageCespiti({ cespiti, stagione, onToast }) {
               <th>Conto / Bene</th>
               <th>Classe</th>
               <th className="num" style={{width:60}}>N°</th>
+              <th className="num" style={{width:90}}>Costo unit.</th>
               <th className="num" style={{width:80}}>Anno</th>
               <th className="num" style={{width:110}}>Costo storico</th>
               <th className="num" style={{width:80}}>Aliquota</th>
@@ -4499,11 +4665,15 @@ function PageCespiti({ cespiti, stagione, onToast }) {
           <tbody>
             {visibili.map(c => {
               const netto = (c.costo_storico || 0) - (c.fondo_ammortamento || 0);
+              // Calcolo costo unitario: usa valore salvato o lo deriva da costo/n_beni
+              const nBeni = Number(c.n_beni) || 1;
+              const costoUnit = c.costo_unitario !== undefined ? c.costo_unitario : (nBeni > 0 ? (c.costo_storico || 0) / nBeni : 0);
               return (
                 <tr key={c._key}>
                   <td style={{fontWeight:500}}>{c.conto}</td>
                   <td><span className="pill">{c.classe || "—"}</span></td>
                   <td className="num">{c.n_beni || "—"}</td>
+                  <td className="num" style={{color:"var(--ink-3)"}}>{costoUnit > 0 ? fmt(costoUnit) : "—"}</td>
                   <td className="num">{c.anno_inizio || "—"}</td>
                   <td className="num">{fmt(c.costo_storico)}</td>
                   <td className="num">{c.aliquota ? (c.aliquota * 100).toFixed(0) + "%" : "—"}</td>
@@ -4520,7 +4690,7 @@ function PageCespiti({ cespiti, stagione, onToast }) {
               );
             })}
             <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
-              <td colSpan={4} style={{fontFamily:"'Fraunces',serif"}}>TOTALI</td>
+              <td colSpan={5} style={{fontFamily:"'Fraunces',serif"}}>TOTALI</td>
               <td className="num">{fmt(totCosto)}</td>
               <td></td>
               <td className="num">{fmt(totQuota)}</td>
@@ -4547,12 +4717,36 @@ function CespiteForm({ cespite, onSave, onCancel }) {
   const isNew = !cespite;
   const [conto, setConto] = useState(cespite?.conto || "");
   const [classe, setClasse] = useState(cespite?.classe || "IMMOBILIZZAZIONI MATERIALI");
-  const [nBeni, setNBeni] = useState(cespite?.n_beni || "1");
+  const [nBeni, setNBeni] = useState(cespite?.n_beni || 1);
   const [annoInizio, setAnnoInizio] = useState(cespite?.anno_inizio || new Date().getFullYear());
+  const [costoUnit, setCostoUnit] = useState(() => {
+    if (!cespite) return "";
+    const n = Number(cespite.n_beni) || 1;
+    return n > 0 ? ((cespite.costo_storico || 0) / n).toFixed(2) : (cespite.costo_storico || 0);
+  });
   const [costo, setCosto] = useState(cespite?.costo_storico || "");
   const [aliquota, setAliquota] = useState(cespite ? (cespite.aliquota * 100) : "");
   const [quota, setQuota] = useState(cespite?.quota_esercizio || 0);
   const [fondo, setFondo] = useState(cespite?.fondo_ammortamento || 0);
+  const [lastChange, setLastChange] = useState("totale"); // "totale" | "unit" | "n"
+
+  // Auto-calcolo costo totale o unitario in base a cosa l'utente sta modificando
+  useEffect(() => {
+    const n = Number(nBeni) || 1;
+    if (lastChange === "unit") {
+      // modificato costo unitario → ricalcolo totale
+      const t = Number(costoUnit) * n;
+      setCosto(Math.round(t * 100) / 100);
+    } else if (lastChange === "totale") {
+      // modificato costo totale → ricalcolo unitario
+      const u = Number(costo) / n;
+      setCostoUnit(Math.round(u * 100) / 100);
+    } else if (lastChange === "n") {
+      // modificato numero beni: tengo il costo unitario, ricalcolo totale
+      const t = Number(costoUnit) * n;
+      setCosto(Math.round(t * 100) / 100);
+    }
+  }, [costoUnit, costo, nBeni, lastChange]);
 
   // Auto-calcolo quota se cambio costo o aliquota
   useEffect(() => {
@@ -4568,7 +4762,8 @@ function CespiteForm({ cespite, onSave, onCancel }) {
     onSave({
       conto: conto.trim(),
       classe,
-      n_beni: nBeni,
+      n_beni: Number(nBeni) || 1,
+      costo_unitario: Number(costoUnit) || 0,
       anno_inizio: Number(annoInizio),
       costo_storico: Number(costo) || 0,
       aliquota: (Number(aliquota) || 0) / 100,
@@ -4597,29 +4792,45 @@ function CespiteForm({ cespite, onSave, onCancel }) {
                 <option>IMMOBILIZZAZIONI IMMATERIALI</option>
               </select>
             </div>
-            <div className="form-row">
-              <label>Numero beni</label>
-              <input type="text" value={nBeni} onChange={e => setNBeni(e.target.value)}/>
+            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr 1fr", gap:10}}>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>N° beni</label>
+                <input type="number" inputMode="decimal" min="1" step="1" value={nBeni}
+                  onChange={e => { setNBeni(e.target.value); setLastChange("n"); }}/>
+              </div>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Costo unitario €</label>
+                <input type="number" inputMode="decimal" step="0.01" value={costoUnit}
+                  onChange={e => { setCostoUnit(e.target.value); setLastChange("unit"); }}/>
+              </div>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Costo totale €</label>
+                <input type="number" inputMode="decimal" step="0.01" value={costo}
+                  onChange={e => { setCosto(e.target.value); setLastChange("totale"); }} style={{background:"var(--panel-2)", fontWeight:600}}/>
+              </div>
             </div>
-            <div className="form-row">
-              <label>Anno acquisto</label>
-              <input type="number" inputMode="decimal" value={annoInizio} onChange={e => setAnnoInizio(e.target.value)} min="2000" max="2100"/>
+            <div style={{fontSize:11, color:"var(--ink-3)", padding:"2px 0 8px"}}>
+              💡 Modifica liberamente N° beni, Costo unitario o Costo totale: i campi si aggiornano automaticamente in base a cosa cambi per ultimo.
             </div>
-            <div className="form-row">
-              <label>Costo storico €</label>
-              <input type="number" inputMode="decimal" step="0.01" value={costo} onChange={e => setCosto(e.target.value)}/>
+            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Anno acquisto</label>
+                <input type="number" inputMode="decimal" value={annoInizio} onChange={e => setAnnoInizio(e.target.value)} min="2000" max="2100"/>
+              </div>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Aliquota %</label>
+                <input type="number" inputMode="decimal" step="0.01" value={aliquota} onChange={e => setAliquota(e.target.value)} placeholder="es. 20 per 20%"/>
+              </div>
             </div>
-            <div className="form-row">
-              <label>Aliquota %</label>
-              <input type="number" inputMode="decimal" step="0.01" value={aliquota} onChange={e => setAliquota(e.target.value)} placeholder="es. 20 per 20%"/>
-            </div>
-            <div className="form-row">
-              <label>Quota esercizio</label>
-              <input type="number" inputMode="decimal" step="0.01" value={quota} onChange={e => setQuota(e.target.value)}/>
-            </div>
-            <div className="form-row">
-              <label>Fondo ammortamento</label>
-              <input type="number" inputMode="decimal" step="0.01" value={fondo} onChange={e => setFondo(e.target.value)}/>
+            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Quota esercizio €</label>
+                <input type="number" inputMode="decimal" step="0.01" value={quota} onChange={e => setQuota(e.target.value)}/>
+              </div>
+              <div>
+                <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Fondo ammortam. €</label>
+                <input type="number" inputMode="decimal" step="0.01" value={fondo} onChange={e => setFondo(e.target.value)}/>
+              </div>
             </div>
             <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
               <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
