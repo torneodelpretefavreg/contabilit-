@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.7.0";
+const APP_VERSION = "3.9.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -834,7 +834,9 @@ const CONTI_LIQUIDITA = [
   { codice: 10, nome: "SATISPAY C/C" },
 ];
 
-const BUSINESS_UNITS = ["FUTSAL", "TDP", "GENERAL"];
+const BUSINESS_UNITS_DEFAULT = ["FUTSAL", "TDP", "GENERAL", "FESTIVAL FABBRICO"];
+// Variabile globale aggiornata dinamicamente dal hook
+let BUSINESS_UNITS = [...BUSINESS_UNITS_DEFAULT];
 
 const MESI = ["settembre","ottobre","novembre","dicembre","gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto"];
 
@@ -888,6 +890,7 @@ function useFirebaseData(stagione) {
   const [movimenti, setMovimenti] = useState([]);
   const [cespiti, setCespiti] = useState([]);
   const [saldiIniziali, setSaldiIniziali] = useState({});
+  const [bu, setBu] = useState([...BUSINESS_UNITS_DEFAULT]);
   const [loading, setLoading] = useState(true);
   const [seedingDone, setSeedingDone] = useState(false);
 
@@ -899,6 +902,7 @@ function useFirebaseData(stagione) {
       db.ref(`stagioni/${stagione}/movimenti`),
       db.ref(`stagioni/${stagione}/cespiti`),
       db.ref(`stagioni/${stagione}/saldiIniziali`),
+      db.ref(`stagioni/${stagione}/businessUnits`),
     ];
     const cbs = [
       refs[0].on("value", snap => setConti(snap.val() ? Object.values(snap.val()) : [])),
@@ -910,6 +914,12 @@ function useFirebaseData(stagione) {
       refs[3].on("value", snap => {
         setSaldiIniziali(snap.val() || {});
         setLoading(false);
+      }),
+      refs[4].on("value", snap => {
+        const v = snap.val();
+        const list = v ? Object.values(v).map(b => b.nome).sort() : [...BUSINESS_UNITS_DEFAULT];
+        setBu(list);
+        BUSINESS_UNITS = list; // aggiorna la variabile globale per backward compat
       }),
     ];
     return () => refs.forEach((r,i) => r.off("value", cbs[i]));
@@ -939,12 +949,16 @@ function useFirebaseData(stagione) {
       cespiti: cespitiObj,
       movimenti: movsObj,
       saldiIniziali: SALDI_INIZIALI,
+      businessUnits: BUSINESS_UNITS_DEFAULT.reduce((acc, b, i) => {
+        acc[`bu_${i}`] = { nome: b, ordine: i };
+        return acc;
+      }, {}),
       meta: { stagione, creataIl: new Date().toISOString(), version: APP_VERSION, saldiIniziali: SALDI_INIZIALI }
     });
     setSeedingDone(true);
   }, [stagione]);
 
-  return { conti, movimenti, cespiti, saldiIniziali, loading, seedStagione };
+  return { conti, movimenti, cespiti, saldiIniziali, bu, loading, seedStagione };
 }
 
 // ============================================================
@@ -1079,9 +1093,32 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
           <label>Conto Piano dei Conti <span className="req">*</span></label>
           <select value={contoPdC} onChange={e => setContoPdC(e.target.value)} required>
             <option value="">— seleziona —</option>
-            {contiPdCFiltrati.sort((a,b) => a.codice - b.codice).map(c => (
-              <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome.trim()} [{c.categoria}]</option>
-            ))}
+            {(() => {
+              // Raggruppo per categoria
+              const grouped = {};
+              contiPdCFiltrati.sort((a,b) => a.codice - b.codice).forEach(c => {
+                const cat = c.categoria || "ALTRO";
+                if (!grouped[cat]) grouped[cat] = [];
+                grouped[cat].push(c);
+              });
+              // Ordine preferito delle categorie per tipo
+              const ordineEntrata = ["RICAVI", "CREDITI", "DEBITI", "PN", "COSTI/RICAVI", "CONTO TRANSITORIO"];
+              const ordineUscita = ["COSTI", "COSTI/RICAVI", "IMM. MATERIALI", "IMM. IMMATERIALI", "DEBITI", "CREDITI", "CONTO TRANSITORIO"];
+              const ordine = tipo === "entrata" ? ordineEntrata : ordineUscita;
+              const catsOrdinate = [
+                ...ordine.filter(c => grouped[c]),
+                ...Object.keys(grouped).filter(c => !ordine.includes(c)).sort()
+              ];
+              return catsOrdinate.map(cat => (
+                <optgroup key={cat} label={`── ${cat} ──`}>
+                  {grouped[cat].map(c => (
+                    <option key={c.codice} value={c.codice}>
+                      {c.codice.toString().padStart(2,"0")} · {c.nome.trim()}
+                    </option>
+                  ))}
+                </optgroup>
+              ));
+            })()}
           </select>
         </div>
       )}
@@ -1259,6 +1296,7 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
   const [filterText, setFilterText] = useState("");
   const [filterOrigine, setFilterOrigine] = useState("");
   const [editing, setEditing] = useState(null);
+  const [tab, setTab] = useState("lista"); // lista | audit
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -1266,6 +1304,87 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
     CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome }; });
     return m;
   }, [conti]);
+
+  // === Audit: anomalie nei movimenti ===
+  const anomalie = useMemo(() => {
+    const result = [];
+    movimenti.forEach(m => {
+      if (m.tipo === "giroconto") return;
+      const motivi = [];
+      let suggerito = null;
+      const cat = (m.categoria || "").toUpperCase();
+      const desc = m.descrizione || "";
+
+      if (m.contoPdC === 20) motivi.push("Conto 20 SPESE DIVERSE è generico");
+      if (m.contoPdC === 35) motivi.push("Conto 35 SOPRAVVENIENZE ATTIVE è generico");
+
+      if (/SPONSOR/i.test(desc) && m.contoPdC !== 69) {
+        motivi.push("Descrizione contiene 'sponsor' ma conto ≠ 69 SPONSOR FUTSAL");
+        suggerito = 69;
+      }
+      if (/(CSI|CARTELLINI)/i.test(desc) && m.contoPdC !== 66) {
+        motivi.push("Descrizione menziona CSI/cartellini ma conto ≠ 66 ONERI CSI");
+        suggerito = 66;
+      }
+      if (/(PALESTRA|PALAZZETTO)/i.test(desc) && m.contoPdC !== 77 && m.tipo === "uscita") {
+        motivi.push("Descrizione menziona palestra ma conto ≠ 77 PALESTRA C/SPESE");
+        suggerito = 77;
+      }
+      if (/PALLONI/i.test(desc) && m.contoPdC !== 62 && m.contoPdC !== 13) {
+        motivi.push("Descrizione menziona palloni ma conto inadatto");
+        suggerito = 62;
+      }
+      if (/COMMERCIALISTA/i.test(desc) && m.contoPdC !== 26) {
+        motivi.push("Descrizione menziona commercialista ma conto ≠ 26");
+        suggerito = 26;
+      }
+      if (/(COMMISSIONI|TENUTA CONTO|SPESE BANCA)/i.test(desc) && m.contoPdC !== 21 && m.tipo === "uscita") {
+        motivi.push("Descrizione bancaria ma conto ≠ 21 ONERI VS BANCA");
+        suggerito = 21;
+      }
+      if (/QUOT[AE]/i.test(desc) && m.contoPdC !== 71 && m.tipo === "entrata") {
+        motivi.push("Descrizione menziona 'quote' ma conto ≠ 71 GIOCATORI C/QUOTA");
+        suggerito = 71;
+      }
+      if (/(EVENTO|TORNEO|SERATA|IDEA VERDE)/i.test(desc)) {
+        if (m.tipo === "entrata" && m.contoPdC !== 28 && m.contoPdC !== 41) {
+          motivi.push("Descrizione menziona evento/torneo ma conto inadatto");
+          suggerito = 41;
+        }
+        if (m.tipo === "uscita" && m.contoPdC !== 76 && m.contoPdC !== 12) {
+          motivi.push("Descrizione menziona evento/torneo ma conto inadatto");
+          suggerito = 76;
+        }
+      }
+      if (/CONTRIBUT/i.test(desc) && m.contoPdC !== 22) {
+        motivi.push("Descrizione menziona contributo ma conto ≠ 22");
+        suggerito = 22;
+      }
+      if (cat === "ALTRO" && !motivi.length) {
+        motivi.push("Categoria libera generica ('ALTRO')");
+      }
+      if (cat === "SPESE DIVERSE" && m.contoPdC === 20) {
+        motivi.push("Categoria + conto entrambi 'SPESE DIVERSE': da specificare");
+      }
+      if (!desc.trim()) {
+        motivi.push("Descrizione vuota");
+      }
+
+      if (motivi.length > 0) result.push({ ...m, motivi, suggerito });
+    });
+    return result;
+  }, [movimenti]);
+
+  const applicaSuggerimento = async (mov, contoNuovo) => {
+    if (!confirm(`Cambiare conto P.d.C. di "${mov.descrizione || mov.categoria}" a ${contoNuovo} ${contiMap[contoNuovo]?.nome.trim() || ""}?`)) return;
+    try {
+      await db.ref(`stagioni/${stagione}/movimenti/${mov._id}`).update({
+        contoPdC: Number(contoNuovo),
+        modificatoIl: new Date().toISOString()
+      });
+      onToast("Conto aggiornato");
+    } catch(e) { alert("Errore: " + e.message); }
+  };
 
   const filtered = useMemo(() => {
     return movimenti
@@ -1313,9 +1432,16 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
       <div className="page-head">
         <div>
           <h2>Movimenti</h2>
-          <div className="sub">{filtered.length} di {movimenti.length} movimenti</div>
+          <div className="sub">{tab === "lista" ? `${filtered.length} di ${movimenti.length} movimenti` : `${anomalie.length} movimenti da revisionare`}</div>
         </div>
       </div>
+
+      <div className="tipo-switch" style={{maxWidth:480, marginBottom:18}}>
+        <button type="button" className={tab === "lista" ? "active entrata" : ""} onClick={() => setTab("lista")}>≡ Lista completa ({movimenti.length})</button>
+        <button type="button" className={tab === "audit" ? "active uscita" : ""} onClick={() => setTab("audit")}>⚠ Da revisionare ({anomalie.length})</button>
+      </div>
+
+      {tab === "lista" && <>
 
       <div className="filters">
         <span className="label">Filtri:</span>
@@ -1398,6 +1524,89 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
           </table>
         )}
       </div>
+      </>}
+
+      {tab === "audit" && (
+        <div>
+          {anomalie.length === 0 ? (
+            <div className="card" style={{textAlign:"center", padding:40, background:"var(--accent-soft)", borderColor:"#c8d8ce"}}>
+              <h3 className="card-title" style={{color:"var(--accent-ink)"}}>✓ Nessuna anomalia rilevata</h3>
+              <p style={{fontSize:13, color:"var(--ink-2)", margin:0}}>Tutti i movimenti hanno conti P.d.C. e descrizioni coerenti.</p>
+            </div>
+          ) : (
+            <>
+              <div style={{marginBottom:14, padding:"12px 16px", background:"#fdf5e6", border:"1px solid #e6d5a8", borderRadius:8, fontSize:12.5, color:"#7a5a1d"}}>
+                <strong>💡 Come funziona.</strong> Sono elencati i movimenti che mostrano possibili incongruenze tra descrizione, categoria e conto P.d.C. Per ciascuno trovi il <strong>motivo</strong> e, dove possibile, un <strong>conto suggerito</strong>: clicca ✓ per applicarlo direttamente, oppure ✎ per aprire il form di modifica completo.
+              </div>
+
+              <div className="tbl-wrap">
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>Tipo</th>
+                      <th>Data</th>
+                      <th>Descrizione / Categoria</th>
+                      <th>Conto attuale</th>
+                      <th className="num">Importo</th>
+                      <th>Motivi</th>
+                      <th>Suggerito</th>
+                      <th style={{width:90}}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {anomalie.sort((a,b) => (b.importo || 0) - (a.importo || 0)).map(m => (
+                      <tr key={m._id}>
+                        <td><span className={"pill " + m.tipo}>{m.tipo}</span></td>
+                        <td>{fmtDate(m.data)}</td>
+                        <td>
+                          <div style={{fontWeight:500}}>{m.descrizione || <span style={{color:"var(--ink-3)"}}>(vuota)</span>}</div>
+                          <div style={{fontSize:10.5, color:"var(--ink-3)"}}>{m.categoria || "—"}</div>
+                        </td>
+                        <td>
+                          {m.contoPdC ? (
+                            <div>
+                              <span className="mono" style={{fontWeight:600}}>{String(m.contoPdC).padStart(2,"0")}</span>{" "}
+                              <span style={{fontSize:12}}>{contiMap[m.contoPdC]?.nome.trim() || "?"}</span>
+                            </div>
+                          ) : <span style={{color:"var(--ink-3)"}}>—</span>}
+                        </td>
+                        <td className={"num " + (m.tipo === "entrata" ? "pos" : "neg")}>
+                          {m.tipo === "entrata" ? "+" : "−"} {fmt(m.importo)}
+                        </td>
+                        <td>
+                          {m.motivi.map((motivo, i) => (
+                            <div key={i} style={{fontSize:11, color:"var(--warn)", marginBottom:2}}>• {motivo}</div>
+                          ))}
+                        </td>
+                        <td>
+                          {m.suggerito ? (
+                            <div style={{fontSize:11.5}}>
+                              <div className="mono" style={{fontWeight:600, color:"var(--accent)"}}>{String(m.suggerito).padStart(2,"0")}</div>
+                              <div style={{color:"var(--ink-2)"}}>{contiMap[m.suggerito]?.nome.trim() || ""}</div>
+                            </div>
+                          ) : <span style={{color:"var(--ink-3)", fontSize:11}}>—</span>}
+                        </td>
+                        <td>
+                          <div style={{display:"flex", gap:4}}>
+                            {m.suggerito && (
+                              <button className="btn accent sm" title="Applica suggerimento" onClick={() => applicaSuggerimento(m, m.suggerito)}>✓</button>
+                            )}
+                            <button className="btn ghost sm" title="Modifica completa" onClick={() => setEditing(m)}>✎</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{marginTop:18, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:11.5, color:"var(--ink-3)"}}>
+                <strong>Criteri di rilevazione:</strong> Conto 20 (SPESE DIVERSE) generico · Conto 35 (SOPRAVVENIENZE) generico · Parole chiave nella descrizione (SPONSOR, CSI, PALESTRA, PALLONI, COMMERCIALISTA, COMMISSIONI, QUOTE, EVENTO, CONTRIBUTI) non coerenti col conto · Categoria "ALTRO" o "SPESE DIVERSE" · Descrizione vuota.
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {editing && (
         <div className="modal-bg" onClick={() => setEditing(null)}>
@@ -4785,6 +4994,188 @@ function SerataForm({ serata, onSave, onCancel }) {
 }
 
 // ============================================================
+// PAGINA: BUSINESS UNITS
+// ============================================================
+function PageBU({ bu, movimenti, stagione, onToast }) {
+  const [buData, setBuData] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [creating, setCreating] = useState(false);
+
+  // Carica BU complete (con chiavi)
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const ref = db.ref(`stagioni/${stagione}/businessUnits`);
+    const cb = ref.on("value", snap => {
+      const v = snap.val();
+      setBuData(v ? Object.entries(v).map(([k,b]) => ({...b, _key: k})).sort((a,b) => (a.ordine || 0) - (b.ordine || 0)) : []);
+    });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  // Conta movimenti per BU
+  const usoBU = useMemo(() => {
+    const m = {};
+    movimenti.forEach(mov => {
+      const b = mov.bu || "(senza BU)";
+      if (!m[b]) m[b] = { count: 0, ricavi: 0, costi: 0 };
+      m[b].count++;
+      if (mov.tipo === "entrata") m[b].ricavi += mov.importo;
+      else if (mov.tipo === "uscita") m[b].costi += mov.importo;
+    });
+    return m;
+  }, [movimenti]);
+
+  const save = async (data, oldKey) => {
+    try {
+      const key = oldKey || `bu_${Date.now().toString(36)}`;
+      const ordine = oldKey ? data.ordine : buData.length;
+      await db.ref(`stagioni/${stagione}/businessUnits/${key}`).set({
+        nome: data.nome.trim().toUpperCase(),
+        ordine,
+      });
+      onToast("Business Unit salvata");
+      setEditing(null); setCreating(false);
+    } catch(e) { alert("Errore: " + e.message); }
+  };
+
+  const remove = async (b) => {
+    const uso = usoBU[b.nome];
+    if (uso && uso.count > 0) {
+      if (!confirm(`⚠️ La BU "${b.nome}" è usata in ${uso.count} movimenti. Eliminarla farà perdere il collegamento (i movimenti resteranno ma con BU "(senza BU)"). Procedere?`)) return;
+    } else {
+      if (!confirm(`Eliminare la BU "${b.nome}"?`)) return;
+    }
+    await db.ref(`stagioni/${stagione}/businessUnits/${b._key}`).remove();
+    onToast("BU eliminata");
+  };
+
+  // Lista di nomi BU che esistono nei movimenti ma NON nella lista BU → suggerisci di aggiungerle
+  const buMancanti = useMemo(() => {
+    const presenti = new Set(buData.map(b => b.nome));
+    const mancanti = [];
+    Object.keys(usoBU).forEach(b => {
+      if (b !== "(senza BU)" && !presenti.has(b)) mancanti.push(b);
+    });
+    return mancanti;
+  }, [buData, usoBU]);
+
+  const aggiungiMancante = async (nome) => {
+    const ordine = buData.length;
+    const key = `bu_${Date.now().toString(36)}`;
+    await db.ref(`stagioni/${stagione}/businessUnits/${key}`).set({ nome, ordine });
+    onToast(`BU "${nome}" aggiunta`);
+  };
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Business Units</h2>
+          <div className="sub">Centri di costo · {buData.length} BU configurate</div>
+        </div>
+        <button className="btn accent" onClick={() => setCreating(true)}>+ Nuova BU</button>
+      </div>
+
+      {buMancanti.length > 0 && (
+        <div className="card" style={{marginBottom:18, background:"#fdf5e6", borderColor:"#e6d5a8"}}>
+          <h3 className="card-title" style={{color:"#7a5a1d"}}>⚠ BU trovate nei movimenti ma non in lista</h3>
+          <p style={{fontSize:13, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Le seguenti BU sono usate in alcuni movimenti ma non sono ancora nella lista ufficiale. Clicca per aggiungerle:
+          </p>
+          <div style={{display:"flex", flexWrap:"wrap", gap:8}}>
+            {buMancanti.map(b => (
+              <button key={b} className="btn ghost sm" onClick={() => aggiungiMancante(b)}>
+                + Aggiungi "{b}" ({usoBU[b]?.count || 0} mov.)
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Nome</th>
+              <th className="num">Movimenti</th>
+              <th className="num">Ricavi</th>
+              <th className="num">Costi</th>
+              <th className="num">Margine</th>
+              <th style={{width:90}}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {buData.map(b => {
+              const uso = usoBU[b.nome] || { count: 0, ricavi: 0, costi: 0 };
+              const margine = uso.ricavi - uso.costi;
+              return (
+                <tr key={b._key}>
+                  <td style={{fontWeight:600}}>{b.nome}</td>
+                  <td className="num">{uso.count}</td>
+                  <td className="num pos">{uso.ricavi > 0 ? fmt(uso.ricavi) : "—"}</td>
+                  <td className="num neg">{uso.costi > 0 ? fmt(uso.costi) : "—"}</td>
+                  <td className={"num " + (margine < 0 ? "neg" : margine > 0 ? "pos" : "")} style={{fontWeight:600}}>
+                    {(uso.ricavi || uso.costi) ? fmt(margine) : "—"}
+                  </td>
+                  <td>
+                    <div style={{display:"flex", gap:4}}>
+                      <button className="btn ghost sm" onClick={() => setEditing(b)}>✎</button>
+                      <button className="btn danger sm" onClick={() => remove(b)}>🗑</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{marginTop:18, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12, color:"var(--ink-2)"}}>
+        <strong>💡 Come usare le Business Unit.</strong> Servono a classificare i movimenti per centro di costo (es. attività della prima squadra, eventi, gestione generale). Vengono mostrate nel form di inserimento movimenti, nei filtri, e nella sezione <strong>Controller → Centri di costo</strong> dove vedi il margine per BU.
+      </div>
+
+      {(editing || creating) && (
+        <div className="modal-bg" onClick={() => { setEditing(null); setCreating(false); }}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>{editing ? `Modifica "${editing.nome}"` : "Nuova Business Unit"}</h3>
+              <button className="btn ghost sm" onClick={() => { setEditing(null); setCreating(false); }}>✕</button>
+            </div>
+            <div className="modal-body">
+              <BUForm bu={editing} onSave={(data) => save(data, editing?._key)} onCancel={() => { setEditing(null); setCreating(false); }} />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BUForm({ bu, onSave, onCancel }) {
+  const [nome, setNome] = useState(bu?.nome || "");
+  const submit = (e) => {
+    e.preventDefault();
+    if (!nome.trim()) return alert("Nome obbligatorio");
+    onSave({ nome, ordine: bu?.ordine });
+  };
+  return (
+    <form onSubmit={submit} className="form-grid">
+      <div className="form-row">
+        <label>Nome BU</label>
+        <input type="text" value={nome} onChange={e => setNome(e.target.value)} placeholder="es. FESTIVAL FABBRICO" required autoFocus/>
+      </div>
+      <div style={{fontSize:11.5, color:"var(--ink-3)", padding:"4px 0"}}>
+        Il nome verrà convertito automaticamente in MAIUSCOLO al salvataggio.
+      </div>
+      <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+        <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
+        <button type="submit" className="btn accent">Salva</button>
+      </div>
+    </form>
+  );
+}
+
+// ============================================================
 // PAGINA: PIANO DEI CONTI
 // ============================================================
 function PagePianoConti({ conti, stagione, onToast }) {
@@ -4953,7 +5344,7 @@ function App() {
   const [toast, setToast] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const { conti, movimenti, cespiti, saldiIniziali, loading, seedStagione } = useFirebaseData(stagione);
+  const { conti, movimenti, cespiti, saldiIniziali, bu, loading, seedStagione } = useFirebaseData(stagione);
 
   // Carica lista stagioni esistenti su Firebase
   useEffect(() => {
@@ -4980,6 +5371,22 @@ function App() {
           await seedStagione();
         }
         return;
+      }
+
+      // Auto-discovery BU: se non esistono, le seedo (default + qualunque BU usata nei movimenti)
+      const buSnap = await db.ref(`stagioni/${stagione}/businessUnits`).once("value");
+      if (!buSnap.exists()) {
+        const movsSnap = await db.ref(`stagioni/${stagione}/movimenti`).once("value");
+        const buInUso = new Set(BUSINESS_UNITS_DEFAULT);
+        if (movsSnap.exists()) {
+          Object.values(movsSnap.val()).forEach(m => {
+            if (m.bu && m.bu.trim()) buInUso.add(m.bu.trim().toUpperCase());
+          });
+        }
+        const buArr = [...buInUso].sort();
+        const buObj = {};
+        buArr.forEach((b, i) => { buObj[`bu_${i}`] = { nome: b, ordine: i }; });
+        await db.ref(`stagioni/${stagione}/businessUnits`).set(buObj);
       }
       // Controlla se i movimenti hanno il campo contoPdC (introdotto in Release 2)
       const movsSnap = await db.ref(`stagioni/${stagione}/movimenti`).once("value");
@@ -5098,6 +5505,7 @@ function App() {
 
           <div className="section-label">Anagrafiche</div>
           <button className={"navlink " + (page==="conti"?"active":"")} onClick={() => setPage("conti")}><span className="ico">▦</span> Piano dei Conti</button>
+          <button className={"navlink " + (page==="bu"?"active":"")} onClick={() => setPage("bu")}><span className="ico">⊟</span> Business Units</button>
 
           <div className="section-label">Reports contabili</div>
           <button className={"navlink " + (page==="libro"?"active":"")} onClick={() => setPage("libro")}><span className="ico">▤</span> Libro Giornale</button>
@@ -5123,6 +5531,7 @@ function App() {
               {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
+              {page === "bu" && <PageBU bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} />}
