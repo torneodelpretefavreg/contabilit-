@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.9.0";
+const APP_VERSION = "3.9.1";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1264,8 +1264,11 @@ function PageNuovo({ conti, stagione, onSaved, onCancel }) {
   const handleSave = async (payload) => {
     if (!firebaseReady) return alert("Firebase non configurato");
     try {
+      // Pulisco undefined (Firebase li rifiuta)
+      const dati = {...payload};
+      Object.keys(dati).forEach(k => { if (dati[k] === undefined) dati[k] = null; });
       const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
-      await ref.set(payload);
+      await ref.set(dati);
       onSaved("Movimento registrato");
     } catch(e) {
       alert("Errore: " + e.message);
@@ -1407,7 +1410,10 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
       if (editing.importato) {
         if (!confirm(`Stai modificando un movimento IMPORTATO dallo sheet (€${editing.importo}). Procedere?`)) return;
       }
-      await db.ref(`stagioni/${stagione}/movimenti/${editing._id}`).set({...payload, importato: editing.importato});
+      // Pulisco i campi undefined prima del set (Firebase li rifiuta)
+      const dati = {...payload, importato: editing.importato || false};
+      Object.keys(dati).forEach(k => { if (dati[k] === undefined) dati[k] = null; });
+      await db.ref(`stagioni/${stagione}/movimenti/${editing._id}`).set(dati);
       onToast("Movimento aggiornato");
       setEditing(null);
     } catch(e) { alert("Errore: " + e.message); }
