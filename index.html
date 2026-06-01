@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.13.2";
+const APP_VERSION = "3.14.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1162,7 +1162,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
 // ============================================================
 // PAGINA: DASHBOARD
 // ============================================================
-function PageDashboard({ conti, movimenti, saldiIniziali }) {
+function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
   // Calcola saldi per ogni conto liquidità
   const saldi = useMemo(() => {
     const map = {};
@@ -1259,6 +1259,167 @@ function PageDashboard({ conti, movimenti, saldiIniziali }) {
 
       <div style={{marginTop:24, padding:"16px 20px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:10, fontSize:12.5, color:"var(--ink-2)"}}>
         <strong>Nota.</strong> I saldi iniziali (al 01/09/2025) provengono dalla riapertura dello sheet originale. I movimenti importati dai fogli ENTRATE NEW / USCITE NEW sono già presenti nella lista <em>Movimenti</em> (badge "importato"). I nuovi movimenti che inserirai si sommano sopra.
+      </div>
+
+      <ManutenzioneBox stagione={stagione} />
+    </div>
+  );
+}
+
+// ============================================================
+// COMPONENTE: BOX MANUTENZIONE
+// ============================================================
+function ManutenzioneBox({ stagione }) {
+  const [running, setRunning] = useState(false);
+
+  const runMigrationChecks = async () => {
+    if (!firebaseReady || !stagione) {
+      alert("Firebase non disponibile o stagione non selezionata.");
+      return;
+    }
+    setRunning(true);
+    try {
+      const movsSnap = await db.ref(`stagioni/${stagione}/movimenti`).once("value");
+      const movs = movsSnap.exists() ? Object.values(movsSnap.val()) : [];
+      const importati = movs.filter(m => m.importato);
+
+      // ===== Check apertura =====
+      const hasApertura = importati.some(m => m.apertura === true);
+
+      // ===== Check migration 3.13 =====
+      const contiSnap = await db.ref(`stagioni/${stagione}/conti`).once("value");
+      const contiVal = contiSnap.val() || {};
+      const has80 = Object.values(contiVal).some(c => c.codice === 80);
+      const hasStampante = Object.values(contiVal).some(c => c.codice === 78);
+      const hasTreppiede = Object.values(contiVal).some(c => c.codice === 79);
+
+      const cespitiSnap = await db.ref(`stagioni/${stagione}/cespiti`).once("value");
+      const cespitiVal = cespitiSnap.val() || {};
+      const cespitiList = Object.entries(cespitiVal).map(([k,c]) => ({...c, _key: k}));
+
+      const hasSpeakerNuovo = cespitiList.some(c =>
+        (c.conto || "").toUpperCase().includes("SPEAKER") && Math.abs((c.costo_storico || 0) - 2338.83) < 0.5
+      );
+      const hasMaterialeAggiornato = cespitiList.some(c =>
+        (c.conto || "").toUpperCase().includes("MATERIALE ALLENAMENTO") && Math.abs((c.costo_storico || 0) - 137.95) < 0.5
+      );
+      const hasStampanteCespite = cespitiList.some(c => (c.conto || "").toUpperCase().includes("STAMPANTE"));
+      const hasTreppiedeCespite = cespitiList.some(c => (c.conto || "").toUpperCase().includes("TREPPIEDE"));
+      const oldLavagnetta = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "LAVAGNETTA");
+      const oldTelecamera = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "TELECAMERA PER FUTSAL");
+      const oldCostiImpianto = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "COSTI IMPIANTO");
+
+      const rimborsiDaSpostare = Object.entries(movsSnap.val() || {}).filter(([k, m]) => {
+        if (m.contoPdC !== 36) return false;
+        if (m.tipo !== "uscita") return false;
+        const cat = (m.categoria || "").toUpperCase();
+        const desc = (m.descrizione || "").toUpperCase();
+        return cat.includes("RIMBORSO") || desc.includes("RIMBORSO") || desc.includes("RIMBORSI");
+      });
+
+      const lines = [];
+      if (!hasApertura) lines.push("• Inserire scrittura di APERTURA al 01/09/2025 (25 movimenti)");
+      if (!has80) lines.push("• Aggiungere conto 80 RIMBORSI SPESE SOCI");
+      if (!hasSpeakerNuovo) lines.push("• Aggiungere cespite SPEAKER nuovo 2.338,83 €");
+      if (!hasMaterialeAggiornato) lines.push("• Aggiornare MATERIALE ALLENAMENTO FUTSAL a 137,95 €");
+      if (hasStampante && !hasStampanteCespite) lines.push("• Aggiungere cespite STAMPANTE SCONTRINI 70 €");
+      if (hasTreppiede && !hasTreppiedeCespite) lines.push("• Aggiungere cespite TREPPIEDE 35 €");
+      if (oldLavagnetta) lines.push("• Rinominare LAVAGNETTA → LAVAGNETTA FUTSAL");
+      if (oldTelecamera) lines.push("• Rinominare TELECAMERA PER FUTSAL → TELECAMERA FUTSAL");
+      if (oldCostiImpianto) lines.push("• Rinominare COSTI IMPIANTO → COSTI DI IMPIANTO");
+      if (rimborsiDaSpostare.length > 0) lines.push(`• Riclassificare ${rimborsiDaSpostare.length} rimborsi spese (€${rimborsiDaSpostare.reduce((s,[,m])=>s+(m.importo||0),0).toFixed(2)}) da conto 36 a conto 80`);
+
+      if (lines.length === 0) {
+        alert("✓ Nessun disallineamento rilevato. Tutto è già aggiornato.");
+        setRunning(false);
+        return;
+      }
+
+      if (!confirm("Operazioni da eseguire:\n\n" + lines.join("\n") + "\n\nProcedere?")) {
+        setRunning(false);
+        return;
+      }
+
+      // ===== ESEGUI =====
+      // Apertura
+      if (!hasApertura) {
+        await db.ref(`stagioni/${stagione}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
+        const apertureObj = {};
+        APERTURA_MOVIMENTI.forEach((m, i) => {
+          apertureObj[`apertura_${String(i).padStart(4,'0')}`] = m;
+        });
+        await db.ref(`stagioni/${stagione}/movimenti`).update(apertureObj);
+      }
+
+      // Conto 80
+      if (!has80) {
+        await db.ref(`stagioni/${stagione}/conti/c80`).set({
+          codice: 80, nome: "RIMBORSI SPESE SOCI", eccedenza: "DARE", prospetto: "CE", categoria: "COSTI"
+        });
+      }
+
+      // Cespiti
+      if (!hasSpeakerNuovo) {
+        await db.ref(`stagioni/${stagione}/cespiti`).push({
+          conto: "SPEAKER", classe: "IMMOBILIZZAZIONI MATERIALI",
+          n_beni: 1, costo_unitario: 2338.83, anno_inizio: 2026,
+          costo_storico: 2338.83, aliquota: 0, quota_esercizio: 0, fondo_ammortamento: 0,
+        });
+      }
+      if (hasStampante && !hasStampanteCespite) {
+        await db.ref(`stagioni/${stagione}/cespiti`).push({
+          conto: "STAMPANTE SCONTRINI", classe: "IMMOBILIZZAZIONI MATERIALI",
+          n_beni: 1, costo_unitario: 70, anno_inizio: 2026,
+          costo_storico: 70, aliquota: 0, quota_esercizio: 0, fondo_ammortamento: 0,
+        });
+      }
+      if (hasTreppiede && !hasTreppiedeCespite) {
+        await db.ref(`stagioni/${stagione}/cespiti`).push({
+          conto: "TREPPIEDE", classe: "IMMOBILIZZAZIONI MATERIALI",
+          n_beni: 1, costo_unitario: 35, anno_inizio: 2026,
+          costo_storico: 35, aliquota: 0, quota_esercizio: 0, fondo_ammortamento: 0,
+        });
+      }
+      if (!hasMaterialeAggiornato) {
+        const matCesp = cespitiList.find(c => (c.conto || "").toUpperCase().includes("MATERIALE ALLENAMENTO"));
+        if (matCesp) {
+          await db.ref(`stagioni/${stagione}/cespiti/${matCesp._key}`).update({
+            costo_storico: 137.95, costo_unitario: 137.95, n_beni: 1,
+          });
+        }
+      }
+      if (oldLavagnetta) await db.ref(`stagioni/${stagione}/cespiti/${oldLavagnetta._key}`).update({ conto: "LAVAGNETTA FUTSAL" });
+      if (oldTelecamera) await db.ref(`stagioni/${stagione}/cespiti/${oldTelecamera._key}`).update({ conto: "TELECAMERA FUTSAL" });
+      if (oldCostiImpianto) await db.ref(`stagioni/${stagione}/cespiti/${oldCostiImpianto._key}`).update({ conto: "COSTI DI IMPIANTO" });
+
+      // Rimborsi → conto 80
+      for (const [movKey, m] of rimborsiDaSpostare) {
+        await db.ref(`stagioni/${stagione}/movimenti/${movKey}`).update({
+          contoPdC: 80, modificatoIl: new Date().toISOString()
+        });
+      }
+
+      alert("✓ Migration completata.\n\nLa pagina si ricarica per applicare i cambiamenti.");
+      window.location.reload();
+    } catch (e) {
+      console.error("Migration error:", e);
+      alert("Errore durante la migration: " + e.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div style={{marginTop:18, padding:"14px 18px", background:"#fef9e7", border:"1px solid #f0d860", borderRadius:10, fontSize:13}}>
+      <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:14, flexWrap:"wrap"}}>
+        <div>
+          <strong style={{color:"#7a5d00"}}>🔧 Manutenzione contabilità</strong>
+          <div style={{fontSize:12, color:"#7a5d00", marginTop:2}}>Verifica e applica eventuali aggiornamenti pendenti (cespiti, conti, riclassificazioni).</div>
+        </div>
+        <button className="btn" disabled={running} onClick={runMigrationChecks}
+                style={{background:"#f0d860", color:"#7a5d00", border:"1px solid #d4ba30", fontWeight:600}}>
+          {running ? "Verifica in corso..." : "Verifica e applica"}
+        </button>
       </div>
     </div>
   );
@@ -2919,24 +3080,23 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
   }, [contiMap]);
 
   // Matrice contoPdC × mese — calcolo saldo NETTO contabile (variazione partita doppia)
-  // Per ogni movimento determino se va in DARE o AVERE del conto P.d.C.
-  // Entrata su PdC: DARE liquidità / AVERE PdC → conto va in AVERE
-  // Uscita su PdC:  DARE PdC / AVERE liquidità → conto va in DARE
-  // Il segno "naturale" del conto determina come visualizzo:
-  //  - Conti DARE (costi, immobilizzazioni, crediti): saldo positivo = DARE - AVERE
-  //  - Conti AVERE (ricavi, debiti, PN): saldo positivo = AVERE - DARE
+  // Per ogni movimento determino se il conto P.d.C. va in DARE o AVERE:
+  //   Entrata + monetaria (liquidità):   DARE liquidità / AVERE PdC → PdC in AVERE
+  //   Entrata + non monetaria (apertura): DARE PdC / AVERE 60        → PdC in DARE
+  //   Uscita + monetaria (liquidità):    DARE PdC / AVERE liquidità  → PdC in DARE
+  //   Uscita + non monetaria (apertura): DARE 60 / AVERE PdC          → PdC in AVERE
+  // Poi visualizzo nel SEGNO NATURALE del conto (DARE per costi/imm/crediti, AVERE per ricavi/debiti/PN)
   const tabella = useMemo(() => {
-    const matrice = {}; // {contoPdC: {mese: variazione netta}}
-    const dettagli = {}; // {contoPdC: {mese: [movimenti]}}
+    const matrice = {};
+    const dettagli = {};
 
     movimenti.forEach(m => {
       if (!m.contoPdC) return;
       if (m.tipo !== "entrata" && m.tipo !== "uscita") return;
 
       // Filtro per vista
-      const segno = m.tipo;
-      if (vista === "uscite" && segno !== "uscita") return;
-      if (vista === "entrate" && segno !== "entrata") return;
+      if (vista === "uscite" && m.tipo !== "uscita") return;
+      if (vista === "entrate" && m.tipo !== "entrata") return;
 
       const cod = m.contoPdC;
       const mese = m.mese || "?";
@@ -2945,19 +3105,25 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
       if (!dettagli[cod]) dettagli[cod] = {};
       if (!dettagli[cod][mese]) dettagli[cod][mese] = [];
 
-      // Calcolo la variazione "in segno naturale del conto"
-      // Conti eccedenza DARE: entrata in AVERE = negativo, uscita in DARE = positivo
-      // Conti eccedenza AVERE: entrata in AVERE = positivo, uscita in DARE = negativo
-      const eccedenza = (conto?.eccedenza || "DARE").toUpperCase();
-      const isAvereNaturale = eccedenza.includes("AVERE") && !eccedenza.includes("DARE/AVERE");
-
-      let variazione;
+      // 1) Determino se il PdC va in DARE o AVERE
+      const hasLiq = !!m.contoLiquidita;
+      let inDare;
       if (m.tipo === "entrata") {
-        // entrata: il conto va in AVERE
-        variazione = isAvereNaturale ? m.importo : -m.importo;
+        inDare = !hasLiq; // monetaria → AVERE, non monetaria → DARE
       } else {
-        // uscita: il conto va in DARE
-        variazione = isAvereNaturale ? -m.importo : m.importo;
+        inDare = hasLiq;  // monetaria → DARE, non monetaria → AVERE
+      }
+
+      // 2) Calcolo la variazione nel "segno naturale del conto"
+      const ecc = (conto?.eccedenza || "DARE").toUpperCase();
+      const isAvereNat = ecc.includes("AVERE") && !ecc.includes("DARE/AVERE");
+      let variazione;
+      if (isAvereNat) {
+        // Conto AVERE naturale (debiti, ricavi, PN, fondi): in AVERE = positivo
+        variazione = inDare ? -m.importo : m.importo;
+      } else {
+        // Conto DARE naturale (costi, immobilizzazioni, crediti): in DARE = positivo
+        variazione = inDare ? m.importo : -m.importo;
       }
 
       matrice[cod][mese] = (matrice[cod][mese] || 0) + variazione;
@@ -5956,7 +6122,7 @@ function App() {
             <div className="empty-state">Caricamento dati…</div>
           ) : (
             <>
-              {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
+              {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} />}
               {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
