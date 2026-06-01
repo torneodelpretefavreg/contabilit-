@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.15.0";
+const APP_VERSION = "3.15.1";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1019,19 +1019,24 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
   const [descrizione, setDescrizione] = useState(mov?.descrizione || "");
 
   // Conti filtrati per tipo: in entrata vedo conti AVERE (ricavi/crediti), in uscita conti DARE (costi/imm)
+  // Se non monetario (= scrittura di rettifica/apertura/ammortamento), mostro TUTTI i conti perché serve flessibilità
   const contiPdCFiltrati = useMemo(() => {
+    // Se non c'è conto liquidità → movimento non monetario → mostro tutto
+    if (!contoLiquidita) {
+      return conti;
+    }
     if (tipo === "entrata") {
       return conti.filter(c =>
-        ["RICAVI", "CREDITI", "DEBITI", "PN", "COSTI/RICAVI", "CONTO TRANSITORIO"].includes(c.categoria)
+        ["RICAVI", "CREDITI", "DEBITI", "PN", "COSTI/RICAVI", "CONTO TRANSITORIO", "RETTIFICA ATTIVO"].includes(c.categoria)
       );
     }
     if (tipo === "uscita") {
       return conti.filter(c =>
-        ["COSTI", "IMM. MATERIALI", "IMM. IMMATERIALI", "DEBITI", "CREDITI", "COSTI/RICAVI", "CONTO TRANSITORIO"].includes(c.categoria)
+        ["COSTI", "IMM. MATERIALI", "IMM. IMMATERIALI", "DEBITI", "CREDITI", "COSTI/RICAVI", "CONTO TRANSITORIO", "RETTIFICA ATTIVO", "PN"].includes(c.categoria)
       );
     }
     return [];
-  }, [conti, tipo]);
+  }, [conti, tipo, contoLiquidita]);
 
   const submit = (e) => {
     e.preventDefault();
@@ -2252,9 +2257,9 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
               {(() => {
                 // Raggruppo per categoria
                 const ordineCat = [
-                  "LIQUIDITÀ", "CREDITI", "IMM. MATERIALI", "IMM. IMMATERIALI",
-                  "FONDI AMM.TO", "DEBITI", "PATRIMONIO NETTO",
-                  "RICAVI", "COSTI", "TRANSITORIO", "ALTRO"
+                  "DISP. LIQUIDE", "CREDITI", "IMM. MATERIALI", "IMM. IMMATERIALI",
+                  "RETTIFICA ATTIVO", "DEBITI", "PN",
+                  "RICAVI", "COSTI", "COSTI/RICAVI", "CONTO TRANSITORIO", "ALTRO"
                 ];
                 const gruppi = {};
                 contiConMovimenti.forEach(c => {
