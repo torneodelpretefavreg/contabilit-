@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.14.0";
+const APP_VERSION = "3.15.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2247,13 +2247,40 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
         <div>
           <div className="filters">
             <span className="label">Conto:</span>
-            <select value={contoMastrino} onChange={e => setContoMastrino(e.target.value)} style={{maxWidth:380}}>
+            <select value={contoMastrino} onChange={e => setContoMastrino(e.target.value)} style={{maxWidth:480}}>
               <option value="">— seleziona un conto —</option>
-              {contiConMovimenti.map(c => (
-                <option key={c.codice} value={c.codice}>
-                  {String(c.codice).padStart(2,"0")} · {c.nome.trim()} {c.categoria ? `[${c.categoria}]` : ""}
-                </option>
-              ))}
+              {(() => {
+                // Raggruppo per categoria
+                const ordineCat = [
+                  "LIQUIDITÀ", "CREDITI", "IMM. MATERIALI", "IMM. IMMATERIALI",
+                  "FONDI AMM.TO", "DEBITI", "PATRIMONIO NETTO",
+                  "RICAVI", "COSTI", "TRANSITORIO", "ALTRO"
+                ];
+                const gruppi = {};
+                contiConMovimenti.forEach(c => {
+                  const cat = c.categoria || "ALTRO";
+                  if (!gruppi[cat]) gruppi[cat] = [];
+                  gruppi[cat].push(c);
+                });
+                // Ordino categorie nell'ordine voluto, poi alfabetico per le residue
+                const categorieOrdinate = Object.keys(gruppi).sort((a, b) => {
+                  const ia = ordineCat.indexOf(a);
+                  const ib = ordineCat.indexOf(b);
+                  if (ia === -1 && ib === -1) return a.localeCompare(b);
+                  if (ia === -1) return 1;
+                  if (ib === -1) return -1;
+                  return ia - ib;
+                });
+                return categorieOrdinate.map(cat => (
+                  <optgroup key={cat} label={cat}>
+                    {gruppi[cat].map(c => (
+                      <option key={c.codice} value={c.codice}>
+                        {String(c.codice).padStart(2,"0")} · {c.nome.trim()}
+                      </option>
+                    ))}
+                  </optgroup>
+                ));
+              })()}
             </select>
           </div>
 
@@ -4772,6 +4799,416 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
 // ============================================================
 // PAGINA: CESPITI
 // ============================================================
+// ============================================================
+// PAGINA: PIANO DI AMMORTAMENTO
+// ============================================================
+function PageAmmortamenti({ cespiti }) {
+  const annoCorrente = new Date().getFullYear();
+  const [annoRiferimento, setAnnoRiferimento] = useState(2026);
+
+  // Calcolo piano ammortamento per ogni cespite
+  const piano = useMemo(() => {
+    return cespiti.map(c => {
+      const costo = Number(c.costo_storico) || 0;
+      const aliquota = Number(c.aliquota) || 0;
+      const annoInizio = Number(c.anno_inizio) || annoCorrente;
+      const fondoAttuale = Number(c.fondo_ammortamento) || 0;
+      const quotaAnnua = costo * aliquota;
+
+      // Calcolo durata teorica in anni
+      const durataTeorica = aliquota > 0 ? Math.ceil(1 / aliquota) : 0;
+      // Anni già ammortizzati (a partire dall'anno di inizio)
+      const anniDecorsi = annoRiferimento - annoInizio + 1;
+      // Fondo teorico (cumulato fino all'anno di riferimento)
+      const fondoTeorico = Math.min(costo, quotaAnnua * Math.max(0, anniDecorsi));
+      // Valore residuo
+      const valoreResiduo = Math.max(0, costo - fondoAttuale);
+      // Anni residui (con fondo attuale)
+      const anniResidui = quotaAnnua > 0 ? Math.ceil(valoreResiduo / quotaAnnua) : 0;
+      // Anno ultimo ammortamento
+      const annoUltimo = aliquota > 0 ? annoInizio + durataTeorica - 1 : null;
+      // Stato ammortamento
+      let stato = "—";
+      if (aliquota === 0) stato = "Aliquota non impostata";
+      else if (valoreResiduo <= 0.01) stato = "Completamente ammortizzato";
+      else if (anniDecorsi <= 0) stato = "Non ancora iniziato";
+      else if (annoRiferimento >= annoUltimo) stato = "Ultimo anno";
+      else stato = `In ammortamento (${anniResidui} anni residui)`;
+
+      return {
+        ...c,
+        quotaAnnua,
+        durataTeorica,
+        anniDecorsi,
+        fondoTeorico,
+        valoreResiduo,
+        anniResidui,
+        annoUltimo,
+        stato,
+        // Differenza tra fondo teorico e attuale (per evidenziare scostamenti)
+        scostamento: fondoAttuale - fondoTeorico,
+      };
+    });
+  }, [cespiti, annoRiferimento]);
+
+  // Totali
+  const tot = useMemo(() => {
+    return {
+      costo: piano.reduce((s,c) => s + (Number(c.costo_storico) || 0), 0),
+      quotaAnnua: piano.reduce((s,c) => s + c.quotaAnnua, 0),
+      fondoAttuale: piano.reduce((s,c) => s + (Number(c.fondo_ammortamento) || 0), 0),
+      fondoTeorico: piano.reduce((s,c) => s + c.fondoTeorico, 0),
+      valoreResiduo: piano.reduce((s,c) => s + c.valoreResiduo, 0),
+    };
+  }, [piano]);
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Piano di Ammortamento</h2>
+          <div className="sub">Calcolo automatico delle quote di ammortamento per ogni cespite</div>
+        </div>
+        <div className="filters" style={{marginLeft:"auto"}}>
+          <span className="label">Anno riferimento:</span>
+          <input type="number" value={annoRiferimento} onChange={e => setAnnoRiferimento(Number(e.target.value))}
+                 style={{maxWidth:100, padding:"6px 10px", border:"1px solid var(--rule)", borderRadius:6}}/>
+        </div>
+      </div>
+
+      {/* KPI */}
+      <div className="kpi-grid" style={{marginBottom:20}}>
+        <div className="kpi">
+          <div className="label">Totale costo storico</div>
+          <div className="value">{fmtEuro(tot.costo)}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Quota ammortamento annua</div>
+          <div className="value" style={{color:"var(--accent-ink)"}}>{fmtEuro(tot.quotaAnnua)}</div>
+          <div className="hint">somma quote tutti i cespiti</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Fondo ammortamento attuale</div>
+          <div className="value">{fmtEuro(tot.fondoAttuale)}</div>
+          <div className="hint">accumulato in libro</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Valore residuo</div>
+          <div className="value" style={{color:"var(--ok)"}}>{fmtEuro(tot.valoreResiduo)}</div>
+          <div className="hint">costo − fondo</div>
+        </div>
+      </div>
+
+      <div style={{padding:"12px 16px", background:"#fff8e7", border:"1px solid #f0d860", borderRadius:8, fontSize:13, marginBottom:16, color:"#7a5d00"}}>
+        <strong>💡 Come leggere.</strong> La <em>quota annua</em> è il costo × aliquota. Il <em>fondo teorico</em> è quanto dovresti aver ammortizzato fino all'anno di riferimento (quota × anni decorsi). Lo <em>scostamento</em> mostra la differenza con il fondo attuale: se è ≠ 0 significa che non hai registrato alcuni ammortamenti o ne hai registrati di troppo.
+      </div>
+
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Cespite</th>
+              <th className="num">Costo storico</th>
+              <th className="num">Aliquota</th>
+              <th className="num">Quota annua</th>
+              <th className="num">Anno inizio</th>
+              <th className="num">Durata</th>
+              <th className="num">Fondo attuale</th>
+              <th className="num">Fondo teorico</th>
+              <th className="num">Scostamento</th>
+              <th className="num">Valore residuo</th>
+              <th>Stato</th>
+            </tr>
+          </thead>
+          <tbody>
+            {piano.map((c, i) => (
+              <tr key={c._key || i}>
+                <td style={{fontWeight:500}}>{c.conto}</td>
+                <td className="num">{fmt(c.costo_storico)}</td>
+                <td className="num">{c.aliquota ? (c.aliquota * 100).toFixed(0) + "%" : "—"}</td>
+                <td className="num" style={{fontWeight:600, color:"var(--accent-ink)"}}>{fmt(c.quotaAnnua)}</td>
+                <td className="num">{c.anno_inizio || "—"}</td>
+                <td className="num">{c.durataTeorica > 0 ? c.durataTeorica + " anni" : "—"}</td>
+                <td className="num">{fmt(c.fondo_ammortamento)}</td>
+                <td className="num" style={{color:"var(--ink-3)"}}>{fmt(c.fondoTeorico)}</td>
+                <td className="num" style={{color: Math.abs(c.scostamento) > 0.5 ? "var(--neg)" : "var(--ink-3)", fontWeight: Math.abs(c.scostamento) > 0.5 ? 600 : 400}}>
+                  {c.scostamento > 0 ? "+" : ""}{fmt(c.scostamento)}
+                </td>
+                <td className="num" style={{fontWeight:600}}>{fmt(c.valoreResiduo)}</td>
+                <td style={{fontSize:11.5}}>
+                  <span className="pill" style={{
+                    background: c.stato.includes("Completamente") ? "#e8f5e9" :
+                                c.stato.includes("Ultimo") ? "#fff3e0" :
+                                c.stato.includes("In ammortamento") ? "var(--accent-soft)" : "var(--panel-2)",
+                    color: c.stato.includes("Completamente") ? "#1b5e20" :
+                           c.stato.includes("Ultimo") ? "#e65100" :
+                           c.stato.includes("In ammortamento") ? "var(--accent-ink)" : "var(--ink-3)"
+                  }}>{c.stato}</span>
+                </td>
+              </tr>
+            ))}
+            <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
+              <td style={{fontFamily:"'Fraunces',serif"}}>TOTALI</td>
+              <td className="num">{fmt(tot.costo)}</td>
+              <td></td>
+              <td className="num">{fmt(tot.quotaAnnua)}</td>
+              <td colSpan={2}></td>
+              <td className="num">{fmt(tot.fondoAttuale)}</td>
+              <td className="num">{fmt(tot.fondoTeorico)}</td>
+              <td className="num" style={{color: Math.abs(tot.fondoAttuale - tot.fondoTeorico) > 0.5 ? "var(--neg)" : "var(--ink-3)"}}>
+                {(tot.fondoAttuale - tot.fondoTeorico) > 0 ? "+" : ""}{fmt(tot.fondoAttuale - tot.fondoTeorico)}
+              </td>
+              <td className="num">{fmt(tot.valoreResiduo)}</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// PAGINA: COMPOSIZIONE CASSA CONTANTI
+// ============================================================
+function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
+  // Tagli € (banconote + monete)
+  const TAGLI = [
+    { val: 500, tipo: "banconota" },
+    { val: 200, tipo: "banconota" },
+    { val: 100, tipo: "banconota" },
+    { val: 50, tipo: "banconota" },
+    { val: 20, tipo: "banconota" },
+    { val: 10, tipo: "banconota" },
+    { val: 5, tipo: "banconota" },
+    { val: 2, tipo: "moneta" },
+    { val: 1, tipo: "moneta" },
+    { val: 0.50, tipo: "moneta" },
+    { val: 0.20, tipo: "moneta" },
+    { val: 0.10, tipo: "moneta" },
+    { val: 0.05, tipo: "moneta" },
+    { val: 0.02, tipo: "moneta" },
+    { val: 0.01, tipo: "moneta" },
+  ];
+
+  // Stato locale: quanti pezzi per ogni taglio
+  const [quantita, setQuantita] = useState({});
+  const [savedComposizione, setSavedComposizione] = useState(null);
+  const [dataConta, setDataConta] = useState(new Date().toISOString().slice(0, 10));
+
+  // Carico composizione salvata da Firebase
+  useEffect(() => {
+    if (!firebaseReady || !stagione) return;
+    db.ref(`stagioni/${stagione}/composizioneCassa`).once("value").then(snap => {
+      if (snap.exists()) {
+        const v = snap.val();
+        setQuantita(v.quantita || {});
+        setDataConta(v.data || new Date().toISOString().slice(0, 10));
+        setSavedComposizione(v);
+      }
+    });
+  }, [stagione]);
+
+  // Calcolo saldo CASSA contabile (cod 3)
+  const saldoCassaContabile = useMemo(() => {
+    let s = saldiIniziali[3] || 0;
+    movimenti.forEach(m => {
+      if (m.contoLiquidita === 3) {
+        if (m.tipo === "entrata") s += m.importo;
+        else if (m.tipo === "uscita") s -= m.importo;
+        else if (m.tipo === "giroconto") s -= m.importo;
+      } else if (m.contoLiquiditaDest === 3 && m.tipo === "giroconto") {
+        s += m.importo;
+      }
+    });
+    return s;
+  }, [movimenti, saldiIniziali]);
+
+  // Totale composizione fisica
+  const totaleFisico = useMemo(() => {
+    return TAGLI.reduce((s, t) => s + (Number(quantita[t.val]) || 0) * t.val, 0);
+  }, [quantita]);
+
+  const totaleBanconote = useMemo(() => {
+    return TAGLI.filter(t => t.tipo === "banconota").reduce((s, t) => s + (Number(quantita[t.val]) || 0) * t.val, 0);
+  }, [quantita]);
+
+  const totaleMonete = useMemo(() => {
+    return TAGLI.filter(t => t.tipo === "moneta").reduce((s, t) => s + (Number(quantita[t.val]) || 0) * t.val, 0);
+  }, [quantita]);
+
+  const scostamento = totaleFisico - saldoCassaContabile;
+
+  const setQ = (val, n) => {
+    setQuantita(prev => ({...prev, [val]: n}));
+  };
+
+  const azzera = () => {
+    if (!confirm("Azzerare tutti i conteggi?")) return;
+    setQuantita({});
+  };
+
+  const salva = async () => {
+    if (!firebaseReady) return alert("Firebase non disponibile");
+    try {
+      const data = {
+        quantita,
+        data: dataConta,
+        totale: totaleFisico,
+        saldoContabile: saldoCassaContabile,
+        scostamento,
+        salvatoIl: new Date().toISOString(),
+      };
+      await db.ref(`stagioni/${stagione}/composizioneCassa`).set(data);
+      setSavedComposizione(data);
+      onToast("Composizione cassa salvata");
+    } catch (e) {
+      alert("Errore: " + e.message);
+    }
+  };
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Composizione Cassa Contanti</h2>
+          <div className="sub">Conta fisica del contante per quadrare con il saldo contabile CASSA</div>
+        </div>
+      </div>
+
+      {/* KPI top */}
+      <div className="kpi-grid" style={{marginBottom:20}}>
+        <div className="kpi">
+          <div className="label">Saldo CASSA contabile</div>
+          <div className="value">{fmtEuro(saldoCassaContabile)}</div>
+          <div className="hint">da app (conto 3)</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Totale conta fisica</div>
+          <div className="value" style={{color:"var(--accent-ink)"}}>{fmtEuro(totaleFisico)}</div>
+          <div className="hint">banconote + monete</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Scostamento</div>
+          <div className="value" style={{color: Math.abs(scostamento) < 0.01 ? "var(--ok)" : "var(--neg)"}}>
+            {scostamento > 0 ? "+" : ""}{fmtEuro(scostamento)}
+          </div>
+          <div className="hint">{Math.abs(scostamento) < 0.01 ? "✓ in quadratura" : "non quadra"}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Data conta</div>
+          <input type="date" value={dataConta} onChange={e => setDataConta(e.target.value)}
+                 style={{width:"100%", padding:"6px 8px", border:"1px solid var(--rule)", borderRadius:6, fontSize:14, marginTop:4}}/>
+        </div>
+      </div>
+
+      <div className="card-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:20}}>
+        {/* BANCONOTE */}
+        <div className="card">
+          <h3 style={{margin:"0 0 12px"}}>💴 Banconote</h3>
+          <table className="tbl" style={{margin:0}}>
+            <thead>
+              <tr>
+                <th className="num" style={{width:90}}>Taglio</th>
+                <th className="num" style={{width:90}}>Pezzi</th>
+                <th className="num">Totale</th>
+              </tr>
+            </thead>
+            <tbody>
+              {TAGLI.filter(t => t.tipo === "banconota").map(t => {
+                const n = Number(quantita[t.val]) || 0;
+                const tot = n * t.val;
+                return (
+                  <tr key={t.val}>
+                    <td className="num" style={{fontWeight:600}}>{fmtEuro(t.val)}</td>
+                    <td className="num">
+                      <input type="number" inputMode="numeric" min="0" value={n || ""}
+                             onChange={e => setQ(t.val, Number(e.target.value))}
+                             placeholder="0"
+                             style={{width:70, padding:"4px 8px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right"}}/>
+                    </td>
+                    <td className="num" style={{color: tot > 0 ? "var(--accent-ink)" : "var(--ink-3)"}}>
+                      {tot > 0 ? fmt(tot) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+              <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
+                <td colSpan={2} style={{fontFamily:"'Fraunces',serif"}}>SUBTOTALE</td>
+                <td className="num">{fmt(totaleBanconote)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* MONETE */}
+        <div className="card">
+          <h3 style={{margin:"0 0 12px"}}>🪙 Monete</h3>
+          <table className="tbl" style={{margin:0}}>
+            <thead>
+              <tr>
+                <th className="num" style={{width:90}}>Taglio</th>
+                <th className="num" style={{width:90}}>Pezzi</th>
+                <th className="num">Totale</th>
+              </tr>
+            </thead>
+            <tbody>
+              {TAGLI.filter(t => t.tipo === "moneta").map(t => {
+                const n = Number(quantita[t.val]) || 0;
+                const tot = n * t.val;
+                return (
+                  <tr key={t.val}>
+                    <td className="num" style={{fontWeight:600}}>{fmtEuro(t.val)}</td>
+                    <td className="num">
+                      <input type="number" inputMode="numeric" min="0" value={n || ""}
+                             onChange={e => setQ(t.val, Number(e.target.value))}
+                             placeholder="0"
+                             style={{width:70, padding:"4px 8px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right"}}/>
+                    </td>
+                    <td className="num" style={{color: tot > 0 ? "var(--accent-ink)" : "var(--ink-3)"}}>
+                      {tot > 0 ? fmt(tot) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+              <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
+                <td colSpan={2} style={{fontFamily:"'Fraunces',serif"}}>SUBTOTALE</td>
+                <td className="num">{fmt(totaleMonete)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Azioni */}
+      <div style={{marginTop:20, display:"flex", gap:10, justifyContent:"flex-end", flexWrap:"wrap"}}>
+        <button className="btn ghost" onClick={azzera}>Azzera conteggi</button>
+        <button className="btn accent" onClick={salva}>Salva composizione</button>
+      </div>
+
+      {savedComposizione && savedComposizione.salvatoIl && (
+        <div style={{marginTop:16, padding:"10px 14px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12.5, color:"var(--ink-3)"}}>
+          Ultima conta salvata: <strong>{new Date(savedComposizione.salvatoIl).toLocaleString("it-IT")}</strong> · data conta {savedComposizione.data} · totale {fmtEuro(savedComposizione.totale)}
+        </div>
+      )}
+
+      {Math.abs(scostamento) > 0.01 && totaleFisico > 0 && (
+        <div style={{marginTop:16, padding:"12px 16px", background:"#fee", border:"1px solid #fcc", borderRadius:8, fontSize:13}}>
+          <strong style={{color:"var(--neg)"}}>⚠️ Scostamento di {fmtEuro(scostamento)}.</strong> Verifica:
+          <ul style={{margin:"6px 0 0 18px", color:"var(--ink-2)"}}>
+            <li>Hai contato tutti i tagli?</li>
+            <li>Hai registrato tutte le entrate/uscite di cassa nell'app?</li>
+            <li>Ci sono prelievi o versamenti tesoriere non registrati?</li>
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// PAGINA: CESPITI
+// ============================================================
 function PageCespiti({ cespiti, stagione, onToast }) {
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -6113,6 +6550,8 @@ function App() {
 
           <div className="section-label">Gestione</div>
           <button className={"navlink " + (page==="cespiti"?"active":"")} onClick={() => setPage("cespiti")}><span className="ico">▣</span> Cespiti</button>
+          <button className={"navlink " + (page==="ammortamenti"?"active":"")} onClick={() => setPage("ammortamenti")}><span className="ico">⊟</span> Ammortamenti</button>
+          <button className={"navlink " + (page==="cassa"?"active":"")} onClick={() => setPage("cassa")}><span className="ico">💵</span> Composizione Cassa</button>
           <button className={"navlink " + (page==="torneo"?"active":"")} onClick={() => setPage("torneo")}><span className="ico">★</span> Torneo</button>
         </nav>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}></div>}
@@ -6135,6 +6574,8 @@ function App() {
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
+              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} />}
+              {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiIniziali} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
             </>
           )}
