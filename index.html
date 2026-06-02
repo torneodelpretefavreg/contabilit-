@@ -795,7 +795,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.15.1";
+const APP_VERSION = "3.16.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1018,6 +1018,33 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
   const [importo, setImporto] = useState(mov?.importo || "");
   const [descrizione, setDescrizione] = useState(mov?.descrizione || "");
 
+  // === Scrittura libera multi-riga ===
+  const [righe, setRighe] = useState([
+    { conto: "", dare: "", avere: "" },
+    { conto: "", dare: "", avere: "" },
+  ]);
+
+  const totDare = useMemo(() => righe.reduce((s,r) => s + (Number(r.dare) || 0), 0), [righe]);
+  const totAvere = useMemo(() => righe.reduce((s,r) => s + (Number(r.avere) || 0), 0), [righe]);
+  const diff = totDare - totAvere;
+  const quadra = Math.abs(diff) < 0.005 && totDare > 0;
+
+  const addRiga = () => setRighe([...righe, { conto: "", dare: "", avere: "" }]);
+  const removeRiga = (i) => {
+    if (righe.length <= 2) return alert("Una scrittura deve avere almeno 2 righe");
+    setRighe(righe.filter((_,idx) => idx !== i));
+  };
+  const updateRiga = (i, field, value) => {
+    setRighe(righe.map((r, idx) => {
+      if (idx !== i) return r;
+      const nr = {...r, [field]: value};
+      // Auto-clear dell'opposto: se inserisco dare, azzero avere e viceversa
+      if (field === "dare" && value !== "") nr.avere = "";
+      if (field === "avere" && value !== "") nr.dare = "";
+      return nr;
+    }));
+  };
+
   // Conti filtrati per tipo: in entrata vedo conti AVERE (ricavi/crediti), in uscita conti DARE (costi/imm)
   // Se non monetario (= scrittura di rettifica/apertura/ammortamento), mostro TUTTI i conti perché serve flessibilità
   const contiPdCFiltrati = useMemo(() => {
@@ -1040,6 +1067,50 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
 
   const submit = (e) => {
     e.preventDefault();
+
+    // === Scrittura libera composta ===
+    if (tipo === "composta") {
+      // Validazioni
+      const righeValide = righe.filter(r => r.conto && (Number(r.dare) > 0 || Number(r.avere) > 0));
+      if (righeValide.length < 2) return alert("Servono almeno 2 righe valide");
+      if (!quadra) return alert(`La scrittura non quadra: DARE ${totDare.toFixed(2)} ≠ AVERE ${totAvere.toFixed(2)} (Δ ${diff.toFixed(2)})`);
+      if (!descrizione.trim()) return alert("Aggiungi una descrizione alla scrittura");
+
+      // Genero scritturaId unico per legare le righe
+      const scritturaId = "scr_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
+
+      // Costruisco N "movimenti" — uno per riga
+      // Convenzione:
+      //   Riga in DARE → tipo "uscita" non monetaria su quel conto (DARE PdC / AVERE bilancio)
+      //   Riga in AVERE → tipo "entrata" non monetaria su quel conto (DARE bilancio / AVERE PdC)
+      // MA poiché sono in scrittura composta, il libro giornale dovrà raggruppare per scritturaId
+      const movimenti = righeValide.map(r => {
+        const isDare = Number(r.dare) > 0;
+        const importo = isDare ? Number(r.dare) : Number(r.avere);
+        return {
+          tipo: isDare ? "uscita" : "entrata",
+          data,
+          contoLiquidita: null,
+          contoLiquiditaDest: null,
+          contoPdC: Number(r.conto),
+          categoria: categoria || "SCRITTURA COMPOSTA",
+          bu: bu || "GENERAL",
+          importo,
+          descrizione: descrizione || "",
+          mese: meseDaData(data),
+          nonMonetario: true,
+          scritturaComposta: true,
+          scritturaId,
+          dare: isDare ? importo : 0,
+          avere: isDare ? 0 : importo,
+          creatoIl: new Date().toISOString(),
+          modificatoIl: new Date().toISOString()
+        };
+      });
+      onSave({ composta: true, movimenti });
+      return;
+    }
+
     if (!importo || Number(importo) <= 0) return alert("Importo non valido");
     if (tipo === "giroconto") {
       if (!contoLiquidita) return alert("Seleziona conto liquidità origine");
@@ -1047,7 +1118,6 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
       if (contoLiquidita === contoLiquiditaDest) return alert("I conti devono essere diversi");
     } else {
       if (!contoPdC) return alert("Seleziona conto del Piano dei Conti");
-      // contoLiquidita opzionale: se vuoto = movimento non monetario (ammortamento, sopravvenienza ecc.)
     }
 
     const nonMonetario = tipo !== "giroconto" && !contoLiquidita;
@@ -1078,12 +1148,144 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
           <button type="button" className={tipo === "entrata" ? "active entrata" : ""} onClick={() => setTipo("entrata")}>↓ Entrata</button>
           <button type="button" className={tipo === "uscita" ? "active uscita" : ""} onClick={() => setTipo("uscita")}>↑ Uscita</button>
           <button type="button" className={tipo === "giroconto" ? "active giroconto" : ""} onClick={() => setTipo("giroconto")}>⇄ Giroconto</button>
+          <button type="button" className={tipo === "composta" ? "active" : ""}
+                  style={tipo === "composta" ? {background:"#7c3aed", color:"white", borderColor:"#7c3aed"} : {}}
+                  onClick={() => setTipo("composta")}>📓 Scrittura libera</button>
         </div>
       </div>
       <div className="form-row">
         <label>Data <span className="req">*</span></label>
         <input type="date" value={data} onChange={e => setData(e.target.value)} required />
       </div>
+
+      {tipo === "composta" ? (
+        <>
+          <div className="form-row">
+            <label>Descrizione <span className="req">*</span></label>
+            <textarea value={descrizione} onChange={e => setDescrizione(e.target.value)}
+                      placeholder="Es: 'Fattura Ghidoni n.45 con IVA al 22%' o 'Distribuzione utile esercizio 24-25'"
+                      style={{minHeight:60}} required />
+          </div>
+          <div className="form-row">
+            <label>BU (opzionale)</label>
+            <select value={bu} onChange={e => setBu(e.target.value)}>
+              <option value="">— nessuna —</option>
+              <option value="GENERAL">GENERAL</option>
+              <option value="FUTSAL">FUTSAL</option>
+              <option value="TDP">TDP</option>
+              <option value="FESTIVAL FABBRICO">FESTIVAL FABBRICO</option>
+            </select>
+          </div>
+
+          <div style={{marginTop:8, padding:"12px 14px", background:"#f5f0ff", border:"1px solid #d4c4f7", borderRadius:8, fontSize:12.5, color:"#5b3aa3"}}>
+            <strong>📓 Scrittura in partita doppia.</strong> Inserisci almeno 2 righe. Per ogni riga: scegli il conto e indica l'importo in DARE oppure in AVERE (non entrambi). Il totale DARE deve coincidere con il totale AVERE.
+          </div>
+
+          <div className="form-row">
+            <label>Righe della scrittura <span className="req">*</span></label>
+            <div style={{border:"1px solid var(--rule)", borderRadius:8, overflow:"hidden"}}>
+              <table className="tbl" style={{margin:0, fontSize:13}}>
+                <thead>
+                  <tr style={{background:"#f5f0ff"}}>
+                    <th style={{width:"50%"}}>Conto</th>
+                    <th className="num" style={{width:"22%"}}>Dare €</th>
+                    <th className="num" style={{width:"22%"}}>Avere €</th>
+                    <th style={{width:40}}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {righe.map((r, i) => (
+                    <tr key={i}>
+                      <td>
+                        <select value={r.conto} onChange={e => updateRiga(i, "conto", e.target.value)}
+                                style={{width:"100%", padding:"5px 8px", border:"1px solid var(--rule)", borderRadius:4, fontSize:13}}>
+                          <option value="">— seleziona conto —</option>
+                          {(() => {
+                            const ordineCat = ["DISP. LIQUIDE", "CREDITI", "IMM. MATERIALI", "IMM. IMMATERIALI",
+                              "RETTIFICA ATTIVO", "DEBITI", "PN", "RICAVI", "COSTI", "COSTI/RICAVI", "CONTO TRANSITORIO"];
+                            const gruppi = {};
+                            conti.forEach(c => {
+                              const cat = c.categoria || "ALTRO";
+                              if (!gruppi[cat]) gruppi[cat] = [];
+                              gruppi[cat].push(c);
+                            });
+                            const categorieOrdinate = Object.keys(gruppi).sort((a, b) => {
+                              const ia = ordineCat.indexOf(a);
+                              const ib = ordineCat.indexOf(b);
+                              if (ia === -1 && ib === -1) return a.localeCompare(b);
+                              if (ia === -1) return 1;
+                              if (ib === -1) return -1;
+                              return ia - ib;
+                            });
+                            return categorieOrdinate.map(cat => (
+                              <optgroup key={cat} label={cat}>
+                                {gruppi[cat].sort((a,b) => a.codice - b.codice).map(c => (
+                                  <option key={c.codice} value={c.codice}>
+                                    {String(c.codice).padStart(2,"0")} · {c.nome.trim()}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ));
+                          })()}
+                        </select>
+                      </td>
+                      <td className="num">
+                        <input type="number" inputMode="decimal" step="0.01" min="0" value={r.dare}
+                               onChange={e => updateRiga(i, "dare", e.target.value)}
+                               placeholder="—"
+                               style={{width:"100%", padding:"5px 8px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right", fontSize:13,
+                                       background: Number(r.dare) > 0 ? "#fef3c7" : "white"}}/>
+                      </td>
+                      <td className="num">
+                        <input type="number" inputMode="decimal" step="0.01" min="0" value={r.avere}
+                               onChange={e => updateRiga(i, "avere", e.target.value)}
+                               placeholder="—"
+                               style={{width:"100%", padding:"5px 8px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right", fontSize:13,
+                                       background: Number(r.avere) > 0 ? "#dbeafe" : "white"}}/>
+                      </td>
+                      <td>
+                        <button type="button" onClick={() => removeRiga(i)}
+                                disabled={righe.length <= 2}
+                                style={{background:"transparent", border:"none", color:"var(--neg)", cursor:righe.length <= 2 ? "not-allowed":"pointer", opacity: righe.length <= 2 ? 0.3 : 1, fontSize:16}}
+                                title="Rimuovi riga">✕</button>
+                      </td>
+                    </tr>
+                  ))}
+                  <tr style={{background:"var(--panel-2)", fontWeight:700}}>
+                    <td style={{paddingLeft:14}}>
+                      <button type="button" onClick={addRiga}
+                              style={{background:"transparent", border:"1px dashed var(--accent-ink)", color:"var(--accent-ink)", padding:"3px 10px", borderRadius:4, cursor:"pointer", fontSize:12}}>
+                        + Aggiungi riga
+                      </button>
+                    </td>
+                    <td className="num">{fmt(totDare)}</td>
+                    <td className="num">{fmt(totAvere)}</td>
+                    <td></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div style={{marginTop:10, padding:"8px 12px",
+                         background: quadra ? "#dcfce7" : Math.abs(diff) < 0.005 ? "var(--panel-2)" : "#fee2e2",
+                         color: quadra ? "#166534" : Math.abs(diff) < 0.005 ? "var(--ink-3)" : "#991b1b",
+                         border: "1px solid " + (quadra ? "#86efac" : Math.abs(diff) < 0.005 ? "var(--rule)" : "#fca5a5"),
+                         borderRadius: 6, fontSize: 13, fontWeight: 600}}>
+              {totDare === 0 && totAvere === 0 ? "Inserisci gli importi nelle righe" :
+               quadra ? `✓ Scrittura quadrata: DARE = AVERE = ${fmt(totDare)} €` :
+               `✗ Sbilancio: DARE ${fmt(totDare)} − AVERE ${fmt(totAvere)} = ${diff > 0 ? "+" : ""}${fmt(diff)} €`}
+            </div>
+          </div>
+
+          <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+            <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
+            <button type="submit" className="btn accent" disabled={!quadra}
+                    style={!quadra ? {opacity:0.5, cursor:"not-allowed"} : {}}>
+              Salva scrittura
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
       <div className="form-row">
         <label>{tipo === "giroconto" ? "Conto origine" : "Conto liquidità"} {tipo === "giroconto" ? <span className="req">*</span> : <span style={{color:"var(--ink-3)",fontSize:11}}>(opzionale)</span>}</label>
         <select value={contoLiquidita} onChange={e => setContoLiquidita(e.target.value)} required={tipo === "giroconto"}>
@@ -1160,6 +1362,8 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
         <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
         <button type="submit" className="btn accent">Salva movimento</button>
       </div>
+        </>
+      )}
     </form>
   );
 }
@@ -1445,6 +1649,22 @@ function PageNuovo({ conti, stagione, onSaved, onCancel }) {
   const handleSave = async (payload) => {
     if (!firebaseReady) return alert("Firebase non configurato");
     try {
+      // === Caso scrittura composta: salvo N movimenti in batch ===
+      if (payload.composta && Array.isArray(payload.movimenti)) {
+        const updates = {};
+        payload.movimenti.forEach((m, i) => {
+          // Pulisco undefined
+          const dati = {...m};
+          Object.keys(dati).forEach(k => { if (dati[k] === undefined) dati[k] = null; });
+          const key = db.ref(`stagioni/${stagione}/movimenti`).push().key;
+          updates[key] = dati;
+        });
+        await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+        onSaved(`Scrittura composta registrata (${payload.movimenti.length} righe)`);
+        return;
+      }
+
+      // === Caso movimento semplice ===
       // Pulisco undefined (Firebase li rifiuta)
       const dati = {...payload};
       Object.keys(dati).forEach(k => { if (dati[k] === undefined) dati[k] = null; });
@@ -1463,7 +1683,7 @@ function PageNuovo({ conti, stagione, onSaved, onCancel }) {
           n_beni: 1,
           anno_inizio: payload.data ? new Date(payload.data).getFullYear() : new Date().getFullYear(),
           costo_storico: payload.importo,
-          aliquota: 0.10, // default 10%
+          aliquota: 0.10,
           quota_esercizio: 0,
           fondo_ammortamento: 0,
           descrizione_origine: payload.descrizione || "",
@@ -1999,7 +2219,47 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
   }
 
   // Per ogni movimento → scrittura partita doppia
+  // PRIMA: raggruppo i movimenti che fanno parte di una scrittura composta
+  const composteMap = {};
+  const movSemplici = [];
   movimenti.forEach(m => {
+    if (m.scritturaComposta && m.scritturaId) {
+      if (!composteMap[m.scritturaId]) composteMap[m.scritturaId] = [];
+      composteMap[m.scritturaId].push(m);
+    } else {
+      movSemplici.push(m);
+    }
+  });
+
+  // Emetto scritture composte come UN'UNICA scrittura con N righe
+  Object.entries(composteMap).forEach(([scritturaId, righeMov]) => {
+    if (righeMov.length === 0) return;
+    const primo = righeMov[0];
+    const righeOrdinate = [...righeMov].sort((a, b) => {
+      // Dare prima, poi Avere; entro ognuno per codice conto
+      const aDare = (a.dare || 0) > 0;
+      const bDare = (b.dare || 0) > 0;
+      if (aDare !== bDare) return aDare ? -1 : 1;
+      return (a.contoPdC || 0) - (b.contoPdC || 0);
+    });
+    scritture.push({
+      data: primo.data,
+      descrizione: primo.descrizione || "Scrittura composta",
+      righe: righeOrdinate.map(r => ({
+        codice: r.contoPdC,
+        nome: contiMap[r.contoPdC]?.nome || "?",
+        dare: r.dare || 0,
+        avere: r.avere || 0,
+      })),
+      auto: false,
+      origine: "composta",
+      scritturaId,
+      composta: true,
+      nonMonetario: true,
+    });
+  });
+
+  movSemplici.forEach(m => {
     const liq = m.contoLiquidita ? contiMap[m.contoLiquidita] : null;
     // Se non c'è conto liquidità e non è un giroconto: scrittura "non monetaria"
     // serve almeno un secondo conto. Per ora usiamo categoria → conto di contropartita generico
@@ -2232,11 +2492,20 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
               {scritture.map((s, idx) => (
                 <React.Fragment key={idx}>
                   {s.righe.map((r, ri) => (
-                    <tr key={`${idx}-${ri}`} style={ri === 0 ? {borderTop:"2px solid var(--rule-2)"} : {}}>
+                    <tr key={`${idx}-${ri}`} style={ri === 0 ? {borderTop: s.composta ? "2px solid #7c3aed" : "2px solid var(--rule-2)"} : {}}>
                       <td>{ri === 0 ? fmtDate(s.data) : ""}</td>
                       <td className="mono" style={{fontWeight:600}}>{String(r.codice).padStart(2,"0")}</td>
                       <td>{r.nome.trim()}</td>
-                      <td>{ri === 0 ? s.descrizione : ""}</td>
+                      <td>
+                        {ri === 0 && (
+                          <>
+                            {s.descrizione}
+                            {s.composta && (
+                              <span style={{marginLeft:8, padding:"2px 6px", background:"#f5f0ff", color:"#7c3aed", borderRadius:4, fontSize:10.5, fontWeight:600}}>📓 composta</span>
+                            )}
+                          </>
+                        )}
+                      </td>
                       <td className="num">{r.dare > 0 ? fmt(r.dare) : ""}</td>
                       <td className="num">{r.avere > 0 ? fmt(r.avere) : ""}</td>
                     </tr>
@@ -3138,12 +3407,17 @@ function PagePivotConti({ conti, movimenti, saldiIniziali }) {
       if (!dettagli[cod][mese]) dettagli[cod][mese] = [];
 
       // 1) Determino se il PdC va in DARE o AVERE
-      const hasLiq = !!m.contoLiquidita;
       let inDare;
-      if (m.tipo === "entrata") {
-        inDare = !hasLiq; // monetaria → AVERE, non monetaria → DARE
+      if (m.scritturaComposta && (m.dare > 0 || m.avere > 0)) {
+        // Per scritture composte uso direttamente i campi dare/avere espliciti
+        inDare = (m.dare || 0) > 0;
       } else {
-        inDare = hasLiq;  // monetaria → DARE, non monetaria → AVERE
+        const hasLiq = !!m.contoLiquidita;
+        if (m.tipo === "entrata") {
+          inDare = !hasLiq; // monetaria → AVERE, non monetaria → DARE
+        } else {
+          inDare = hasLiq;  // monetaria → DARE, non monetaria → AVERE
+        }
       }
 
       // 2) Calcolo la variazione nel "segno naturale del conto"
