@@ -2214,7 +2214,8 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
       descrizione: "Riapertura saldi iniziali",
       righe: righeApertura,
       auto: true,
-      origine: "apertura"
+      origine: "apertura",
+      bu: null, // aggregato di più BU: non filtrabile per singola BU
     });
   }
 
@@ -2256,6 +2257,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
       scritturaId,
       composta: true,
       nonMonetario: true,
+      bu: primo.bu || "GENERAL",
     });
   });
 
@@ -2277,7 +2279,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
             { codice: m.contoPdC, nome: contiMap[m.contoPdC]?.nome || "?", dare: m.importo, avere: 0 },
             { codice: ctrCodice, nome: ctrNome, dare: 0, avere: m.importo },
           ],
-          auto: true, origine: m._id || "mov", movId: m._id, nonMonetario: true, apertura: m.apertura,
+          auto: true, origine: m._id || "mov", movId: m._id, nonMonetario: true, apertura: m.apertura, bu: m.bu || "GENERAL",
         });
       } else {
         const pdc = contiMap[m.contoPdC];
@@ -2288,7 +2290,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
             { codice: m.contoLiquidita, nome: liq.nome || "?", dare: m.importo, avere: 0 },
             { codice: m.contoPdC, nome: pdc?.nome || "?", dare: 0, avere: m.importo },
           ],
-          auto: true, origine: m._id || "mov", movId: m._id,
+          auto: true, origine: m._id || "mov", movId: m._id, bu: m.bu || "GENERAL",
         });
       }
     } else if (m.tipo === "uscita" && m.contoPdC) {
@@ -2313,7 +2315,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
             { codice: contropartitaCod, nome: contropartitaNome, dare: m.importo, avere: 0 },
             { codice: m.contoPdC, nome: contiMap[m.contoPdC]?.nome || "?", dare: 0, avere: m.importo },
           ],
-          auto: true, origine: m._id || "mov", movId: m._id, nonMonetario: true, apertura: m.apertura,
+          auto: true, origine: m._id || "mov", movId: m._id, nonMonetario: true, apertura: m.apertura, bu: m.bu || "GENERAL",
         });
       } else {
         const pdc = contiMap[m.contoPdC];
@@ -2324,7 +2326,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
             { codice: m.contoPdC, nome: pdc?.nome || "?", dare: m.importo, avere: 0 },
             { codice: m.contoLiquidita, nome: liq.nome || "?", dare: 0, avere: m.importo },
           ],
-          auto: true, origine: m._id || "mov", movId: m._id,
+          auto: true, origine: m._id || "mov", movId: m._id, bu: m.bu || "GENERAL",
         });
       }
     } else if (m.tipo === "giroconto") {
@@ -2336,7 +2338,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
           { codice: m.contoLiquiditaDest, nome: dest?.nome || "?", dare: m.importo, avere: 0 },
           { codice: m.contoLiquidita, nome: liq?.nome || "?", dare: 0, avere: m.importo },
         ],
-        auto: true, origine: m._id || "mov", movId: m._id,
+        auto: true, origine: m._id || "mov", movId: m._id, bu: m.bu || "GENERAL",
       });
     }
   });
@@ -2372,6 +2374,7 @@ function calcolaMastrini(scritture) {
 function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
   const [tab, setTab] = useState("cron"); // cron | mastrino
   const [contoMastrino, setContoMastrino] = useState("");
+  const [filterBu, setFilterBu] = useState(""); // "" = tutte le BU
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -2385,23 +2388,53 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
     [movimenti, saldiIniziali, contiMap]
   );
 
-  const totD = scritture.reduce((s, sc) => s + sc.righe.reduce((sr, r) => sr + (r.dare || 0), 0), 0);
-  const totA = scritture.reduce((s, sc) => s + sc.righe.reduce((sr, r) => sr + (r.avere || 0), 0), 0);
+  // BU presenti nelle scritture (escluso l'aggregato di apertura con bu null)
+  const buDisponibili = useMemo(() => {
+    const set = new Set();
+    scritture.forEach(s => { if (s.bu) set.add(s.bu); });
+    return [...set].sort();
+  }, [scritture]);
+
+  // Scritture filtrate per BU: filtro scritture INTERE (entrambe le righe
+  // condividono la stessa BU), così il giornale resta quadrato dentro la BU.
+  // L'apertura (bu null) viene mostrata solo quando non c'è filtro attivo.
+  const scrittureView = useMemo(
+    () => filterBu ? scritture.filter(s => s.bu === filterBu) : scritture,
+    [scritture, filterBu]
+  );
+
+  // Verifica chiusura evento: saldo residuo sui conti transitori 74/75 per la BU.
+  // A fine evento devono essere chiusi (saldo ≈ 0).
+  const CONTI_DA_CHIUDERE = [74, 75];
+  const verificaChiusura = useMemo(() => {
+    if (!filterBu) return null;
+    return CONTI_DA_CHIUDERE.map(cod => {
+      let dare = 0, avere = 0;
+      scrittureView.forEach(s => s.righe.forEach(r => {
+        if (r.codice === cod) { dare += r.dare || 0; avere += r.avere || 0; }
+      }));
+      const saldo = dare - avere;
+      return { codice: cod, nome: contiMap[cod]?.nome || `Conto ${cod}`, saldo, chiuso: Math.abs(saldo) < 0.01, attivo: (dare + avere) > 0 };
+    });
+  }, [filterBu, scrittureView, contiMap]);
+
+  const totD = scrittureView.reduce((s, sc) => s + sc.righe.reduce((sr, r) => sr + (r.dare || 0), 0), 0);
+  const totA = scrittureView.reduce((s, sc) => s + sc.righe.reduce((sr, r) => sr + (r.avere || 0), 0), 0);
   const quadrato = Math.abs(totD - totA) < 0.01;
 
   // Conti che hanno movimenti, per popolare il dropdown
   const contiConMovimenti = useMemo(() => {
     const set = new Set();
-    scritture.forEach(s => s.righe.forEach(r => set.add(r.codice)));
+    scrittureView.forEach(s => s.righe.forEach(r => set.add(r.codice)));
     return [...set].map(c => contiMap[c] || {codice: c, nome: `Conto ${c}`}).sort((a,b) => a.codice - b.codice);
-  }, [scritture, contiMap]);
+  }, [scrittureView, contiMap]);
 
   // Mastrino del conto selezionato, raggruppato per mese
   const mastrinoPerMese = useMemo(() => {
     if (!contoMastrino) return null;
     const cod = Number(contoMastrino);
     const righe = []; // tutte le righe del conto, con data e descrizione
-    scritture.forEach(s => {
+    scrittureView.forEach(s => {
       s.righe.forEach(r => {
         if (r.codice === cod) {
           righe.push({
@@ -2451,14 +2484,14 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
     const totAvere = gruppiArr.reduce((s,g) => s + g.totAvere, 0);
 
     return { gruppi: gruppiArr, totDare, totAvere, saldoFinale: totDare - totAvere };
-  }, [contoMastrino, scritture]);
+  }, [contoMastrino, scrittureView]);
 
   return (
     <div>
       <div className="page-head">
         <div>
           <h2>Libro Giornale</h2>
-          <div className="sub">{scritture.length} scritture · vista cronologica o per conto (mastrino)</div>
+          <div className="sub">{scrittureView.length}{filterBu ? ` di ${scritture.length}` : ""} scritture · vista cronologica o per conto (mastrino)</div>
         </div>
         <div style={{display:"flex", gap:8, alignItems:"baseline"}}>
           <span className="mono" style={{fontSize:12.5, color:"var(--ink-3)"}}>
@@ -2475,6 +2508,59 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
         <button type="button" className={tab === "mastrino" ? "active entrata" : ""} onClick={() => setTab("mastrino")}>▦ Mastrini per conto</button>
       </div>
 
+      <div className="filters" style={{marginBottom:14}}>
+        <span className="label">Business Unit:</span>
+        <select value={filterBu} onChange={e => setFilterBu(e.target.value)} style={{maxWidth:280}}>
+          <option value="">Tutte le BU</option>
+          {buDisponibili.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+        {filterBu && (
+          <button className="btn ghost sm" onClick={() => setFilterBu("")}>Reset BU</button>
+        )}
+        {filterBu && (
+          <span className="mono" style={{fontSize:12, color:"var(--ink-3)", marginLeft:"auto"}}>
+            Σ DARE {fmt(totD)} · Σ AVERE {fmt(totA)} · {quadrato ? "✓ quadrato" : "✗ sbilanciato"}
+          </span>
+        )}
+      </div>
+
+      {verificaChiusura && (
+        <div style={{
+          marginBottom:18, padding:"14px 18px", borderRadius:"var(--radius-lg)",
+          border:"1px solid var(--rule)", borderLeft:"4px solid var(--gold)",
+          background:"var(--panel-2)", boxShadow:"var(--shadow-sm)",
+        }}>
+          <div style={{fontSize:12.5, fontWeight:600, color:"var(--ink-2)", marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em"}}>
+            Verifica chiusura evento · {filterBu}
+          </div>
+          <div style={{display:"flex", flexWrap:"wrap", gap:18}}>
+            {verificaChiusura.map(v => (
+              <div key={v.codice} style={{display:"flex", alignItems:"center", gap:10}}>
+                <span className="mono" style={{fontSize:12, color:"var(--ink-3)"}}>{String(v.codice).padStart(2,"0")}</span>
+                <span style={{fontSize:13, color:"var(--ink-2)"}}>{v.nome.trim()}</span>
+                {!v.attivo ? (
+                  <span className="pill" style={{background:"var(--bg)", borderColor:"var(--rule-2)", color:"var(--ink-3)"}}>
+                    nessun movimento
+                  </span>
+                ) : (
+                  <span className="pill" style={{
+                    fontWeight:600,
+                    background: v.chiuso ? "var(--accent-soft)" : "var(--danger-soft)",
+                    borderColor: v.chiuso ? "#c8d8ce" : "#f1d6d6",
+                    color: v.chiuso ? "var(--accent-ink)" : "var(--danger)",
+                  }}>
+                    {v.chiuso ? "✓ chiuso" : `⚠ residuo ${fmt(Math.abs(v.saldo))} ${v.saldo > 0 ? "D" : "A"}`}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="hint" style={{marginTop:10, fontSize:11.5, color:"var(--ink-3)"}}>
+            A fine evento questi conti transitori devono risultare chiusi. Un residuo segnala una scrittura di storno/giroconto mancante.
+          </div>
+        </div>
+      )}
+
       {tab === "cron" && (
         <div className="tbl-wrap" style={{maxHeight:"calc(100vh - 280px)", overflowY:"auto"}}>
           <table className="tbl">
@@ -2489,7 +2575,7 @@ function PageLibroGiornale({ conti, movimenti, saldiIniziali }) {
               </tr>
             </thead>
             <tbody>
-              {scritture.map((s, idx) => (
+              {scrittureView.map((s, idx) => (
                 <React.Fragment key={idx}>
                   {s.righe.map((r, ri) => (
                     <tr key={`${idx}-${ri}`} style={ri === 0 ? {borderTop: s.composta ? "2px solid #7c3aed" : "2px solid var(--rule-2)"} : {}}>
