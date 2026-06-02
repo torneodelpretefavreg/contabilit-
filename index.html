@@ -3808,6 +3808,19 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
     return [...set].sort();
   }, [movimenti, budget]);
 
+  // Voci di budget = SOLO quelle inserite manualmente dall'utente.
+  // Il budget parte vuoto: nessuna voce viene derivata in automatico dai movimenti.
+  const vociBudget = useMemo(() => {
+    return Object.entries(budget)
+      .map(([key, b]) => ({
+        key,
+        categoria: b.categoria || key,
+        ricavi: Number(b.ricavi) || 0,
+        costi: Number(b.costi) || 0,
+      }))
+      .sort((a, b) => a.categoria.localeCompare(b.categoria));
+  }, [budget]);
+
   const actualPerCategoria = useMemo(() => {
     const r = {};
     movimenti.forEach(m => {
@@ -4107,14 +4120,20 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
                 </tr>
               </thead>
               <tbody>
-                {categorieUsate.map(cat => {
-                  const catKey = cat.replace(/[.#$/\[\]]/g, '_');
-                  const b = budget[catKey] || {};
+                {vociBudget.length === 0 && (
+                  <tr>
+                    <td colSpan={8} style={{textAlign:"center", padding:"32px 16px", color:"var(--ink-3)"}}>
+                      Nessuna voce di budget. Usa <strong>+ Aggiungi voce budget</strong> per inserire le categorie che vuoi monitorare.
+                    </td>
+                  </tr>
+                )}
+                {vociBudget.map(v => {
+                  const cat = v.categoria;
+                  const b = { ricavi: v.ricavi, costi: v.costi };
                   const a = actualPerCategoria[cat] || { ricavi: 0, costi: 0 };
-                  const isRicavo = (b.ricavi || 0) > 0 || (a.ricavi > 0 && !(b.costi > 0));
+                  const isRicavo = (b.ricavi || 0) > 0 || (!(b.costi > 0) && a.ricavi > 0);
                   const budVal = isRicavo ? (b.ricavi || 0) : (b.costi || 0);
                   const actVal = isRicavo ? a.ricavi : a.costi;
-                  if (budVal === 0 && actVal === 0) return null;
                   const delta = actVal - budVal;
                   const deltaP = budVal > 0 ? (delta / budVal * 100) : null;
                   // semaforo: per ricavi voglio actual >= budget*(% avanzamento), per costi voglio actual <= budget*(% avanzamento)
@@ -4132,7 +4151,7 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
                     stato = "—"; // senza budget non c'è stato
                   }
                   return (
-                    <tr key={cat}>
+                    <tr key={v.key}>
                       <td style={{fontWeight:500}}>{cat}</td>
                       <td><span className={"pill " + (isRicavo ? "entrata" : "uscita")}>{isRicavo ? "Ricavo" : "Costo"}</span></td>
                       <td className="num">{budVal > 0 ? fmt(budVal) : <span style={{color:"var(--ink-3)"}}>—</span>}</td>
@@ -4145,7 +4164,7 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
                       <td>
                         <div style={{display:"flex", gap:4}}>
                           <button className="btn ghost sm" onClick={() => setBudgetEditing({ categoria: cat, ricavi: b.ricavi || "", costi: b.costi || "" })}>✎</button>
-                          {budVal > 0 && <button className="btn danger sm" onClick={() => removeBudget(cat)}>🗑</button>}
+                          <button className="btn danger sm" onClick={() => removeBudget(cat)}>🗑</button>
                         </div>
                       </td>
                     </tr>
@@ -5167,25 +5186,76 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
 // ============================================================
 // PAGINA: PIANO DI AMMORTAMENTO
 // ============================================================
-function PageAmmortamenti({ cespiti }) {
+function PageAmmortamenti({ cespiti, stagione, onToast }) {
   const annoCorrente = new Date().getFullYear();
   const [annoRiferimento, setAnnoRiferimento] = useState(2026);
 
+  // Esercizio corrente: chiude il 31/08/2026. I cespiti "di quest'anno"
+  // (anno_inizio === 2026) si ammortizzano con ragguaglio ai giorni dalla data
+  // di registrazione in contabilità fino al 31/08/2026. Gli anni precedenti
+  // restano immutati (uso la quota_esercizio salvata).
+  const ANNO_ESERCIZIO = 2026;
+  const FINE_ESERCIZIO = useMemo(() => new Date(2026, 7, 31), []); // 31 agosto 2026
+  const GIORNI_ANNO = 365;
+
+  // Sottoscrivo i cespiti con la loro key, così posso salvare la data_inizio inline
+  const [cespitiKeyed, setCespitiKeyed] = useState([]);
+  useEffect(() => {
+    if (!firebaseReady || !stagione) { setCespitiKeyed(cespiti.map((c, i) => ({...c, _key: c._key || `idx_${i}`}))); return; }
+    const ref = db.ref(`stagioni/${stagione}/cespiti`);
+    const cb = ref.on("value", snap => {
+      const v = snap.val();
+      setCespitiKeyed(v ? Object.entries(v).map(([k, c]) => ({...c, _key: k})) : []);
+    });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  const setDataInizio = async (key, val) => {
+    if (!firebaseReady || !stagione || key.startsWith("idx_")) return;
+    try {
+      await db.ref(`stagioni/${stagione}/cespiti/${key}/data_inizio`).set(val || null);
+      if (onToast) onToast("Data registrazione aggiornata");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
   // Calcolo piano ammortamento per ogni cespite
   const piano = useMemo(() => {
-    return cespiti.map(c => {
+    return cespitiKeyed.map(c => {
       const costo = Number(c.costo_storico) || 0;
       const aliquota = Number(c.aliquota) || 0;
       const annoInizio = Number(c.anno_inizio) || annoCorrente;
       const fondoAttuale = Number(c.fondo_ammortamento) || 0;
-      const quotaAnnua = costo * aliquota;
+      const quotaAnnua = costo * aliquota; // quota annua "piena" teorica
+      const isCorrente = annoInizio === ANNO_ESERCIZIO;
+
+      // Pro-rata ai giorni SOLO per i cespiti dell'esercizio corrente
+      let giorni = null, ragguaglio = null, dataMancante = false;
+      let quotaEsercizio;
+      if (isCorrente && aliquota > 0) {
+        if (c.data_inizio) {
+          const d = new Date(c.data_inizio + "T00:00:00");
+          const diff = Math.round((FINE_ESERCIZIO - d) / 86400000) + 1; // giorni inclusivi
+          giorni = Math.max(0, Math.min(GIORNI_ANNO, diff));
+          ragguaglio = giorni / GIORNI_ANNO;
+          quotaEsercizio = Math.min(Math.max(0, costo - fondoAttuale), quotaAnnua * ragguaglio);
+        } else {
+          dataMancante = true;
+          quotaEsercizio = quotaAnnua; // senza data uso la quota piena, ma segnalo
+        }
+      } else {
+        // Anni precedenti / senza aliquota: immutato → quota salvata
+        quotaEsercizio = (c.quota_esercizio !== undefined && c.quota_esercizio !== null)
+          ? Number(c.quota_esercizio) : quotaAnnua;
+      }
 
       // Calcolo durata teorica in anni
       const durataTeorica = aliquota > 0 ? Math.ceil(1 / aliquota) : 0;
       // Anni già ammortizzati (a partire dall'anno di inizio)
       const anniDecorsi = annoRiferimento - annoInizio + 1;
-      // Fondo teorico (cumulato fino all'anno di riferimento)
-      const fondoTeorico = Math.min(costo, quotaAnnua * Math.max(0, anniDecorsi));
+      // Fondo teorico: per il corrente = quota d'esercizio ragguagliata; altrimenti come prima
+      const fondoTeorico = isCorrente
+        ? Math.min(costo, quotaEsercizio)
+        : Math.min(costo, quotaAnnua * Math.max(0, anniDecorsi));
       // Valore residuo
       const valoreResiduo = Math.max(0, costo - fondoAttuale);
       // Anni residui (con fondo attuale)
@@ -5195,14 +5265,21 @@ function PageAmmortamenti({ cespiti }) {
       // Stato ammortamento
       let stato = "—";
       if (aliquota === 0) stato = "Aliquota non impostata";
+      else if (isCorrente && dataMancante) stato = "⚠ Imposta data registrazione";
       else if (valoreResiduo <= 0.01) stato = "Completamente ammortizzato";
       else if (anniDecorsi <= 0) stato = "Non ancora iniziato";
+      else if (isCorrente) stato = "Primo anno (ragguaglio gg)";
       else if (annoRiferimento >= annoUltimo) stato = "Ultimo anno";
       else stato = `In ammortamento (${anniResidui} anni residui)`;
 
       return {
         ...c,
         quotaAnnua,
+        quotaEsercizio,
+        isCorrente,
+        giorni,
+        ragguaglio,
+        dataMancante,
         durataTeorica,
         anniDecorsi,
         fondoTeorico,
@@ -5214,13 +5291,14 @@ function PageAmmortamenti({ cespiti }) {
         scostamento: fondoAttuale - fondoTeorico,
       };
     });
-  }, [cespiti, annoRiferimento]);
+  }, [cespitiKeyed, annoRiferimento, FINE_ESERCIZIO]);
 
   // Totali
   const tot = useMemo(() => {
     return {
       costo: piano.reduce((s,c) => s + (Number(c.costo_storico) || 0), 0),
       quotaAnnua: piano.reduce((s,c) => s + c.quotaAnnua, 0),
+      quotaEsercizio: piano.reduce((s,c) => s + (c.quotaEsercizio || 0), 0),
       fondoAttuale: piano.reduce((s,c) => s + (Number(c.fondo_ammortamento) || 0), 0),
       fondoTeorico: piano.reduce((s,c) => s + c.fondoTeorico, 0),
       valoreResiduo: piano.reduce((s,c) => s + c.valoreResiduo, 0),
@@ -5248,9 +5326,9 @@ function PageAmmortamenti({ cespiti }) {
           <div className="value">{fmtEuro(tot.costo)}</div>
         </div>
         <div className="kpi">
-          <div className="label">Quota ammortamento annua</div>
-          <div className="value" style={{color:"var(--accent-ink)"}}>{fmtEuro(tot.quotaAnnua)}</div>
-          <div className="hint">somma quote tutti i cespiti</div>
+          <div className="label">Quota esercizio (ragguagliata)</div>
+          <div className="value" style={{color:"var(--accent-ink)"}}>{fmtEuro(tot.quotaEsercizio)}</div>
+          <div className="hint">annua piena {fmtEuro(tot.quotaAnnua)}</div>
         </div>
         <div className="kpi">
           <div className="label">Fondo ammortamento attuale</div>
@@ -5265,7 +5343,7 @@ function PageAmmortamenti({ cespiti }) {
       </div>
 
       <div style={{padding:"12px 16px", background:"#fff8e7", border:"1px solid #f0d860", borderRadius:8, fontSize:13, marginBottom:16, color:"#7a5d00"}}>
-        <strong>💡 Come leggere.</strong> La <em>quota annua</em> è il costo × aliquota. Il <em>fondo teorico</em> è quanto dovresti aver ammortizzato fino all'anno di riferimento (quota × anni decorsi). Lo <em>scostamento</em> mostra la differenza con il fondo attuale: se è ≠ 0 significa che non hai registrato alcuni ammortamenti o ne hai registrati di troppo.
+        <strong>💡 Come leggere.</strong> La <em>quota annua</em> è costo × aliquota. Per i cespiti di <strong>quest'esercizio</strong> (anno {ANNO_ESERCIZIO}) la <em>quota d'esercizio</em> è ragguagliata ai giorni dalla data di registrazione in contabilità fino al <strong>31/08/2026</strong> (gg/365). Imposta la data direttamente in tabella. I cespiti degli <strong>anni precedenti</strong> restano immutati (quota salvata). Lo <em>scostamento</em> è la differenza fra fondo teorico e fondo attuale.
       </div>
 
       <div className="tbl-wrap">
@@ -5276,7 +5354,9 @@ function PageAmmortamenti({ cespiti }) {
               <th className="num">Costo storico</th>
               <th className="num">Aliquota</th>
               <th className="num">Quota annua</th>
-              <th className="num">Anno inizio</th>
+              <th className="num">Quota eserc.</th>
+              <th className="num">Anno</th>
+              <th style={{width:140}}>Data reg.</th>
               <th className="num">Durata</th>
               <th className="num">Fondo attuale</th>
               <th className="num">Fondo teorico</th>
@@ -5291,8 +5371,24 @@ function PageAmmortamenti({ cespiti }) {
                 <td style={{fontWeight:500}}>{c.conto}</td>
                 <td className="num">{fmt(c.costo_storico)}</td>
                 <td className="num">{c.aliquota ? (c.aliquota * 100).toFixed(0) + "%" : "—"}</td>
-                <td className="num" style={{fontWeight:600, color:"var(--accent-ink)"}}>{fmt(c.quotaAnnua)}</td>
+                <td className="num" style={{color:"var(--ink-3)"}}>{fmt(c.quotaAnnua)}</td>
+                <td className="num" style={{fontWeight:600, color:"var(--accent-ink)"}}>
+                  {fmt(c.quotaEsercizio)}
+                  {c.isCorrente && c.ragguaglio !== null && (
+                    <div style={{fontSize:10.5, color:"var(--ink-3)", fontWeight:400}}>{c.giorni} gg · {(c.ragguaglio*100).toFixed(1)}%</div>
+                  )}
+                </td>
                 <td className="num">{c.anno_inizio || "—"}</td>
+                <td>
+                  {c.isCorrente ? (
+                    <input type="date" value={c.data_inizio || ""} max="2026-08-31"
+                           onChange={e => setDataInizio(c._key, e.target.value)}
+                           style={{width:130, padding:"3px 6px", border:"1px solid var(--rule)", borderRadius:4, fontSize:12,
+                                   background: c.dataMancante ? "var(--danger-soft)" : "var(--panel)"}}/>
+                  ) : (
+                    <span style={{color:"var(--ink-3)"}}>—</span>
+                  )}
+                </td>
                 <td className="num">{c.durataTeorica > 0 ? c.durataTeorica + " anni" : "—"}</td>
                 <td className="num">{fmt(c.fondo_ammortamento)}</td>
                 <td className="num" style={{color:"var(--ink-3)"}}>{fmt(c.fondoTeorico)}</td>
@@ -5303,11 +5399,13 @@ function PageAmmortamenti({ cespiti }) {
                 <td style={{fontSize:11.5}}>
                   <span className="pill" style={{
                     background: c.stato.includes("Completamente") ? "#e8f5e9" :
+                                c.stato.includes("Imposta") ? "var(--danger-soft)" :
                                 c.stato.includes("Ultimo") ? "#fff3e0" :
-                                c.stato.includes("In ammortamento") ? "var(--accent-soft)" : "var(--panel-2)",
+                                (c.stato.includes("In ammortamento") || c.stato.includes("Primo anno")) ? "var(--accent-soft)" : "var(--panel-2)",
                     color: c.stato.includes("Completamente") ? "#1b5e20" :
+                           c.stato.includes("Imposta") ? "var(--danger)" :
                            c.stato.includes("Ultimo") ? "#e65100" :
-                           c.stato.includes("In ammortamento") ? "var(--accent-ink)" : "var(--ink-3)"
+                           (c.stato.includes("In ammortamento") || c.stato.includes("Primo anno")) ? "var(--accent-ink)" : "var(--ink-3)"
                   }}>{c.stato}</span>
                 </td>
               </tr>
@@ -5317,7 +5415,8 @@ function PageAmmortamenti({ cespiti }) {
               <td className="num">{fmt(tot.costo)}</td>
               <td></td>
               <td className="num">{fmt(tot.quotaAnnua)}</td>
-              <td colSpan={2}></td>
+              <td className="num">{fmt(tot.quotaEsercizio)}</td>
+              <td colSpan={3}></td>
               <td className="num">{fmt(tot.fondoAttuale)}</td>
               <td className="num">{fmt(tot.fondoTeorico)}</td>
               <td className="num" style={{color: Math.abs(tot.fondoAttuale - tot.fondoTeorico) > 0.5 ? "var(--neg)" : "var(--ink-3)"}}>
@@ -5360,8 +5459,9 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
   const [quantita, setQuantita] = useState({});
   const [savedComposizione, setSavedComposizione] = useState(null);
   const [dataConta, setDataConta] = useState(new Date().toISOString().slice(0, 10));
+  const [storico, setStorico] = useState([]); // conte salvate nel tempo
 
-  // Carico composizione salvata da Firebase
+  // Carico composizione salvata da Firebase (working set: tiene le q precedenti)
   useEffect(() => {
     if (!firebaseReady || !stagione) return;
     db.ref(`stagioni/${stagione}/composizioneCassa`).once("value").then(snap => {
@@ -5372,6 +5472,19 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
         setSavedComposizione(v);
       }
     });
+  }, [stagione]);
+
+  // Sottoscrivo lo storico delle conte salvate
+  useEffect(() => {
+    if (!firebaseReady || !stagione) return;
+    const ref = db.ref(`stagioni/${stagione}/composizioneCassaStorico`);
+    const cb = ref.on("value", snap => {
+      const v = snap.val();
+      setStorico(v
+        ? Object.entries(v).map(([k, s]) => ({ ...s, _key: k })).sort((a, b) => (b.salvatoIl || "").localeCompare(a.salvatoIl || ""))
+        : []);
+    });
+    return () => ref.off("value", cb);
   }, [stagione]);
 
   // Calcolo saldo CASSA contabile (cod 3)
@@ -5424,12 +5537,30 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
         scostamento,
         salvatoIl: new Date().toISOString(),
       };
+      // 1) Aggiorno la composizione corrente (così riapro con le stesse q)
       await db.ref(`stagioni/${stagione}/composizioneCassa`).set(data);
+      // 2) Appendo uno snapshot allo storico (così ogni conta resta salvata)
+      await db.ref(`stagioni/${stagione}/composizioneCassaStorico`).push(data);
       setSavedComposizione(data);
-      onToast("Composizione cassa salvata");
+      onToast("Conta salvata nello storico");
     } catch (e) {
       alert("Errore: " + e.message);
     }
+  };
+
+  // Ricarica le quantità di una conta storica nell'editor (senza ricontare)
+  const caricaConta = (s) => {
+    setQuantita(s.quantita || {});
+    setDataConta(s.data || dataConta);
+    onToast("Conta caricata — modifica l'importo o salvane una nuova");
+  };
+
+  const eliminaConta = async (s) => {
+    if (!confirm(`Eliminare la conta del ${s.data || "—"} (totale ${fmtEuro(s.totale || 0)})?`)) return;
+    try {
+      await db.ref(`stagioni/${stagione}/composizioneCassaStorico/${s._key}`).remove();
+      onToast("Conta eliminata dallo storico");
+    } catch (e) { alert("Errore: " + e.message); }
   };
 
   return (
@@ -5548,12 +5679,58 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
       {/* Azioni */}
       <div style={{marginTop:20, display:"flex", gap:10, justifyContent:"flex-end", flexWrap:"wrap"}}>
         <button className="btn ghost" onClick={azzera}>Azzera conteggi</button>
-        <button className="btn accent" onClick={salva}>Salva composizione</button>
+        <button className="btn accent" onClick={salva}>💾 Salva conta</button>
       </div>
 
       {savedComposizione && savedComposizione.salvatoIl && (
         <div style={{marginTop:16, padding:"10px 14px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12.5, color:"var(--ink-3)"}}>
           Ultima conta salvata: <strong>{new Date(savedComposizione.salvatoIl).toLocaleString("it-IT")}</strong> · data conta {savedComposizione.data} · totale {fmtEuro(savedComposizione.totale)}
+        </div>
+      )}
+
+      {/* STORICO CONTE */}
+      {storico.length > 0 && (
+        <div className="card" style={{marginTop:20}}>
+          <h3 style={{margin:"0 0 4px"}}>🗂 Storico conte salvate</h3>
+          <div style={{fontSize:12, color:"var(--ink-3)", marginBottom:12}}>
+            Ogni salvataggio resta qui. Lo scostamento di ogni riga è quello al momento del salvataggio; per confrontare una conta col saldo contabile <em>attuale</em>, caricala e guarda i KPI in alto.
+          </div>
+          <div className="tbl-wrap" style={{margin:0}}>
+            <table className="tbl" style={{margin:0}}>
+              <thead>
+                <tr>
+                  <th style={{width:110}}>Data conta</th>
+                  <th className="num">Totale fisico</th>
+                  <th className="num">Saldo contabile</th>
+                  <th className="num">Scostamento</th>
+                  <th>Salvata il</th>
+                  <th style={{width:150}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {storico.map(s => {
+                  const sc = Number(s.scostamento) || 0;
+                  return (
+                    <tr key={s._key}>
+                      <td>{s.data || "—"}</td>
+                      <td className="num" style={{fontWeight:600}}>{fmt(s.totale || 0)}</td>
+                      <td className="num" style={{color:"var(--ink-3)"}}>{fmt(s.saldoContabile || 0)}</td>
+                      <td className="num" style={{color: Math.abs(sc) < 0.01 ? "var(--accent-ink)" : "var(--danger)", fontWeight:600}}>
+                        {sc > 0 ? "+" : ""}{fmt(sc)}
+                      </td>
+                      <td style={{fontSize:12, color:"var(--ink-3)"}}>{s.salvatoIl ? new Date(s.salvatoIl).toLocaleString("it-IT") : "—"}</td>
+                      <td>
+                        <div style={{display:"flex", gap:4}}>
+                          <button className="btn ghost sm" onClick={() => caricaConta(s)}>↺ Carica</button>
+                          <button className="btn danger sm" onClick={() => eliminaConta(s)}>🗑</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -5731,6 +5908,7 @@ function CespiteForm({ cespite, onSave, onCancel }) {
   const [aliquota, setAliquota] = useState(cespite ? (cespite.aliquota * 100) : "");
   const [quota, setQuota] = useState(cespite?.quota_esercizio || 0);
   const [fondo, setFondo] = useState(cespite?.fondo_ammortamento || 0);
+  const [dataInizio, setDataInizio] = useState(cespite?.data_inizio || "");
   const [lastChange, setLastChange] = useState("totale"); // "totale" | "unit" | "n"
 
   // Auto-calcolo costo totale o unitario in base a cosa l'utente sta modificando
@@ -5772,6 +5950,7 @@ function CespiteForm({ cespite, onSave, onCancel }) {
       aliquota: (Number(aliquota) || 0) / 100,
       quota_esercizio: Number(quota) || 0,
       fondo_ammortamento: Number(fondo) || 0,
+      data_inizio: dataInizio || null,
     });
   };
 
@@ -5823,6 +6002,13 @@ function CespiteForm({ cespite, onSave, onCancel }) {
               <div>
                 <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Aliquota %</label>
                 <input type="number" inputMode="decimal" step="0.01" value={aliquota} onChange={e => setAliquota(e.target.value)} placeholder="es. 20 per 20%"/>
+              </div>
+            </div>
+            <div className="form-row">
+              <label style={{fontSize:11, color:"var(--ink-3)", fontWeight:600, textTransform:"uppercase"}}>Data registrazione in contabilità</label>
+              <input type="date" value={dataInizio} onChange={e => setDataInizio(e.target.value)}/>
+              <div style={{fontSize:11, color:"var(--ink-3)", marginTop:4}}>
+                Per i cespiti di quest'esercizio serve a ragguagliare la quota ai giorni fino al 31/08/2026.
               </div>
             </div>
             <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
@@ -6228,10 +6414,18 @@ function SerataForm({ serata, onSave, onCancel }) {
 // ============================================================
 // PAGINA: BUSINESS UNITS
 // ============================================================
-function PageBU({ bu, movimenti, stagione, onToast }) {
+function PageBU({ bu, conti, movimenti, stagione, onToast }) {
   const [buData, setBuData] = useState([]);
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
+  const [drillDown, setDrillDown] = useState(null); // nome BU espansa
+
+  const contiMap = useMemo(() => {
+    const m = {};
+    (conti || []).forEach(c => { m[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome }; });
+    return m;
+  }, [conti]);
 
   // Carica BU complete (con chiavi)
   useEffect(() => {
@@ -6256,6 +6450,36 @@ function PageBU({ bu, movimenti, stagione, onToast }) {
     });
     return m;
   }, [movimenti]);
+
+  // Composizione per conto di ciascuna BU (per il drill-down)
+  // Per ogni BU raggruppo i movimenti per conto P.d.C. e sommo ricavi/costi.
+  const contiPerBU = useMemo(() => {
+    const out = {};
+    movimenti.forEach(mov => {
+      if (mov.tipo !== "entrata" && mov.tipo !== "uscita") return;
+      const cod = mov.contoPdC;
+      if (!cod) return;
+      const b = mov.bu || "(senza BU)";
+      if (!out[b]) out[b] = {};
+      if (!out[b][cod]) out[b][cod] = { codice: cod, ricavi: 0, costi: 0, count: 0 };
+      if (mov.tipo === "entrata") out[b][cod].ricavi += mov.importo;
+      else out[b][cod].costi += mov.importo;
+      out[b][cod].count++;
+    });
+    // Trasformo in array ordinati per impatto (netto assoluto) per ogni BU
+    const res = {};
+    Object.entries(out).forEach(([b, conti]) => {
+      res[b] = Object.values(conti)
+        .map(c => ({
+          ...c,
+          nome: contiMap[c.codice]?.nome?.trim() || `Conto ${c.codice}`,
+          categoria: contiMap[c.codice]?.categoria || "",
+          netto: c.ricavi - c.costi,
+        }))
+        .sort((a, b2) => Math.abs(b2.netto) - Math.abs(a.netto));
+    });
+    return res;
+  }, [movimenti, contiMap]);
 
   const save = async (data, oldKey) => {
     try {
@@ -6303,7 +6527,7 @@ function PageBU({ bu, movimenti, stagione, onToast }) {
       <div className="page-head">
         <div>
           <h2>Business Units</h2>
-          <div className="sub">Centri di costo · {buData.length} BU configurate</div>
+          <div className="sub">Centri di costo · {buData.length} BU configurate · clicca una riga per vedere i conti che la compongono</div>
         </div>
         <button className="btn accent" onClick={() => setCreating(true)}>+ Nuova BU</button>
       </div>
@@ -6340,22 +6564,68 @@ function PageBU({ bu, movimenti, stagione, onToast }) {
             {buData.map(b => {
               const uso = usoBU[b.nome] || { count: 0, ricavi: 0, costi: 0 };
               const margine = uso.ricavi - uso.costi;
+              const aperta = drillDown === b.nome;
+              const dettaglio = contiPerBU[b.nome] || [];
               return (
-                <tr key={b._key}>
-                  <td style={{fontWeight:600}}>{b.nome}</td>
-                  <td className="num">{uso.count}</td>
-                  <td className="num pos">{uso.ricavi > 0 ? fmt(uso.ricavi) : "—"}</td>
-                  <td className="num neg">{uso.costi > 0 ? fmt(uso.costi) : "—"}</td>
-                  <td className={"num " + (margine < 0 ? "neg" : margine > 0 ? "pos" : "")} style={{fontWeight:600}}>
-                    {(uso.ricavi || uso.costi) ? fmt(margine) : "—"}
-                  </td>
-                  <td>
-                    <div style={{display:"flex", gap:4}}>
-                      <button className="btn ghost sm" onClick={() => setEditing(b)}>✎</button>
-                      <button className="btn danger sm" onClick={() => remove(b)}>🗑</button>
-                    </div>
-                  </td>
-                </tr>
+                <React.Fragment key={b._key}>
+                  <tr style={{cursor:"pointer", background: aperta ? "var(--accent-soft)" : undefined}}
+                      onClick={() => setDrillDown(aperta ? null : b.nome)}>
+                    <td style={{fontWeight:600}}>
+                      <span style={{display:"inline-block", width:14, color:"var(--ink-3)", transform: aperta ? "rotate(90deg)" : "none", transition:"transform .15s"}}>▸</span>
+                      {b.nome}
+                    </td>
+                    <td className="num">{uso.count}</td>
+                    <td className="num pos">{uso.ricavi > 0 ? fmt(uso.ricavi) : "—"}</td>
+                    <td className="num neg">{uso.costi > 0 ? fmt(uso.costi) : "—"}</td>
+                    <td className={"num " + (margine < 0 ? "neg" : margine > 0 ? "pos" : "")} style={{fontWeight:600}}>
+                      {(uso.ricavi || uso.costi) ? fmt(margine) : "—"}
+                    </td>
+                    <td onClick={e => e.stopPropagation()}>
+                      <div style={{display:"flex", gap:4}}>
+                        <button className="btn ghost sm" onClick={() => setEditing(b)}>✎</button>
+                        <button className="btn danger sm" onClick={() => remove(b)}>🗑</button>
+                      </div>
+                    </td>
+                  </tr>
+                  {aperta && (
+                    <tr>
+                      <td colSpan={6} style={{padding:0, background:"var(--panel-2)"}}>
+                        <div style={{padding:"4px 16px 14px 30px"}}>
+                          {dettaglio.length === 0 ? (
+                            <div style={{padding:"12px 0", color:"var(--ink-3)", fontSize:13}}>Nessun conto movimentato per questa BU.</div>
+                          ) : (
+                            <table className="tbl" style={{margin:"6px 0 0", background:"transparent"}}>
+                              <thead>
+                                <tr>
+                                  <th style={{width:50, background:"transparent"}}>Cod.</th>
+                                  <th style={{background:"transparent"}}>Conto</th>
+                                  <th style={{background:"transparent"}}>Categoria</th>
+                                  <th className="num" style={{width:80, background:"transparent"}}>Mov.</th>
+                                  <th className="num" style={{width:110, background:"transparent"}}>Ricavi</th>
+                                  <th className="num" style={{width:110, background:"transparent"}}>Costi</th>
+                                  <th className="num" style={{width:110, background:"transparent"}}>Netto</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {dettaglio.map(c => (
+                                  <tr key={c.codice}>
+                                    <td className="mono" style={{fontWeight:600}}>{String(c.codice).padStart(2,"0")}</td>
+                                    <td>{c.nome}</td>
+                                    <td style={{fontSize:11.5, color:"var(--ink-3)"}}>{c.categoria || "—"}</td>
+                                    <td className="num">{c.count}</td>
+                                    <td className="num pos">{c.ricavi > 0 ? fmt(c.ricavi) : "—"}</td>
+                                    <td className="num neg">{c.costi > 0 ? fmt(c.costi) : "—"}</td>
+                                    <td className={"num " + (c.netto < 0 ? "neg" : c.netto > 0 ? "pos" : "")} style={{fontWeight:600}}>{fmt(c.netto)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               );
             })}
           </tbody>
@@ -6930,7 +7200,7 @@ function App() {
               {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
-              {page === "bu" && <PageBU bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
+              {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} />}
@@ -6939,7 +7209,7 @@ function App() {
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
-              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} />}
+              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiIniziali} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
             </>
