@@ -1017,6 +1017,9 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
   const [bu, setBu] = useState(mov?.bu || "GENERAL");
   const [importo, setImporto] = useState(mov?.importo || "");
   const [descrizione, setDescrizione] = useState(mov?.descrizione || "");
+  // Contropartita esplicita per movimenti NON monetari (no conto liquidità):
+  // evita che l'app usi di default 60/35. Vuota = "da assegnare".
+  const [contoContropartita, setContoContropartita] = useState(mov?.contoContropartita ?? "");
 
   // === Scrittura libera multi-riga ===
   const [righe, setRighe] = useState([
@@ -1122,12 +1125,22 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
 
     const nonMonetario = tipo !== "giroconto" && !contoLiquidita;
 
+    // Per i movimenti non monetari (rettifiche/chiusure) la contropartita va scelta
+    // a mano. Ammortamenti (conti 44-51) e aperture hanno la loro logica dedicata.
+    const ammoCodici = [44,45,46,47,48,49,50,51];
+    const serveContropartita = nonMonetario && !mov?.apertura && !ammoCodici.includes(Number(contoPdC));
+    if (serveContropartita && !contoContropartita) {
+      const ok = confirm("Movimento non monetario senza conto di contropartita: verrà segnato come \"DA ASSEGNARE\" nel libro giornale finché non lo correggi. Vuoi procedere comunque?\n\n(Consiglio: scegli la contropartita qui sopra, oppure usa \"Scrittura libera\" per scegliere entrambi i conti.)");
+      if (!ok) return;
+    }
+
     const payload = {
       tipo,
       data,
       contoLiquidita: contoLiquidita ? Number(contoLiquidita) : null,
       contoLiquiditaDest: tipo === "giroconto" ? Number(contoLiquiditaDest) : null,
       contoPdC: tipo !== "giroconto" ? Number(contoPdC) : null,
+      contoContropartita: serveContropartita && contoContropartita ? Number(contoContropartita) : null,
       categoria: categoria || "",
       bu: bu || "GENERAL",
       importo: Number(importo),
@@ -1170,10 +1183,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
             <label>BU (opzionale)</label>
             <select value={bu} onChange={e => setBu(e.target.value)}>
               <option value="">— nessuna —</option>
-              <option value="GENERAL">GENERAL</option>
-              <option value="FUTSAL">FUTSAL</option>
-              <option value="TDP">TDP</option>
-              <option value="FESTIVAL FABBRICO">FESTIVAL FABBRICO</option>
+              {BUSINESS_UNITS.map(b => <option key={b} value={b}>{b}</option>)}
             </select>
           </div>
 
@@ -1334,6 +1344,20 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
               ));
             })()}
           </select>
+        </div>
+      )}
+      {tipo !== "giroconto" && !contoLiquidita && ![44,45,46,47,48,49,50,51].includes(Number(contoPdC)) && (
+        <div className="form-row">
+          <label>Conto di contropartita <span style={{color:"var(--ink-3)", fontWeight:400}}>(movimento non monetario)</span></label>
+          <select value={contoContropartita} onChange={e => setContoContropartita(e.target.value)}>
+            <option value="">— da assegnare (sconsigliato) —</option>
+            {[...conti].sort((a,b) => a.codice - b.codice).map(c => (
+              <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome.trim()}</option>
+            ))}
+          </select>
+          <div style={{fontSize:11.5, color:"var(--ink-3)", marginTop:4}}>
+            Niente conto liquidità ⇒ scrittura non monetaria. Scegli qui l'altro conto della partita doppia (es. per chiudere un conto transitorio). Se lo lasci vuoto finirà su "DA ASSEGNARE", così non sporca Bilancio di Apertura o Sopravvenienze.
+          </div>
         </div>
       )}
       {tipo !== "giroconto" && (
@@ -2269,9 +2293,17 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
     if (m.tipo === "entrata" && m.contoPdC) {
       if (!liq) {
         // Apertura: contropartita = 60 BILANCIO DI APERTURA
-        // Altri non monetari: contropartita = 35 SOPRAVVENIENZE ATTIVE
-        const ctrCodice = m.apertura ? 60 : 35;
-        const ctrNome = m.apertura ? "BILANCIO DI APERTURA" : "SOPRAVVENIENZE ATTIVE";
+        // Altrimenti: contropartita ESPLICITA scelta dall'utente; se assente → DA ASSEGNARE
+        // (non si usa più 35 SOPRAVVENIENZE di default)
+        let ctrCodice, ctrNome;
+        if (m.apertura) {
+          ctrCodice = 60; ctrNome = "BILANCIO DI APERTURA";
+        } else if (m.contoContropartita) {
+          ctrCodice = Number(m.contoContropartita);
+          ctrNome = contiMap[ctrCodice]?.nome || `Conto ${ctrCodice}`;
+        } else {
+          ctrCodice = 0; ctrNome = "⚠ DA ASSEGNARE";
+        }
         scritture.push({
           data: m.data,
           descrizione: m.descrizione || (m.apertura ? "Apertura conto" : `Entrata non monetaria ${m.categoria || ''}`.trim()),
@@ -2297,15 +2329,21 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
       if (!liq) {
         // Apertura: contropartita = 60 BILANCIO DI APERTURA
         // Ammortamenti: contropartita = fondo amm.to
-        // Altri non monetari: contropartita = 60 BILANCIO DI APERTURA
-        let contropartitaCod = 60; // BILANCIO DI APERTURA (default per apertura e generico)
-        let contropartitaNome = "BILANCIO DI APERTURA";
-        if (!m.apertura) {
-          // Solo per non-apertura: mappa ammortamento → fondo
+        // Altrimenti: contropartita ESPLICITA; se assente → DA ASSEGNARE
+        // (non si usa più 60 BILANCIO DI APERTURA come default generico)
+        let contropartitaCod, contropartitaNome;
+        if (m.apertura) {
+          contropartitaCod = 60; contropartitaNome = "BILANCIO DI APERTURA";
+        } else {
           const ammoMap = {44:52, 45:53, 46:54, 47:55, 48:56, 49:57, 50:58, 51:59};
           if (ammoMap[m.contoPdC]) {
             contropartitaCod = ammoMap[m.contoPdC];
             contropartitaNome = contiMap[contropartitaCod]?.nome || "FONDO AMM.TO";
+          } else if (m.contoContropartita) {
+            contropartitaCod = Number(m.contoContropartita);
+            contropartitaNome = contiMap[contropartitaCod]?.nome || `Conto ${contropartitaCod}`;
+          } else {
+            contropartitaCod = 0; contropartitaNome = "⚠ DA ASSEGNARE";
           }
         }
         scritture.push({
