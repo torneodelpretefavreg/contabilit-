@@ -6033,6 +6033,353 @@ function CespiteForm({ cespite, onSave, onCancel }) {
 }
 
 // ============================================================
+// PAGINA: ISCRIZIONI TdP (lette dal TdP Manager + pagamenti + contabilità)
+// ============================================================
+// Mappa metodo di pagamento → conto di liquidità (codice P.d.C.)
+const METODI_TDP = [
+  { val: "contanti", label: "Contanti", conto: 3 },
+  { val: "bonifico", label: "Bonifico", conto: 1 },
+  { val: "pos", label: "POS", conto: 5 },
+  { val: "satispay", label: "Satispay", conto: 10 },
+  { val: "paypal", label: "PayPal", conto: 9 },
+];
+// Conti P.d.C. di destinazione dei ricavi torneo
+const CONTO_ISCRIZIONE = 6;   // ISCRIZIONI C/ENT.
+const CONTO_ASSICURAZIONE = 7; // ASSICURAZIONI GIOCATORI
+
+function PageIscrizioniTdP({ stagione, conti, onToast }) {
+  const [iscrizioni, setIscrizioni] = useState([]);
+  const [pagamenti, setPagamenti] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [modale, setModale] = useState(null); // { team, modo: "pagato"|"parziale" }
+
+  // Legge le iscrizioni pubblicate dal TdP Manager (nodo top-level, condiviso)
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const ref = db.ref("iscrizioni_tdp");
+    const cb = ref.on("value", snap => {
+      const v = snap.val();
+      setIscrizioni(v ? Object.entries(v).map(([k, t]) => ({ ...t, teamId: t.teamId || k })) : []);
+      setLoading(false);
+    });
+    return () => ref.off("value", cb);
+  }, []);
+
+  // Legge i pagamenti già registrati (nodo top-level)
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const ref = db.ref("pagamenti_tdp");
+    const cb = ref.on("value", snap => setPagamenti(snap.val() || {}));
+    return () => ref.off("value", cb);
+  }, []);
+
+  // Stato pagamento per ogni squadra
+  const statoDi = (team) => {
+    const p = pagamenti[team.teamId];
+    const dovuto = Number(team.totaleDovuto) || 0;
+    const pagato = p ? Number(p.importoPagato) || 0 : 0;
+    if (!p || pagato <= 0) return { key: "da_incassare", label: "Da incassare", pagato: 0, residuo: dovuto };
+    if (p.completato || pagato >= dovuto - 0.01) return { key: "pagato", label: "Pagato", pagato, residuo: Math.max(0, dovuto - pagato) };
+    return { key: "parziale", label: "Parziale", pagato, residuo: Math.max(0, dovuto - pagato) };
+  };
+
+  // KPI
+  const kpi = useMemo(() => {
+    let dovuto = 0, incassato = 0, nPagate = 0;
+    iscrizioni.forEach(t => {
+      dovuto += Number(t.totaleDovuto) || 0;
+      const s = statoDi(t);
+      incassato += s.pagato;
+      if (s.key === "pagato") nPagate++;
+    });
+    return { dovuto, incassato, daIncassare: dovuto - incassato, nSquadre: iscrizioni.length, nPagate };
+  }, [iscrizioni, pagamenti]);
+
+  // Registra (o aggiorna) un pagamento + genera/aggiorna i movimenti contabili
+  const registraPagamento = async ({ team, importoPagato, metodo, contoLiquidita, dataPagamento, note, completato }) => {
+    if (!firebaseReady) return alert("Firebase non disponibile");
+    const teamId = team.teamId;
+    try {
+      // 1) Rimuovo eventuali movimenti contabili creati in precedenza per questa squadra
+      const precedente = pagamenti[teamId];
+      const vecchiIds = (precedente && precedente.movimentiIds) || [];
+      for (const id of vecchiIds) {
+        await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
+      }
+
+      // 2) Creo i nuovi movimenti (entrata) in base all'importo pagato
+      const nuoviIds = [];
+      const quotaIscr = Number(team.quotaIscrizione) || 0;
+      const quotaAss = Number(team.quotaAssicurazione) || 0;
+      const base = {
+        tipo: "entrata",
+        data: dataPagamento,
+        contoLiquidita: Number(contoLiquidita),
+        contoLiquiditaDest: null,
+        categoria: "ISCRIZIONI TDP",
+        bu: "TDP",
+        mese: meseDaData(dataPagamento),
+        nonMonetario: false,
+        origineTdP: teamId,
+        creatoIl: new Date().toISOString(),
+        modificatoIl: new Date().toISOString(),
+      };
+
+      const pushMov = async (mov) => {
+        const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
+        await ref.set(mov);
+        nuoviIds.push(ref.key);
+      };
+
+      if (completato && quotaAss > 0) {
+        // Pagamento completo: separo iscrizione e assicurazione sui rispettivi conti
+        await pushMov({ ...base, contoPdC: CONTO_ISCRIZIONE, importo: quotaIscr,
+          descrizione: `Iscrizione TdP — ${team.nomeSquadra}` });
+        await pushMov({ ...base, contoPdC: CONTO_ASSICURAZIONE, importo: quotaAss,
+          descrizione: `Assicurazione TdP — ${team.nomeSquadra}` });
+      } else {
+        // Pagamento parziale o senza assicurazione: un'unica entrata su ISCRIZIONI C/ENT.
+        await pushMov({ ...base, contoPdC: CONTO_ISCRIZIONE, importo: Number(importoPagato),
+          descrizione: `Iscrizione TdP — ${team.nomeSquadra}${completato ? "" : " (acconto)"}` });
+      }
+
+      // 3) Scrivo il pagamento sul nodo condiviso
+      await db.ref(`pagamenti_tdp/${teamId}`).set({
+        importoPagato: Number(importoPagato),
+        dataPagamento,
+        metodo,
+        completato: !!completato,
+        note: note || "",
+        movimentiIds: nuoviIds,
+        registratoIl: new Date().toISOString(),
+      });
+
+      onToast(`Pagamento ${team.nomeSquadra} registrato · entrata in contabilità`);
+      setModale(null);
+    } catch (e) {
+      alert("Errore: " + e.message);
+    }
+  };
+
+  const annullaPagamento = async (team) => {
+    const p = pagamenti[team.teamId];
+    if (!p) return;
+    if (!confirm(`Annullare il pagamento di "${team.nomeSquadra}"? Verranno rimossi anche i movimenti contabili collegati.`)) return;
+    try {
+      for (const id of (p.movimentiIds || [])) {
+        await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
+      }
+      await db.ref(`pagamenti_tdp/${team.teamId}`).remove();
+      onToast("Pagamento annullato");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Iscrizioni TdP</h2>
+          <div className="sub">Iscrizioni dal TdP Manager · {iscrizioni.length} squadre · ogni pagamento genera l'entrata in contabilità</div>
+        </div>
+      </div>
+
+      <div className="kpi-grid" style={{marginBottom:20}}>
+        <div className="kpi">
+          <div className="label">Totale dovuto</div>
+          <div className="value">{fmtEuro(kpi.dovuto)}</div>
+          <div className="hint">{kpi.nSquadre} squadre</div>
+        </div>
+        <div className="kpi accent">
+          <div className="label">Incassato</div>
+          <div className="value">{fmtEuro(kpi.incassato)}</div>
+          <div className="hint">{kpi.nPagate} squadre saldate</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Da incassare</div>
+          <div className="value" style={{color: kpi.daIncassare > 0.01 ? "var(--danger)" : "var(--accent-ink)"}}>{fmtEuro(kpi.daIncassare)}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">% incasso</div>
+          <div className="value">{kpi.dovuto > 0 ? Math.round(kpi.incassato / kpi.dovuto * 100) : 0}%</div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="empty-state">Caricamento iscrizioni…</div>
+      ) : iscrizioni.length === 0 ? (
+        <div className="empty-state" style={{padding:48}}>
+          Nessuna iscrizione pubblicata dal TdP Manager su <span className="mono">/iscrizioni_tdp</span>.
+        </div>
+      ) : (
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Squadra</th>
+                <th className="num" style={{width:60}}>Gioc.</th>
+                <th style={{width:70}}>Girone</th>
+                <th className="num" style={{width:110}}>Iscrizione</th>
+                <th className="num" style={{width:110}}>Assicuraz.</th>
+                <th className="num" style={{width:110}}>Dovuto</th>
+                <th className="num" style={{width:110}}>Pagato</th>
+                <th style={{width:120}}>Stato</th>
+                <th style={{width:230}}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {iscrizioni
+                .slice()
+                .sort((a,b) => (a.girone||"").localeCompare(b.girone||"") || (a.nomeSquadra||"").localeCompare(b.nomeSquadra||""))
+                .map(team => {
+                  const s = statoDi(team);
+                  const pill = s.key === "pagato"
+                    ? { background:"var(--accent-soft)", color:"var(--accent-ink)", border:"#c8d8ce" }
+                    : s.key === "parziale"
+                    ? { background:"#fff3e0", color:"#e65100", border:"#f0d6a8" }
+                    : { background:"var(--danger-soft)", color:"var(--danger)", border:"#f1d6d6" };
+                  return (
+                    <tr key={team.teamId}>
+                      <td style={{fontWeight:600}}>{team.nomeSquadra}</td>
+                      <td className="num">{team.numeroGiocatori ?? "—"}</td>
+                      <td>{team.girone ? <span className="pill">{team.girone}</span> : "—"}</td>
+                      <td className="num">{fmt(team.quotaIscrizione || 0)}</td>
+                      <td className="num">{fmt(team.quotaAssicurazione || 0)}</td>
+                      <td className="num" style={{fontWeight:600}}>{fmt(team.totaleDovuto || 0)}</td>
+                      <td className="num" style={{color: s.pagato > 0 ? "var(--accent-ink)" : "var(--ink-3)"}}>{s.pagato > 0 ? fmt(s.pagato) : "—"}</td>
+                      <td>
+                        <span className="pill" style={{background:pill.background, color:pill.color, borderColor:pill.border, fontWeight:600}}>
+                          {s.label}{s.key === "parziale" ? ` · resta ${fmt(s.residuo)}` : ""}
+                        </span>
+                      </td>
+                      <td>
+                        <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
+                          {s.key !== "pagato" && (
+                            <button className="btn accent sm" onClick={() => setModale({ team, modo: "pagato" })}>Segna pagato</button>
+                          )}
+                          {s.key !== "pagato" && (
+                            <button className="btn ghost sm" onClick={() => setModale({ team, modo: "parziale" })}>Parziale</button>
+                          )}
+                          {s.key !== "da_incassare" && (
+                            <button className="btn danger sm" onClick={() => annullaPagamento(team)}>Annulla</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{marginTop:18, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12, color:"var(--ink-2)"}}>
+        <strong>💡 Come funziona.</strong> Le iscrizioni arrivano in tempo reale dal TdP Manager. Registrando un pagamento, scrivo il record su <span className="mono">/pagamenti_tdp</span> e genero l'entrata nel libro giornale (BU <strong>TDP</strong>, conti <strong>{CONTO_ISCRIZIONE} ISCRIZIONI C/ENT.</strong> e <strong>{CONTO_ASSICURAZIONE} ASSICURAZIONI GIOCATORI</strong>). Modificando o annullando un pagamento, i movimenti collegati vengono rigenerati o rimossi, senza duplicati.
+      </div>
+
+      {modale && (
+        <PagamentoTdPModal
+          team={modale.team}
+          modo={modale.modo}
+          pagamentoEsistente={pagamenti[modale.team.teamId]}
+          conti={conti}
+          onConfirm={registraPagamento}
+          onClose={() => setModale(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function PagamentoTdPModal({ team, modo, pagamentoEsistente, conti, onConfirm, onClose }) {
+  const dovuto = Number(team.totaleDovuto) || 0;
+  const completo = modo === "pagato";
+  const [importo, setImporto] = useState(completo ? dovuto : (pagamentoEsistente?.importoPagato || ""));
+  const [metodo, setMetodo] = useState(pagamentoEsistente?.metodo || "contanti");
+  const metodoConf = METODI_TDP.find(m => m.val === metodo) || METODI_TDP[0];
+  const [contoLiquidita, setContoLiquidita] = useState(metodoConf.conto);
+  const [dataPagamento, setDataPagamento] = useState(pagamentoEsistente?.dataPagamento || new Date().toISOString().slice(0,10));
+  const [note, setNote] = useState(pagamentoEsistente?.note || "");
+
+  // Quando cambio metodo, aggiorno il conto di liquidità suggerito
+  useEffect(() => {
+    const m = METODI_TDP.find(m => m.val === metodo);
+    if (m) setContoLiquidita(m.conto);
+  }, [metodo]);
+
+  const nomeConto = (cod) => {
+    const c = (conti || []).find(c => Number(c.codice) === Number(cod)) || CONTI_LIQUIDITA.find(c => c.codice === Number(cod));
+    return c ? c.nome : `Conto ${cod}`;
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+    const imp = Number(importo);
+    if (!imp || imp <= 0) return alert("Importo non valido");
+    if (imp > dovuto + 0.01 && !confirm(`L'importo (${fmt(imp)}) supera il dovuto (${fmt(dovuto)}). Procedere comunque?`)) return;
+    const completato = completo || imp >= dovuto - 0.01;
+    onConfirm({ team, importoPagato: imp, metodo, contoLiquidita, dataPagamento, note, completato });
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{completo ? "Segna pagato" : "Pagamento parziale"} — {team.nomeSquadra}</h3>
+          <button className="btn ghost sm" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          <div style={{display:"flex", gap:18, marginBottom:14, fontSize:13, color:"var(--ink-2)"}}>
+            <span>Dovuto: <strong>{fmtEuro(dovuto)}</strong></span>
+            <span>Iscrizione {fmt(team.quotaIscrizione||0)} · Assicur. {fmt(team.quotaAssicurazione||0)}</span>
+          </div>
+          <form className="form-grid" onSubmit={submit}>
+            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
+              <div>
+                <label>Importo €</label>
+                <input type="number" inputMode="decimal" step="0.01" value={importo}
+                       onChange={e => setImporto(e.target.value)} autoFocus
+                       readOnly={completo}
+                       style={completo ? {background:"var(--panel-2)", fontWeight:600} : {}}/>
+              </div>
+              <div>
+                <label>Data pagamento</label>
+                <input type="date" value={dataPagamento} onChange={e => setDataPagamento(e.target.value)} required/>
+              </div>
+            </div>
+            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
+              <div>
+                <label>Metodo</label>
+                <select value={metodo} onChange={e => setMetodo(e.target.value)}>
+                  {METODI_TDP.map(m => <option key={m.val} value={m.val}>{m.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label>Conto liquidità (incasso)</label>
+                <select value={contoLiquidita} onChange={e => setContoLiquidita(Number(e.target.value))}>
+                  {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2,"0")} · {c.nome}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="form-row">
+              <label>Note (opzionale)</label>
+              <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="es. pagato in contanti alla riunione capitani"/>
+            </div>
+            <div style={{fontSize:11.5, color:"var(--ink-3)", padding:"2px 0"}}>
+              Verrà incassato su <strong>{nomeConto(contoLiquidita)}</strong> e registrata l'entrata in contabilità (BU TDP).
+              {completo && (team.quotaAssicurazione > 0) && " Iscrizione e assicurazione su conti separati."}
+            </div>
+            <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+              <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
+              <button type="submit" className="btn accent">Conferma e registra</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // PAGINA: TORNEO
 // ============================================================
 function PageTorneo({ stagione, onToast }) {
@@ -7187,6 +7534,7 @@ function App() {
           <button className={"navlink " + (page==="cespiti"?"active":"")} onClick={() => setPage("cespiti")}><span className="ico">▣</span> Cespiti</button>
           <button className={"navlink " + (page==="ammortamenti"?"active":"")} onClick={() => setPage("ammortamenti")}><span className="ico">⊟</span> Ammortamenti</button>
           <button className={"navlink " + (page==="cassa"?"active":"")} onClick={() => setPage("cassa")}><span className="ico">💵</span> Composizione Cassa</button>
+          <button className={"navlink " + (page==="iscrizioni"?"active":"")} onClick={() => setPage("iscrizioni")}><span className="ico">🧾</span> Iscrizioni TdP</button>
           <button className={"navlink " + (page==="torneo"?"active":"")} onClick={() => setPage("torneo")}><span className="ico">★</span> Torneo</button>
         </nav>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}></div>}
@@ -7211,6 +7559,7 @@ function App() {
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiIniziali} onToast={showToast} />}
+              {page === "iscrizioni" && <PageIscrizioniTdP stagione={stagione} conti={conti} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
             </>
           )}
