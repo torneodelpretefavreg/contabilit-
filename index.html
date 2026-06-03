@@ -6051,17 +6051,28 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
   const [iscrizioni, setIscrizioni] = useState([]);
   const [pagamenti, setPagamenti] = useState({});
   const [loading, setLoading] = useState(true);
+  const [errore, setErrore] = useState(null);
   const [modale, setModale] = useState(null); // { team, modo: "pagato"|"parziale" }
 
   // Legge le iscrizioni pubblicate dal TdP Manager (nodo top-level, condiviso)
   useEffect(() => {
-    if (!firebaseReady) return;
+    if (!firebaseReady) { setLoading(false); setErrore("Firebase non inizializzato."); return; }
     const ref = db.ref("iscrizioni_tdp");
-    const cb = ref.on("value", snap => {
-      const v = snap.val();
-      setIscrizioni(v ? Object.entries(v).map(([k, t]) => ({ ...t, teamId: t.teamId || k })) : []);
-      setLoading(false);
-    });
+    const cb = ref.on("value",
+      snap => {
+        const v = snap.val();
+        setIscrizioni(v ? Object.entries(v).map(([k, t]) => ({ ...t, teamId: t.teamId || k })) : []);
+        setErrore(null);
+        setLoading(false);
+      },
+      err => {
+        // tipicamente "permission_denied": le regole Firebase non coprono /iscrizioni_tdp
+        setErrore(err && err.code === "PERMISSION_DENIED"
+          ? "Accesso negato a /iscrizioni_tdp. Aggiorna le regole di sicurezza Firebase per consentire la lettura di questo nodo."
+          : "Errore lettura iscrizioni: " + (err && err.message ? err.message : err));
+        setLoading(false);
+      }
+    );
     return () => ref.off("value", cb);
   }, []);
 
@@ -6069,7 +6080,10 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
   useEffect(() => {
     if (!firebaseReady) return;
     const ref = db.ref("pagamenti_tdp");
-    const cb = ref.on("value", snap => setPagamenti(snap.val() || {}));
+    const cb = ref.on("value",
+      snap => setPagamenti(snap.val() || {}),
+      err => console.warn("Lettura pagamenti_tdp:", err && err.message ? err.message : err)
+    );
     return () => ref.off("value", cb);
   }, []);
 
@@ -6206,6 +6220,14 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
 
       {loading ? (
         <div className="empty-state">Caricamento iscrizioni…</div>
+      ) : errore ? (
+        <div className="empty-state" style={{padding:40, textAlign:"center"}}>
+          <div style={{fontSize:32, marginBottom:8}}>⚠️</div>
+          <div style={{color:"var(--danger)", fontWeight:600, marginBottom:6}}>{errore}</div>
+          <div style={{fontSize:12.5, color:"var(--ink-3)", maxWidth:520, margin:"0 auto"}}>
+            Nelle regole del Realtime Database aggiungi una sezione per <span className="mono">"iscrizioni_tdp"</span> (lettura) e <span className="mono">"pagamenti_tdp"</span> (lettura/scrittura), poi ricarica la pagina.
+          </div>
+        </div>
       ) : iscrizioni.length === 0 ? (
         <div className="empty-state" style={{padding:48}}>
           Nessuna iscrizione pubblicata dal TdP Manager su <span className="mono">/iscrizioni_tdp</span>.
