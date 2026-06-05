@@ -6313,11 +6313,19 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
     return { dovuto, incassato, daIncassare: dovuto - incassato, nSquadre: iscrizioni.length, nPagate };
   }, [iscrizioni, pagamenti]);
 
-  // Registra (o aggiorna) un pagamento + genera/aggiorna i movimenti contabili
-  const registraPagamento = async ({ team, importoPagato, metodo, contoLiquidita, dataPagamento, note, completato }) => {
+  // Registra (o aggiorna) un pagamento + genera/aggiorna i movimenti contabili.
+  // `righe` = [{ importo, contoLiquidita }, ...]: il pagamento puo essere ripartito su piu conti.
+  const registraPagamento = async ({ team, righe, dataPagamento, note, completato }) => {
     if (!firebaseReady) return alert("Firebase non disponibile");
     const teamId = team.teamId;
     try {
+      // Normalizzo le righe valide
+      const righeValide = (righe || [])
+        .map(r => ({ importo: Number(r.importo) || 0, contoLiquidita: Number(r.contoLiquidita) }))
+        .filter(r => r.importo > 0 && r.contoLiquidita);
+      if (righeValide.length === 0) return alert("Inserisci almeno una riga di incasso valida.");
+      const importoPagato = righeValide.reduce((s, r) => s + r.importo, 0);
+
       // 1) Rimuovo eventuali movimenti contabili creati in precedenza per questa squadra
       const precedente = pagamenti[teamId];
       const vecchiIds = (precedente && precedente.movimentiIds) || [];
@@ -6325,14 +6333,13 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
         await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
       }
 
-      // 2) Creo i nuovi movimenti (entrata) in base all'importo pagato
+      // 2) Creo i nuovi movimenti (entrata) ripartiti per conto di liquidità
       const nuoviIds = [];
       const quotaIscr = Number(team.quotaIscrizione) || 0;
       const quotaAss = Number(team.quotaAssicurazione) || 0;
       const base = {
         tipo: "entrata",
         data: dataPagamento,
-        contoLiquidita: Number(contoLiquidita),
         contoLiquiditaDest: null,
         categoria: "ISCRIZIONI TDP",
         bu: "TDP",
@@ -6349,30 +6356,50 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
         nuoviIds.push(ref.key);
       };
 
-      if (completato && quotaAss > 0) {
-        // Pagamento completo: separo iscrizione e assicurazione sui rispettivi conti
-        await pushMov({ ...base, contoPdC: CONTO_ISCRIZIONE, importo: quotaIscr,
-          descrizione: `Iscrizione TdP — ${team.nomeSquadra}` });
-        await pushMov({ ...base, contoPdC: CONTO_ASSICURAZIONE, importo: quotaAss,
-          descrizione: `Assicurazione TdP — ${team.nomeSquadra}` });
-      } else {
-        // Pagamento parziale o senza assicurazione: un'unica entrata su ISCRIZIONI C/ENT.
-        await pushMov({ ...base, contoPdC: CONTO_ISCRIZIONE, importo: Number(importoPagato),
-          descrizione: `Iscrizione TdP — ${team.nomeSquadra}${completato ? "" : " (acconto)"}` });
+      // Quanto destinare a ISCRIZIONE e quanto ad ASSICURAZIONE (in totale).
+      // La separazione la applico solo a saldo completo con assicurazione > 0;
+      // per gli acconti tutto su ISCRIZIONI C/ENT. (come prima).
+      let remIscr = (completato && quotaAss > 0) ? quotaIscr : importoPagato;
+      let remAss  = (completato && quotaAss > 0) ? quotaAss  : 0;
+
+      for (const r of righeValide) {
+        const movBase = { ...base, contoLiquidita: r.contoLiquidita };
+        let amt = r.importo;
+        const iscrPart = Math.min(amt, Math.max(0, remIscr));
+        if (iscrPart > 0.001) {
+          await pushMov({ ...movBase, contoPdC: CONTO_ISCRIZIONE, importo: Math.round(iscrPart * 100) / 100,
+            descrizione: `Iscrizione TdP — ${team.nomeSquadra}${completato ? "" : " (acconto)"}` });
+          remIscr -= iscrPart; amt -= iscrPart;
+        }
+        const assPart = Math.min(amt, Math.max(0, remAss));
+        if (assPart > 0.001) {
+          await pushMov({ ...movBase, contoPdC: CONTO_ASSICURAZIONE, importo: Math.round(assPart * 100) / 100,
+            descrizione: `Assicurazione TdP — ${team.nomeSquadra}` });
+          remAss -= assPart; amt -= assPart;
+        }
+        // Eventuale eccedenza residua su ISCRIZIONI C/ENT.
+        if (amt > 0.001) {
+          await pushMov({ ...movBase, contoPdC: CONTO_ISCRIZIONE, importo: Math.round(amt * 100) / 100,
+            descrizione: `Iscrizione TdP — ${team.nomeSquadra}${completato ? "" : " (acconto)"}` });
+        }
       }
 
       // 3) Scrivo il pagamento sul nodo condiviso
+      const metodoLabel = righeValide.length > 1
+        ? "misto"
+        : (METODI_TDP.find(m => m.conto === righeValide[0].contoLiquidita)?.val || "altro");
       await db.ref(`pagamenti_tdp/${teamId}`).set({
-        importoPagato: Number(importoPagato),
+        importoPagato: Math.round(importoPagato * 100) / 100,
+        righe: righeValide,
         dataPagamento,
-        metodo,
+        metodo: metodoLabel,
         completato: !!completato,
         note: note || "",
         movimentiIds: nuoviIds,
         registratoIl: new Date().toISOString(),
       });
 
-      onToast(`Pagamento ${team.nomeSquadra} registrato · entrata in contabilità`);
+      onToast(`Pagamento ${team.nomeSquadra} registrato · ${righeValide.length > 1 ? righeValide.length + " conti" : "entrata"} in contabilità`);
       setModale(null);
     } catch (e) {
       alert("Errore: " + e.message);
@@ -6519,31 +6546,52 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
 function PagamentoTdPModal({ team, modo, pagamentoEsistente, conti, onConfirm, onClose }) {
   const dovuto = Number(team.totaleDovuto) || 0;
   const completo = modo === "pagato";
-  const [importo, setImporto] = useState(completo ? dovuto : (pagamentoEsistente?.importoPagato || ""));
-  const [metodo, setMetodo] = useState(pagamentoEsistente?.metodo || "contanti");
-  const metodoConf = METODI_TDP.find(m => m.val === metodo) || METODI_TDP[0];
-  const [contoLiquidita, setContoLiquidita] = useState(metodoConf.conto);
+
+  // Conto suggerito di default (contanti, se presente)
+  const contoDefault = (METODI_TDP.find(m => m.val === "contanti") || {}).conto
+    || (CONTI_LIQUIDITA[0] && CONTI_LIQUIDITA[0].codice);
+
+  // Righe iniziali: dal pagamento esistente se presente, altrimenti una sola riga.
+  const righeIniziali = () => {
+    if (pagamentoEsistente && Array.isArray(pagamentoEsistente.righe) && pagamentoEsistente.righe.length) {
+      return pagamentoEsistente.righe.map(r => ({ importo: String(r.importo), contoLiquidita: Number(r.contoLiquidita) }));
+    }
+    if (pagamentoEsistente && pagamentoEsistente.importoPagato) {
+      const c = (METODI_TDP.find(m => m.val === pagamentoEsistente.metodo) || {}).conto || contoDefault;
+      return [{ importo: String(pagamentoEsistente.importoPagato), contoLiquidita: Number(c) }];
+    }
+    return [{ importo: completo ? String(dovuto) : "", contoLiquidita: Number(contoDefault) }];
+  };
+
+  const [righe, setRighe] = useState(righeIniziali);
   const [dataPagamento, setDataPagamento] = useState(pagamentoEsistente?.dataPagamento || new Date().toISOString().slice(0,10));
   const [note, setNote] = useState(pagamentoEsistente?.note || "");
 
-  // Quando cambio metodo, aggiorno il conto di liquidità suggerito
-  useEffect(() => {
-    const m = METODI_TDP.find(m => m.val === metodo);
-    if (m) setContoLiquidita(m.conto);
-  }, [metodo]);
+  const totale = righe.reduce((s, r) => s + (Number(r.importo) || 0), 0);
+  const diff = Math.round((dovuto - totale) * 100) / 100;
 
   const nomeConto = (cod) => {
     const c = (conti || []).find(c => Number(c.codice) === Number(cod)) || CONTI_LIQUIDITA.find(c => c.codice === Number(cod));
-    return c ? c.nome : `Conto ${cod}`;
+    return c ? c.nome.trim() : `Conto ${cod}`;
   };
+
+  const setRiga = (i, patch) => setRighe(rs => rs.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+  const addRiga = () => setRighe(rs => [...rs, { importo: completo && diff > 0.01 ? String(diff) : "", contoLiquidita: Number(contoDefault) }]);
+  const removeRiga = (i) => setRighe(rs => rs.length > 1 ? rs.filter((_, idx) => idx !== i) : rs);
 
   const submit = (e) => {
     e.preventDefault();
-    const imp = Number(importo);
-    if (!imp || imp <= 0) return alert("Importo non valido");
-    if (imp > dovuto + 0.01 && !confirm(`L'importo (${fmt(imp)}) supera il dovuto (${fmt(dovuto)}). Procedere comunque?`)) return;
-    const completato = completo || imp >= dovuto - 0.01;
-    onConfirm({ team, importoPagato: imp, metodo, contoLiquidita, dataPagamento, note, completato });
+    const righeValide = righe
+      .map(r => ({ importo: Number(r.importo) || 0, contoLiquidita: Number(r.contoLiquidita) }))
+      .filter(r => r.importo > 0 && r.contoLiquidita);
+    if (righeValide.length === 0) return alert("Inserisci almeno una riga con importo e conto.");
+    const tot = righeValide.reduce((s, r) => s + r.importo, 0);
+    if (completo && Math.abs(dovuto - tot) > 0.01) {
+      return alert(`Per segnare la squadra come PAGATA la somma delle righe (${fmt(tot)}) deve coincidere col dovuto (${fmt(dovuto)}).\nDifferenza: ${fmt(dovuto - tot)}.`);
+    }
+    if (tot > dovuto + 0.01 && !confirm(`Il totale inserito (${fmt(tot)}) supera il dovuto (${fmt(dovuto)}). Procedere comunque?`)) return;
+    const completato = completo || tot >= dovuto - 0.01;
+    onConfirm({ team, righe: righeValide, dataPagamento, note, completato });
   };
 
   return (
@@ -6559,40 +6607,47 @@ function PagamentoTdPModal({ team, modo, pagamentoEsistente, conti, onConfirm, o
             <span>Iscrizione {fmt(team.quotaIscrizione||0)} · Assicur. {fmt(team.quotaAssicurazione||0)}</span>
           </div>
           <form className="form-grid" onSubmit={submit}>
-            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
-              <div>
-                <label>Importo €</label>
-                <input type="number" inputMode="decimal" step="0.01" value={importo}
-                       onChange={e => setImporto(e.target.value)} autoFocus
-                       readOnly={completo}
-                       style={completo ? {background:"var(--panel-2)", fontWeight:600} : {}}/>
-              </div>
-              <div>
-                <label>Data pagamento</label>
-                <input type="date" value={dataPagamento} onChange={e => setDataPagamento(e.target.value)} required/>
-              </div>
+            <div className="form-row" style={{gridTemplateColumns:"1fr", gap:8}}>
+              <label>Incasso ripartito per conto</label>
+              {righe.map((r, i) => (
+                <div key={i} style={{display:"flex", gap:8, alignItems:"center"}}>
+                  <input type="number" inputMode="decimal" step="0.01" placeholder="Importo €" value={r.importo}
+                         autoFocus={i === 0}
+                         onChange={e => setRiga(i, { importo: e.target.value })}
+                         style={{flex:"0 0 130px"}}/>
+                  <select value={r.contoLiquidita} onChange={e => setRiga(i, { contoLiquidita: Number(e.target.value) })} style={{flex:1}}>
+                    {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2,"0")} · {c.nome.trim()}</option>)}
+                  </select>
+                  <button type="button" className="btn danger sm" onClick={() => removeRiga(i)}
+                          disabled={righe.length <= 1} title="Rimuovi riga" style={{flex:"0 0 auto"}}>🗑</button>
+                </div>
+              ))}
+              <button type="button" className="btn ghost sm" onClick={addRiga} style={{alignSelf:"flex-start", marginTop:2}}>
+                + Aggiungi conto
+              </button>
             </div>
-            <div className="form-row" style={{gridTemplateColumns:"1fr 1fr", gap:10}}>
-              <div>
-                <label>Metodo</label>
-                <select value={metodo} onChange={e => setMetodo(e.target.value)}>
-                  {METODI_TDP.map(m => <option key={m.val} value={m.val}>{m.label}</option>)}
-                </select>
-              </div>
-              <div>
-                <label>Conto liquidità (incasso)</label>
-                <select value={contoLiquidita} onChange={e => setContoLiquidita(Number(e.target.value))}>
-                  {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2,"0")} · {c.nome}</option>)}
-                </select>
-              </div>
+
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:12, padding:"8px 12px",
+                         background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:6, fontSize:13}}>
+              <span>Totale inserito: <strong className="mono">{fmtEuro(totale)}</strong></span>
+              {completo
+                ? <span style={{color: Math.abs(diff) < 0.01 ? "var(--accent-ink)" : "var(--danger)", fontWeight:600}}>
+                    {Math.abs(diff) < 0.01 ? "✓ Coincide col dovuto" : `Differenza col dovuto: ${fmt(diff)}`}
+                  </span>
+                : <span style={{color:"var(--ink-3)"}}>Resto: {fmt(Math.max(0, diff))}</span>}
+            </div>
+
+            <div className="form-row">
+              <label>Data pagamento</label>
+              <input type="date" value={dataPagamento} onChange={e => setDataPagamento(e.target.value)} required/>
             </div>
             <div className="form-row">
               <label>Note (opzionale)</label>
-              <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="es. pagato in contanti alla riunione capitani"/>
+              <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="es. 100 contanti + resto bonifico"/>
             </div>
             <div style={{fontSize:11.5, color:"var(--ink-3)", padding:"2px 0"}}>
-              Verrà incassato su <strong>{nomeConto(contoLiquidita)}</strong> e registrata l'entrata in contabilità (BU TDP).
-              {completo && (team.quotaAssicurazione > 0) && " Iscrizione e assicurazione su conti separati."}
+              Verrà registrata un'entrata in contabilità per ogni conto (BU TDP).
+              {completo && (team.quotaAssicurazione > 0) && " Iscrizione e assicurazione vengono separate sui conti 6 e 7 a livello complessivo."}
             </div>
             <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
               <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
