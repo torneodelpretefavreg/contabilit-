@@ -785,6 +785,10 @@
     .kpi .value { font-size: 22px; }
   }
   .tbl tbody tr.row-click:hover { background: var(--accent-soft); }
+  .rf-compact table.tbl { font-size: 11px; }
+  .rf-compact table.tbl th { padding: 6px 7px; font-size: 9px; letter-spacing: .02em; }
+  .rf-compact table.tbl td { padding: 5px 7px; }
+  .rf-compact table.tbl td.num, .rf-compact table.tbl th.num { font-size: 10.5px; }
 </style>
 </head>
 <body>
@@ -892,6 +896,7 @@ function useFirebaseData(stagione) {
   const [movimenti, setMovimenti] = useState([]);
   const [cespiti, setCespiti] = useState([]);
   const [saldiIniziali, setSaldiIniziali] = useState({});
+  const [categorieRF, setCategorieRF] = useState({ entrate: [], uscite: [] });
   const [bu, setBu] = useState([...BUSINESS_UNITS_DEFAULT]);
   const [loading, setLoading] = useState(true);
   const [seedingDone, setSeedingDone] = useState(false);
@@ -905,6 +910,7 @@ function useFirebaseData(stagione) {
       db.ref(`stagioni/${stagione}/cespiti`),
       db.ref(`stagioni/${stagione}/saldiIniziali`),
       db.ref(`stagioni/${stagione}/businessUnits`),
+      db.ref(`stagioni/${stagione}/categorieRF`),
     ];
     const cbs = [
       refs[0].on("value", snap => setConti(snap.val() ? Object.values(snap.val()) : [])),
@@ -922,6 +928,13 @@ function useFirebaseData(stagione) {
         const list = v ? Object.values(v).map(b => b.nome).sort() : [...BUSINESS_UNITS_DEFAULT];
         setBu(list);
         BUSINESS_UNITS = list; // aggiorna la variabile globale per backward compat
+      }),
+      refs[5].on("value", snap => {
+        const v = snap.val() || {};
+        setCategorieRF({
+          entrate: Array.isArray(v.entrate) ? v.entrate.filter(Boolean) : (v.entrate ? Object.values(v.entrate).filter(Boolean) : []),
+          uscite:  Array.isArray(v.uscite)  ? v.uscite.filter(Boolean)  : (v.uscite  ? Object.values(v.uscite).filter(Boolean)  : []),
+        });
       }),
     ];
     return () => refs.forEach((r,i) => r.off("value", cbs[i]));
@@ -966,7 +979,7 @@ function useFirebaseData(stagione) {
     setSeedingDone(true);
   }, [stagione]);
 
-  return { conti, movimenti, cespiti, saldiIniziali, bu, loading, seedStagione };
+  return { conti, movimenti, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione };
 }
 
 // ============================================================
@@ -1008,7 +1021,7 @@ function Login({ onLogin }) {
 // ============================================================
 // MOVIMENTO FORM
 // ============================================================
-function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
+function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entrate: [], uscite: [] } }) {
   const [tipo, setTipo] = useState(mov?.tipo || "uscita");
   const [data, setData] = useState(mov?.data || todayISO());
   const [contoLiquidita, setContoLiquidita] = useState(mov?.contoLiquidita ?? "");
@@ -1364,8 +1377,20 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null }) {
       {tipo !== "giroconto" && (
         <>
           <div className="form-row">
-            <label>Categoria libera</label>
-            <input type="text" value={categoria} onChange={e => setCategoria(e.target.value)} placeholder="es. ONERI CSI" />
+            <label>Categoria (rendiconto) <span className="req">*</span></label>
+            {(() => {
+              const opts = (tipo === "entrata" ? categorie.entrate : categorie.uscite) || [];
+              const lista = categoria && !opts.includes(categoria) ? [categoria, ...opts] : opts;
+              return (
+                <select value={categoria} onChange={e => setCategoria(e.target.value)}>
+                  <option value="">— seleziona categoria —</option>
+                  {lista.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              );
+            })()}
+            <div style={{fontSize:11.5, color:"var(--ink-3)", marginTop:4}}>
+              Le categorie si gestiscono nella sezione <strong>Rendiconto Finanziario</strong>.
+            </div>
           </div>
           <div className="form-row">
             <label>Business Unit</label>
@@ -1762,7 +1787,7 @@ function ManutenzioneBox({ stagione }) {
 // ============================================================
 // PAGINA: NUOVO MOVIMENTO
 // ============================================================
-function PageNuovo({ conti, stagione, onSaved, onCancel }) {
+function PageNuovo({ conti, stagione, categorie, onSaved, onCancel }) {
   const [cespitoFromMov, setCespitoFromMov] = useState(null);
 
   const contiMap = useMemo(() => {
@@ -1845,7 +1870,7 @@ function PageNuovo({ conti, stagione, onSaved, onCancel }) {
         </div>
       </div>
       <div className="card" style={{maxWidth:760}}>
-        <MovimentoForm conti={conti} onSave={handleSave} onCancel={onCancel} />
+        <MovimentoForm conti={conti} categorie={categorie} onSave={handleSave} onCancel={onCancel} />
       </div>
 
       {cespitoFromMov && (
@@ -1962,7 +1987,7 @@ function CespiteFormQuick({ cespite, onSave, onSkip }) {
 // ============================================================
 // PAGINA: LISTA MOVIMENTI
 // ============================================================
-function PageMovimenti({ conti, movimenti, stagione, onToast }) {
+function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
   const [filterTipo, setFilterTipo] = useState("");
   const [filterMese, setFilterMese] = useState("");
   const [filterBu, setFilterBu] = useState("");
@@ -2298,7 +2323,7 @@ function PageMovimenti({ conti, movimenti, stagione, onToast }) {
               <button className="btn ghost sm" onClick={() => setEditing(null)}>✕</button>
             </div>
             <div className="modal-body">
-              <MovimentoForm conti={conti} mov={editing} onSave={handleEdit} onCancel={() => setEditing(null)} />
+              <MovimentoForm conti={conti} mov={editing} categorie={categorie} onSave={handleEdit} onCancel={() => setEditing(null)} />
             </div>
           </div>
         </div>
@@ -3408,140 +3433,300 @@ function PageBilancio({ conti, movimenti, saldiIniziali }) {
   );
 }
 
+// Unione tra categorie gestite (categorieRF) e categorie già presenti nei movimenti.
+// Restituisce { entrate:[...], uscite:[...] } ordinate e senza duplicati: così il
+// menu a tendina mostra sempre le opzioni previste + quelle già usate nei dati.
+function mergeCategorie(categorieRF, movimenti) {
+  const setE = new Set((categorieRF && categorieRF.entrate) || []);
+  const setU = new Set((categorieRF && categorieRF.uscite) || []);
+  (movimenti || []).forEach(m => {
+    const cat = (m.categoria || "").trim();
+    if (!cat) return;
+    if (m.tipo === "entrata") setE.add(cat);
+    else if (m.tipo === "uscita") setU.add(cat);
+  });
+  const ord = (s) => Array.from(s).sort((a,b)=>a.localeCompare(b));
+  return { entrate: ord(setE), uscite: ord(setU) };
+}
+
+// ============================================================
+// HELPER: costruzione Rendiconto Finanziario (schema unico)
+// ============================================================
+// Schema ispirato al foglio "RF NEW": un solo prospetto verticale con
+// DISP. INIZIALI -> ENTRATE OPERATIVE (per categoria) -> TOTALE -> USCITE
+// OPERATIVE -> TOTALE -> SALDO OPERATIVO (A-B) -> INVESTIMENTI -> TOTALE ->
+// DISP. FINALI -> VARIAZIONE %. Le categorie sono quelle dei movimenti.
+// Gli investimenti = uscite su conti immobilizzazione (IMM. *).
+function buildRendiconto(movimenti, conti, saldiIniziali) {
+  const cMap = {};
+  (conti || []).forEach(c => { cMap[c.codice] = c; });
+  const isInvest = (m) => {
+    const cat = (cMap[m.contoPdC] && cMap[m.contoPdC].categoria || "").toUpperCase();
+    return cat.indexOf("IMM.") === 0 || cat.indexOf("IMM.") > -1;
+  };
+
+  const entrate = {}, usciteOp = {}, investimenti = {};
+  const addTo = (mappa, cat, mese, v) => {
+    if (!mappa[cat]) mappa[cat] = {};
+    mappa[cat][mese] = (mappa[cat][mese] || 0) + v;
+  };
+  (movimenti || []).forEach(m => {
+    if (m.nonMonetario) return;          // i movimenti non monetari (ammortamenti) non incidono sulla liquidità
+    const cat = m.categoria || "(senza categoria)";
+    const mese = m.mese || "?";
+    if (m.tipo === "entrata") addTo(entrate, cat, mese, m.importo);
+    else if (m.tipo === "uscita") addTo(isInvest(m) ? investimenti : usciteOp, cat, mese, m.importo);
+    // i giroconti sono trasferimenti interni: netti zero sulla liquidità totale -> esclusi
+  });
+
+  const sumMese = (mappa) => {
+    const t = {}; MESI.forEach(x => t[x] = 0);
+    Object.values(mappa).forEach(r => Object.entries(r).forEach(([mm, v]) => { if (t[mm] !== undefined) t[mm] += v; }));
+    return t;
+  };
+  const totEntrate = sumMese(entrate);
+  const totUsciteOp = sumMese(usciteOp);
+  const totInvest = sumMese(investimenti);
+  const saldoOp = {}; MESI.forEach(m => saldoOp[m] = totEntrate[m] - totUsciteOp[m]);
+
+  const openingTot = CONTI_LIQUIDITA.reduce((s, c) => s + (Number(saldiIniziali && saldiIniziali[c.codice]) || 0), 0);
+  const dispIniz = {}, dispFin = {}, variaz = {};
+  let running = openingTot;
+  MESI.forEach(m => {
+    dispIniz[m] = running;
+    const net = totEntrate[m] - totUsciteOp[m] - totInvest[m];
+    dispFin[m] = running + net;
+    variaz[m] = Math.abs(dispIniz[m]) > 0.001 ? net / dispIniz[m] : 0;
+    running = dispFin[m];
+  });
+
+  const grandEntrate = MESI.reduce((s, m) => s + totEntrate[m], 0);
+  const grandUsciteOp = MESI.reduce((s, m) => s + totUsciteOp[m], 0);
+  const grandInvest = MESI.reduce((s, m) => s + totInvest[m], 0);
+  const grandSaldoOp = grandEntrate - grandUsciteOp;
+  const closing = openingTot + grandEntrate - grandUsciteOp - grandInvest;
+  const variazTot = Math.abs(openingTot) > 0.001 ? (closing - openingTot) / openingTot : 0;
+
+  return {
+    entrate, usciteOp, investimenti,
+    totEntrate, totUsciteOp, totInvest, saldoOp,
+    dispIniz, dispFin, variaz, openingTot, closing,
+    grandEntrate, grandUsciteOp, grandInvest, grandSaldoOp, variazTot,
+    isInvest,
+  };
+}
+
+// Matrice del Rendiconto per gli export (PDF/Excel): righe ordinate dello schema unico.
+function rendicontoMatrix(rf) {
+  const rows = [];
+  const valuesOf = (mappa) => MESI.map(m => mappa[m] || 0);
+  rows.push({ type:"disp", label:"DISP. INIZIALI", values: valuesOf(rf.dispIniz), tot: rf.openingTot });
+  rows.push({ type:"header", label:"RIEPILOGO ENTRATE" });
+  Object.keys(rf.entrate).sort((a,b)=>a.localeCompare(b)).forEach(cat =>
+    rows.push({ type:"cat", label: cat, values: valuesOf(rf.entrate[cat]), tot: MESI.reduce((s,m)=>s+(rf.entrate[cat][m]||0),0) }));
+  rows.push({ type:"total", label:"TOTALE ENTRATE OPERATIVE (A)", values: valuesOf(rf.totEntrate), tot: rf.grandEntrate });
+  rows.push({ type:"header", label:"RIEPILOGO USCITE" });
+  Object.keys(rf.usciteOp).sort((a,b)=>a.localeCompare(b)).forEach(cat =>
+    rows.push({ type:"cat", label: cat, values: valuesOf(rf.usciteOp[cat]), tot: MESI.reduce((s,m)=>s+(rf.usciteOp[cat][m]||0),0) }));
+  rows.push({ type:"total", label:"TOTALE USCITE OPERATIVE (B)", values: valuesOf(rf.totUsciteOp), tot: rf.grandUsciteOp });
+  rows.push({ type:"total", label:"SALDO OPERATIVO (A - B)", values: valuesOf(rf.saldoOp), tot: rf.grandSaldoOp });
+  rows.push({ type:"header", label:"RIEPILOGO INVESTIMENTI" });
+  Object.keys(rf.investimenti).sort((a,b)=>a.localeCompare(b)).forEach(cat =>
+    rows.push({ type:"cat", label: cat, values: valuesOf(rf.investimenti[cat]), tot: MESI.reduce((s,m)=>s+(rf.investimenti[cat][m]||0),0) }));
+  rows.push({ type:"total", label:"TOTALE INVESTIMENTI", values: valuesOf(rf.totInvest), tot: rf.grandInvest });
+  rows.push({ type:"disp", label:"DISP. FINALI", values: valuesOf(rf.dispFin), tot: rf.closing });
+  rows.push({ type:"pct", label:"VARIAZIONE %", values: MESI.map(m => rf.variaz[m]), tot: rf.variazTot });
+  return rows;
+}
+
 // ============================================================
 // PAGINA: RENDICONTO FINANZIARIO
 // ============================================================
-function PageRendiconto({ conti, movimenti }) {
+function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF, onToast }) {
   const [filterBu, setFilterBu] = useState("");
-  const [drillDown, setDrillDown] = useState(null); // { tipo, categoria, mese, movs }
+  const [drillDown, setDrillDown] = useState(null); // { sezione, tipo, categoria, mese, movs }
+  const [vista, setVista] = useState("mensile"); // mensile | totali
+  const [collapsed, setCollapsed] = useState({ entrate: false, uscite: false, investimenti: false });
+  const [gestApri, setGestApri] = useState(false);
+
+  const toggleSez = (k) => setCollapsed(c => ({ ...c, [k]: !c[k] }));
+  const mostraMesi = vista === "mensile";
 
   const filtered = useMemo(() => movimenti.filter(m => !filterBu || m.bu === filterBu), [movimenti, filterBu]);
+  const rf = useMemo(() => buildRendiconto(filtered, conti, saldiIniziali), [filtered, conti, saldiIniziali]);
 
-  // Matrice categoria × mese per entrate e uscite
-  const tabella = useMemo(() => {
-    const entrate = {};
-    const uscite = {};
-    filtered.forEach(m => {
-      const cat = m.categoria || "(senza categoria)";
-      const mese = m.mese || "?";
-      if (m.tipo === "entrata") {
-        if (!entrate[cat]) entrate[cat] = {};
-        entrate[cat][mese] = (entrate[cat][mese] || 0) + m.importo;
-      } else if (m.tipo === "uscita") {
-        if (!uscite[cat]) uscite[cat] = {};
-        uscite[cat][mese] = (uscite[cat][mese] || 0) + m.importo;
-      }
-    });
-    return { entrate, uscite };
-  }, [filtered]);
+  // Mostro solo i mesi che hanno almeno un movimento (così la tabella sta in pagina)
+  const mesiAttivi = MESI.filter(m => (rf.totEntrate[m] || 0) !== 0 || (rf.totUsciteOp[m] || 0) !== 0 || (rf.totInvest[m] || 0) !== 0);
+  const mesiVis = mostraMesi ? (mesiAttivi.length ? mesiAttivi : MESI) : [];
+  const nCols = mesiVis.length + 2;
 
-  const totaliPerMese = (mappa) => {
-    const tot = {};
-    MESI.forEach(m => tot[m] = 0);
-    Object.values(mappa).forEach(rigaMesi => {
-      Object.entries(rigaMesi).forEach(([m, v]) => {
-        if (tot[m] !== undefined) tot[m] += v;
-      });
+  const fmtPct = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
+
+  const apriDrill = (sezione, categoria, mese) => {
+    const movs = filtered.filter(m => {
+      if ((m.categoria || "(senza categoria)") !== categoria || m.nonMonetario) return false;
+      if (mese !== "__tot__" && m.mese !== mese) return false;
+      if (sezione === "entrate") return m.tipo === "entrata";
+      if (sezione === "uscite") return m.tipo === "uscita" && !rf.isInvest(m);
+      if (sezione === "investimenti") return m.tipo === "uscita" && rf.isInvest(m);
+      return false;
     });
-    return tot;
+    setDrillDown({ sezione, categoria, mese, movs });
   };
 
-  const totEntrateMese = totaliPerMese(tabella.entrate);
-  const totUsciteMese = totaliPerMese(tabella.uscite);
-  const totEntrateGen = Object.values(totEntrateMese).reduce((s,v)=>s+v, 0);
-  const totUsciteGen = Object.values(totUsciteMese).reduce((s,v)=>s+v, 0);
+  // Celle dei valori mensili (mostrate solo in vista "mensile")
+  const celleMesi = (mappa, classCol, onCell) => mostraMesi ? mesiVis.map(m => (
+    <td key={m} className={"num " + (classCol||"")}
+        style={onCell && mappa[m] ? {cursor:"pointer", textDecoration:"underline dotted"} : {}}
+        onClick={() => onCell && mappa[m] && onCell(m)} title={onCell && mappa[m] ? "Click per dettagli" : ""}>
+      {mappa[m] ? fmt(mappa[m]) : ""}
+    </td>
+  )) : null;
 
-  const apriDrill = (tipo, categoria, mese) => {
-    const movs = filtered.filter(m => m.tipo === tipo && (m.categoria || "(senza categoria)") === categoria && m.mese === mese);
-    setDrillDown({ tipo, categoria, mese, movs });
-  };
-
-  const renderSezione = (titolo, tipo, mappa, totMese, totGen, classCol) => {
-    const rows = Object.entries(mappa);
-    if (rows.length === 0) return null;
+  const RigaCat = ({ sezione, cat, mesi, classCol }) => {
+    const totRiga = MESI.reduce((s, m) => s + (mesi[m] || 0), 0);
     return (
-      <div style={{marginBottom:28}}>
-        <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"0 0 10px"}}>{titolo}</h3>
-        <div className="tbl-wrap" style={{overflowX:"auto"}}>
-          <table className="tbl" style={{fontSize:12}}>
-            <thead>
-              <tr>
-                <th style={{minWidth:170, position:"sticky", left:0, background:"var(--panel-2)", zIndex:2}}>Categoria</th>
-                {MESI.map(m => <th key={m} className="num" style={{textTransform:"capitalize", minWidth:80}}>{m.slice(0,3)}</th>)}
-                <th className="num" style={{minWidth:90, background:"var(--panel-2)"}}>Totale</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
-                const totRiga = Object.values(mesi).reduce((s,v)=>s+v, 0);
-                return (
-                  <tr key={cat}>
-                    <td style={{position:"sticky", left:0, background:"var(--panel)", fontWeight:500}}>{cat}</td>
-                    {MESI.map(m => (
-                      <td key={m} className={"num " + classCol} style={mesi[m] ? {cursor:"pointer", textDecoration:"underline dotted"} : {}}
-                          onClick={() => mesi[m] && apriDrill(tipo, cat, m)}
-                          title={mesi[m] ? "Click per dettagli" : ""}>
-                        {mesi[m] ? fmt(mesi[m]) : ""}
-                      </td>
-                    ))}
-                    <td className="num" style={{fontWeight:600}}>{fmt(totRiga)}</td>
-                  </tr>
-                );
-              })}
-              <tr style={{borderTop:"2px solid var(--ink)", fontWeight:600, background:"var(--panel-2)"}}>
-                <td style={{position:"sticky", left:0, background:"var(--panel-2)", fontFamily:"'Fraunces',serif"}}>Totale</td>
-                {MESI.map(m => <td key={m} className={"num " + classCol}>{totMese[m] ? fmt(totMese[m]) : ""}</td>)}
-                <td className="num" style={{fontWeight:700}}>{fmt(totGen)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <tr>
+        <td style={{position:"sticky", left:0, background:"var(--panel)", paddingLeft:22}}>{cat}</td>
+        {celleMesi(mesi, classCol, (m) => apriDrill(sezione, cat, m))}
+        <td className={"num " + classCol} style={totRiga ? {fontWeight:600, cursor:"pointer", textDecoration:"underline dotted"} : {fontWeight:600}}
+            onClick={() => totRiga && apriDrill(sezione, cat, "__tot__")} title={totRiga ? "Click per dettagli" : ""}>
+          {totRiga ? fmt(totRiga) : ""}
+        </td>
+      </tr>
     );
   };
+
+  // Intestazione di sezione, cliccabile per collassare/espandere (come il raggruppamento Excel)
+  const RigaHeader = ({ label, sezKey }) => (
+    <tr style={{background:"var(--panel-2)", cursor:"pointer"}} onClick={() => toggleSez(sezKey)}>
+      <td colSpan={nCols} style={{position:"sticky", left:0, fontWeight:700, fontSize:11.5, letterSpacing:".04em",
+           textTransform:"uppercase", color:"var(--ink-2)", background:"var(--panel-2)"}}>
+        <span style={{display:"inline-block", width:16}}>{collapsed[sezKey] ? "▸" : "▾"}</span>{label}
+        {collapsed[sezKey] && <span style={{fontWeight:400, textTransform:"none", color:"var(--ink-3)", marginLeft:8}}>(raggruppato)</span>}
+      </td>
+    </tr>
+  );
+
+  const RigaTotale = ({ label, perMese, tot, strong, classCol }) => (
+    <tr style={strong ? {fontWeight:700, background:"var(--panel-2)", borderTop:"1.5px solid var(--ink)"} : {fontWeight:600}}>
+      <td style={{position:"sticky", left:0, background:"var(--panel-2)", fontFamily: strong ? "'Fraunces',serif" : undefined}}>{label}</td>
+      {mostraMesi && mesiVis.map(m => <td key={m} className={"num " + (classCol||"")}>{perMese[m] ? fmt(perMese[m]) : ""}</td>)}
+      <td className="num">{fmt(tot)}</td>
+    </tr>
+  );
+
+  const RigaVuota = ({ label }) => (
+    <tr><td style={{position:"sticky", left:0, background:"var(--panel)", paddingLeft:22, color:"var(--ink-3)"}}>{label}</td>
+      {mostraMesi && mesiVis.map(m=><td key={m}></td>)}<td></td></tr>
+  );
+
+  const catEntrate = Object.keys(rf.entrate).sort((a,b)=>a.localeCompare(b));
+  const catUscite = Object.keys(rf.usciteOp).sort((a,b)=>a.localeCompare(b));
+  const catInvest = Object.keys(rf.investimenti).sort((a,b)=>a.localeCompare(b));
+  const flussoNetto = rf.closing - rf.openingTot;
 
   return (
     <div>
       <div className="page-head">
         <div>
           <h2>Rendiconto Finanziario</h2>
-          <div className="sub">Flussi entrate/uscite per categoria e mese · click su una cella per i dettagli</div>
+          <div className="sub">Prospetto unico dei flussi di liquidità · click su una cella per i dettagli</div>
         </div>
       </div>
 
-      <div className="filters">
+      <CategorieManager stagione={stagione} categorieRF={categorieRF} movimenti={movimenti}
+        aperto={gestApri} onToggle={() => setGestApri(o => !o)} onToast={onToast} />
+
+      <div className="filters" style={{marginTop:14}}>
         <span className="label">Filtra:</span>
         <select value={filterBu} onChange={e => setFilterBu(e.target.value)}>
           <option value="">Tutte le BU</option>
           {BUSINESS_UNITS.map(b => <option key={b} value={b}>{b}</option>)}
         </select>
+        <span className="label">Vista:</span>
+        <select value={vista} onChange={e => setVista(e.target.value)}>
+          <option value="mensile">Per mese</option>
+          <option value="totali">Solo totali</option>
+        </select>
+        <button className="btn ghost sm" onClick={() => setCollapsed({entrate:true, uscite:true, investimenti:true})}>Raggruppa tutto</button>
+        <button className="btn ghost sm" onClick={() => setCollapsed({entrate:false, uscite:false, investimenti:false})}>Espandi tutto</button>
       </div>
 
       <div className="kpi-grid">
-        <div className="kpi">
-          <div className="label">Entrate totali</div>
-          <div className="value" style={{color:"var(--accent)"}}>{fmtEuro(totEntrateGen)}</div>
-        </div>
-        <div className="kpi">
-          <div className="label">Uscite totali</div>
-          <div className="value" style={{color:"var(--danger)"}}>{fmtEuro(totUsciteGen)}</div>
-        </div>
-        <div className="kpi accent">
-          <div className="label">Flusso netto</div>
-          <div className="value">{fmtEuro(totEntrateGen - totUsciteGen)}</div>
-          <div className="hint">Entrate − Uscite</div>
-        </div>
+        <div className="kpi"><div className="label">Entrate operative</div><div className="value" style={{color:"var(--accent)"}}>{fmtEuro(rf.grandEntrate)}</div></div>
+        <div className="kpi"><div className="label">Uscite operative</div><div className="value" style={{color:"var(--danger)"}}>{fmtEuro(rf.grandUsciteOp)}</div></div>
+        <div className="kpi"><div className="label">Investimenti</div><div className="value" style={{color:"var(--danger)"}}>{fmtEuro(rf.grandInvest)}</div></div>
+        <div className="kpi accent"><div className="label">Flusso netto</div><div className={"value " + (flussoNetto < 0 ? "neg" : "")}>{fmtEuro(flussoNetto)}</div><div className="hint">Disp. {fmt(rf.openingTot)} → {fmt(rf.closing)}</div></div>
       </div>
 
-      {renderSezione("Entrate per categoria e mese", "entrata", tabella.entrate, totEntrateMese, totEntrateGen, "pos")}
-      {renderSezione("Uscite per categoria e mese", "uscita", tabella.uscite, totUsciteMese, totUsciteGen, "neg")}
+      <div className="tbl-wrap rf-compact" style={{overflowX:"auto", marginTop:8}}>
+        <table className="tbl" style={{fontSize:11}}>
+          <thead>
+            <tr>
+              <th style={{minWidth:150, position:"sticky", left:0, background:"var(--panel-2)", zIndex:2}}>Voce</th>
+              {mostraMesi && mesiVis.map(m => <th key={m} className="num" style={{textTransform:"capitalize", minWidth:50}}>{m.slice(0,3)}</th>)}
+              <th className="num" style={{minWidth:84, background:"var(--panel-2)"}}>Totale</th>
+            </tr>
+          </thead>
+          <tbody>
+            {/* DISP. INIZIALI */}
+            <tr style={{fontWeight:700}}>
+              <td style={{position:"sticky", left:0, background:"var(--panel)"}}>DISP. INIZIALI</td>
+              {mostraMesi && mesiVis.map(m => <td key={m} className="num">{fmt(rf.dispIniz[m])}</td>)}
+              <td className="num">{fmt(rf.openingTot)}</td>
+            </tr>
+
+            {/* ENTRATE */}
+            <RigaHeader label="Riepilogo entrate" sezKey="entrate" />
+            {!collapsed.entrate && (catEntrate.length === 0
+              ? <RigaVuota label="nessuna entrata" />
+              : catEntrate.map(cat => <RigaCat key={cat} sezione="entrate" cat={cat} mesi={rf.entrate[cat]} classCol="pos" />))}
+            <RigaTotale label="TOTALE ENTRATE OPERATIVE (A)" perMese={rf.totEntrate} tot={rf.grandEntrate} classCol="pos" />
+
+            {/* USCITE */}
+            <RigaHeader label="Riepilogo uscite" sezKey="uscite" />
+            {!collapsed.uscite && (catUscite.length === 0
+              ? <RigaVuota label="nessuna uscita" />
+              : catUscite.map(cat => <RigaCat key={cat} sezione="uscite" cat={cat} mesi={rf.usciteOp[cat]} classCol="neg" />))}
+            <RigaTotale label="TOTALE USCITE OPERATIVE (B)" perMese={rf.totUsciteOp} tot={rf.grandUsciteOp} classCol="neg" />
+
+            {/* SALDO OPERATIVO */}
+            <RigaTotale label="SALDO OPERATIVO (A − B)" perMese={rf.saldoOp} tot={rf.grandSaldoOp} strong />
+
+            {/* INVESTIMENTI */}
+            <RigaHeader label="Riepilogo investimenti" sezKey="investimenti" />
+            {!collapsed.investimenti && (catInvest.length === 0
+              ? <RigaVuota label="nessun investimento" />
+              : catInvest.map(cat => <RigaCat key={cat} sezione="investimenti" cat={cat} mesi={rf.investimenti[cat]} classCol="neg" />))}
+            <RigaTotale label="TOTALE INVESTIMENTI" perMese={rf.totInvest} tot={rf.grandInvest} classCol="neg" />
+
+            {/* DISP. FINALI */}
+            <tr style={{fontWeight:700, background:"var(--panel-2)", borderTop:"2px solid var(--ink)"}}>
+              <td style={{position:"sticky", left:0, background:"var(--panel-2)", fontFamily:"'Fraunces',serif"}}>DISP. FINALI</td>
+              {mostraMesi && mesiVis.map(m => <td key={m} className="num">{fmt(rf.dispFin[m])}</td>)}
+              <td className="num">{fmt(rf.closing)}</td>
+            </tr>
+            {/* VARIAZIONE % */}
+            <tr style={{color:"var(--ink-2)", fontSize:11.5}}>
+              <td style={{position:"sticky", left:0, background:"var(--panel)"}}>Variazione %</td>
+              {mostraMesi && mesiVis.map(m => <td key={m} className="num" style={{color: rf.variaz[m] < 0 ? "var(--danger)" : "var(--accent-ink)"}}>{fmtPct(rf.variaz[m])}</td>)}
+              <td className="num" style={{color: rf.variazTot < 0 ? "var(--danger)" : "var(--accent-ink)", fontWeight:600}}>{fmtPct(rf.variazTot)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{marginTop:14, fontSize:11.5, color:"var(--ink-3)"}}>
+        Suggerimento: i mesi senza movimenti sono nascosti. Usa <strong>"Solo totali"</strong> per la vista più compatta, e clicca le intestazioni di sezione (o "Raggruppa tutto") per vedere solo i totali di riga. Gli <strong>investimenti</strong> sono le uscite su conti immobilizzazione; ammortamenti e giroconti sono esclusi perché non incidono sulla liquidità.
+      </div>
 
       {drillDown && (
         <div className="modal-bg" onClick={() => setDrillDown(null)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:760}}>
             <div className="modal-head">
               <h3>
-                {drillDown.tipo === "entrata" ? "↓ Entrate" : "↑ Uscite"} · {drillDown.categoria} · <span style={{textTransform:"capitalize"}}>{drillDown.mese}</span>
+                {drillDown.sezione === "entrate" ? "↓ Entrate" : drillDown.sezione === "investimenti" ? "⚒ Investimenti" : "↑ Uscite"} · {drillDown.categoria} · <span style={{textTransform:"capitalize"}}>{drillDown.mese === "__tot__" ? "tutti i mesi" : drillDown.mese}</span>
               </h3>
               <button className="btn ghost sm" onClick={() => setDrillDown(null)}>✕</button>
             </div>
@@ -3564,7 +3749,7 @@ function PageRendiconto({ conti, movimenti }) {
                         <td>{fmtDate(m.data)}</td>
                         <td>{m.descrizione || <span style={{color:"var(--ink-3)"}}>(senza descrizione)</span>}</td>
                         <td><span className="pill">{m.bu || "—"}</span></td>
-                        <td className={"num " + (drillDown.tipo === "entrata" ? "pos" : "neg")}>{fmt(m.importo)}</td>
+                        <td className={"num " + (drillDown.sezione === "entrate" ? "pos" : "neg")}>{fmt(m.importo)}</td>
                       </tr>
                     ))}
                     <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
@@ -3575,6 +3760,137 @@ function PageRendiconto({ conti, movimenti }) {
                 </table>
               )}
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// COMPONENTE: GESTIONE CATEGORIE (sotto-sezione del Rendiconto)
+// ============================================================
+function CategorieManager({ stagione, categorieRF, movimenti, aperto, onToggle, onToast }) {
+  const [nuovaE, setNuovaE] = useState("");
+  const [nuovaU, setNuovaU] = useState("");
+
+  // Conteggio utilizzi per categoria, separato per tipo
+  const usoConta = useMemo(() => {
+    const e = {}, u = {};
+    (movimenti || []).forEach(m => {
+      const c = (m.categoria || "").trim();
+      if (!c) return;
+      if (m.tipo === "entrata") e[c] = (e[c] || 0) + 1;
+      else if (m.tipo === "uscita") u[c] = (u[c] || 0) + 1;
+    });
+    return { entrate: e, uscite: u };
+  }, [movimenti]);
+
+  // Liste effettive = gestite ∪ rilevate dai movimenti
+  const liste = useMemo(() => mergeCategorie(categorieRF, movimenti), [categorieRF, movimenti]);
+  const gestite = {
+    entrate: new Set((categorieRF && categorieRF.entrate) || []),
+    uscite: new Set((categorieRF && categorieRF.uscite) || []),
+  };
+
+  const salva = async (tipo, lista) => {
+    if (!firebaseReady || !stagione) return;
+    const pulita = Array.from(new Set(lista.map(s => s.trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+    await db.ref(`stagioni/${stagione}/categorieRF/${tipo}`).set(pulita);
+  };
+
+  const aggiungi = async (tipo) => {
+    const val = (tipo === "entrate" ? nuovaE : nuovaU).trim();
+    if (!val) return;
+    const attuali = Array.from(gestite[tipo]);
+    if (attuali.some(c => c.toLowerCase() === val.toLowerCase())) { alert("Categoria già presente."); return; }
+    await salva(tipo, [...attuali, val]);
+    if (tipo === "entrate") setNuovaE(""); else setNuovaU("");
+    if (onToast) onToast("Categoria aggiunta");
+  };
+
+  const rinomina = async (tipo, vecchio) => {
+    const nuovo = prompt(`Rinomina categoria "${vecchio}" in:`, vecchio);
+    if (!nuovo || nuovo.trim() === vecchio) return;
+    const nome = nuovo.trim();
+    // aggiorno la lista gestita
+    const attuali = Array.from(gestite[tipo]).map(c => c === vecchio ? nome : c);
+    await salva(tipo, attuali);
+    // cascata sui movimenti che usano la vecchia categoria (dello stesso tipo)
+    const tipoMov = tipo === "entrate" ? "entrata" : "uscita";
+    const daAgg = (movimenti || []).filter(m => m.tipo === tipoMov && (m.categoria || "").trim() === vecchio);
+    if (daAgg.length && confirm(`Aggiornare anche i ${daAgg.length} movimenti che usano "${vecchio}"?`)) {
+      const updates = {};
+      daAgg.forEach(m => { updates[`${m._id}/categoria`] = nome; });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+    }
+    if (onToast) onToast("Categoria rinominata");
+  };
+
+  const elimina = async (tipo, nome) => {
+    const inUso = (usoConta[tipo][nome] || 0);
+    if (inUso > 0) {
+      alert(`Non posso eliminarla: è usata da ${inUso} movimenti. Rinominala o riassegna prima quei movimenti.`);
+      return;
+    }
+    if (!confirm(`Eliminare la categoria "${nome}"?`)) return;
+    await salva(tipo, Array.from(gestite[tipo]).filter(c => c !== nome));
+    if (onToast) onToast("Categoria eliminata");
+  };
+
+  const colonna = (tipo, label, lista, nuova, setNuova) => (
+    <div style={{flex:1, minWidth:240}}>
+      <div style={{fontWeight:700, fontSize:12, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-2)", marginBottom:8}}>{label}</div>
+      <div style={{display:"flex", gap:6, marginBottom:10}}>
+        <input type="text" value={nuova} onChange={e => setNuova(e.target.value)}
+               onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); aggiungi(tipo); } }}
+               placeholder="Nuova categoria…" style={{flex:1, padding:"5px 8px", border:"1px solid var(--rule)", borderRadius:5, fontSize:12.5}}/>
+        <button className="btn accent sm" onClick={() => aggiungi(tipo)}>+ Aggiungi</button>
+      </div>
+      <div style={{display:"flex", flexDirection:"column", gap:4}}>
+        {lista.length === 0 && <div style={{fontSize:12, color:"var(--ink-3)"}}>Nessuna categoria.</div>}
+        {lista.map(c => {
+          const inUso = usoConta[tipo][c] || 0;
+          const soloRilevata = !gestite[tipo].has(c);
+          return (
+            <div key={c} style={{display:"flex", alignItems:"center", gap:8, padding:"4px 8px", border:"1px solid var(--rule)",
+                 borderRadius:5, background: soloRilevata ? "var(--panel-2)" : "var(--panel)"}}>
+              <span style={{flex:1, fontSize:12.5}}>{c}</span>
+              {inUso > 0 && <span className="pill" style={{fontSize:9.5}}>{inUso} mov.</span>}
+              {soloRilevata && <span className="pill" style={{fontSize:9.5, background:"#fff3e0", color:"#e65100", borderColor:"#f0d6a8"}}>solo nei dati</span>}
+              {soloRilevata
+                ? <button className="btn ghost sm" title="Aggiungi all'elenco gestito" onClick={() => salva(tipo, [...Array.from(gestite[tipo]), c]).then(()=>onToast && onToast("Categoria adottata"))}>adotta</button>
+                : <>
+                    <button className="btn ghost sm" title="Rinomina" onClick={() => rinomina(tipo, c)}>✎</button>
+                    <button className="btn danger sm" title="Elimina" onClick={() => elimina(tipo, c)}>🗑</button>
+                  </>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="card" style={{padding:0, overflow:"hidden"}}>
+      <div onClick={onToggle} style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:12,
+           padding:"12px 16px", cursor:"pointer", background:"var(--panel-2)"}}>
+        <div>
+          <strong style={{fontSize:14}}>⚙ Gestione categorie</strong>
+          <span style={{fontSize:12, color:"var(--ink-3)", marginLeft:8}}>
+            {liste.entrate.length} entrate · {liste.uscite.length} uscite — sono le opzioni selezionabili nei movimenti
+          </span>
+        </div>
+        <span style={{fontSize:13, color:"var(--ink-2)"}}>{aperto ? "▾ chiudi" : "▸ apri"}</span>
+      </div>
+      {aperto && (
+        <div style={{padding:16}}>
+          <div style={{display:"flex", gap:24, flexWrap:"wrap"}}>
+            {colonna("entrate", "Categorie entrate", liste.entrate, nuovaE, setNuovaE)}
+            {colonna("uscite", "Categorie uscite", liste.uscite, nuovaU, setNuovaU)}
+          </div>
+          <div style={{marginTop:12, fontSize:11.5, color:"var(--ink-3)"}}>
+            Le categorie qui elencate sono quelle proposte nel form dei movimenti (contabilità generale). Quelle marcate <span className="pill" style={{fontSize:9.5, background:"#fff3e0", color:"#e65100", borderColor:"#f0d6a8"}}>solo nei dati</span> esistono nei movimenti ma non nell'elenco gestito: premi <strong>adotta</strong> per renderle ufficiali. Rinominando una categoria puoi aggiornare anche i movimenti collegati.
           </div>
         </div>
       )}
@@ -4564,22 +4880,11 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
     const attivo = spVoci.filter(m => m.saldo > 0).reduce((s,m) => s+m.saldo, 0);
     const passivo = spVoci.filter(m => m.saldo < 0).reduce((s,m) => s-m.saldo, 0);
 
-    // RF
-    const rfEntrate = {}, rfUscite = {};
-    movimenti.forEach(m => {
-      const cat = m.categoria || "(senza categoria)";
-      const mese = m.mese || "?";
-      if (m.tipo === "entrata") {
-        if (!rfEntrate[cat]) rfEntrate[cat] = {};
-        rfEntrate[cat][mese] = (rfEntrate[cat][mese] || 0) + m.importo;
-      } else if (m.tipo === "uscita") {
-        if (!rfUscite[cat]) rfUscite[cat] = {};
-        rfUscite[cat][mese] = (rfUscite[cat][mese] || 0) + m.importo;
-      }
-    });
+    // RF — schema unico (stesso prospetto della pagina Rendiconto)
+    const rf = buildRendiconto(movimenti, conti, saldiIniziali);
 
-    return { scritture, mastrini, totD, totA, spVoci, ceVoci, ricavi, costi, utile, attivo, passivo, rfEntrate, rfUscite };
-  }, [movimenti, saldiIniziali, contiMap]);
+    return { scritture, mastrini, totD, totA, spVoci, ceVoci, ricavi, costi, utile, attivo, passivo, rf };
+  }, [movimenti, saldiIniziali, contiMap, conti]);
 
   // === HELPER: header pagina PDF ===
   const addHeader = (doc, titoloDoc, pageNum, totPages) => {
@@ -4779,45 +5084,34 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
       doc.text(`Generato il ${new Date().toLocaleDateString("it-IT")}`, 148, 25, { align: "center" });
       doc.setTextColor(0);
 
-      const buildRfTable = (titolo, mappa, color, startY) => {
-        const rows = Object.entries(mappa).sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
-          const r = [cat];
-          let tot = 0;
-          MESI.forEach(m => {
-            r.push(mesi[m] ? mesi[m].toFixed(2) : "");
-            tot += mesi[m] || 0;
-          });
-          r.push(tot.toFixed(2));
-          return r;
-        });
-        // Totale
-        const totMese = {};
-        MESI.forEach(m => totMese[m] = 0);
-        Object.values(mappa).forEach(r => {
-          Object.entries(r).forEach(([m,v]) => { if (totMese[m] !== undefined) totMese[m] += v; });
-        });
-        const totGen = Object.values(totMese).reduce((s,v) => s+v, 0);
-        rows.push([
-          {content:"TOTALE", styles:{fontStyle:"bold"}},
-          ...MESI.map(m => ({content: totMese[m] ? totMese[m].toFixed(2) : "", styles:{fontStyle:"bold"}})),
-          {content: totGen.toFixed(2), styles:{fontStyle:"bold", fillColor: color === "verde" ? [230,240,232] : [251,236,236]}}
-        ]);
+      const fmtCell = (v) => (v || v === 0) ? Number(v).toLocaleString("it-IT", {minimumFractionDigits:2, maximumFractionDigits:2}) : "";
+      const fmtPctCell = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
+      const body = rendicontoMatrix(dati.rf).map(r => {
+        if (r.type === "header") {
+          return [{ content: r.label, colSpan: MESI.length + 2, styles: { fontStyle: "bold", fillColor: [238,238,234], textColor: 60, fontSize: 7 } }];
+        }
+        const isStrong = r.type === "total" || r.type === "disp";
+        const valCells = r.values.map(v => ({
+          content: r.type === "pct" ? fmtPctCell(v) : fmtCell(v),
+          styles: isStrong ? { fontStyle: "bold" } : {},
+        }));
+        const totCell = {
+          content: r.type === "pct" ? fmtPctCell(r.tot) : fmtCell(r.tot),
+          styles: { fontStyle: "bold", fillColor: [236,240,238] },
+        };
+        return [{ content: r.label, styles: { fontStyle: isStrong ? "bold" : "normal" } }, ...valCells, totCell];
+      });
 
-        doc.setFontSize(10); doc.setFont("helvetica","bold");
-        doc.text(titolo, 14, startY);
-        doc.autoTable({
-          startY: startY + 2,
-          head: [["Categoria", ...MESI.map(m => m.slice(0,3)), "Totale"]],
-          body: rows,
-          styles: { fontSize: 7, cellPadding: 1.2 },
-          headStyles: { fillColor: color === "verde" ? [45, 94, 62] : [181, 67, 67], textColor: 240, fontStyle: "bold", fontSize: 7 },
-          columnStyles: { 0: { cellWidth: 38 } },
-        });
-        return doc.lastAutoTable.finalY;
-      };
-
-      const y1 = buildRfTable("ENTRATE per categoria e mese", dati.rfEntrate, "verde", 32);
-      buildRfTable("USCITE per categoria e mese", dati.rfUscite, "rosso", y1 + 10);
+      doc.setFontSize(10); doc.setFont("helvetica","bold");
+      doc.text("Prospetto unico dei flussi di liquidità (per mese)", 14, 32);
+      doc.autoTable({
+        startY: 34,
+        head: [["Voce", ...MESI.map(m => m.slice(0,3)), "Totale"]],
+        body,
+        styles: { fontSize: 7, cellPadding: 1.2, halign: "right" },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold", fontSize: 7, halign: "right" },
+        columnStyles: { 0: { cellWidth: 42, halign: "left" } },
+      });
 
       doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
       setLastAction("Rendiconto Finanziario esportato");
@@ -5058,40 +5352,29 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
       doc.text("4. Rendiconto Finanziario", 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
-      const buildRfRowsPack = (mappa) => {
-        const rows = Object.entries(mappa).sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
-          const r = [cat];
-          let tot = 0;
-          MESI.forEach(m => { r.push(mesi[m] ? mesi[m].toFixed(2) : ""); tot += mesi[m] || 0; });
-          r.push(tot.toFixed(2));
-          return r;
-        });
-        const totMese = {}; MESI.forEach(m => totMese[m] = 0);
-        Object.values(mappa).forEach(r => Object.entries(r).forEach(([m,v]) => { if (totMese[m] !== undefined) totMese[m] += v; }));
-        const totGen = Object.values(totMese).reduce((s,v) => s+v, 0);
-        rows.push([{content:"TOTALE", styles:{fontStyle:"bold"}}, ...MESI.map(m => ({content: totMese[m] ? totMese[m].toFixed(2) : "", styles:{fontStyle:"bold"}})), {content: totGen.toFixed(2), styles:{fontStyle:"bold"}}]);
-        return rows;
-      };
+      const fmtCellP = (v) => (v || v === 0) ? Number(v).toLocaleString("it-IT", {minimumFractionDigits:2, maximumFractionDigits:2}) : "";
+      const fmtPctP = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
+      const rfBody = rendicontoMatrix(dati.rf).map(r => {
+        if (r.type === "header") {
+          return [{ content: r.label, colSpan: MESI.length + 2, styles: { fontStyle: "bold", fillColor: [238,238,234], textColor: 60, fontSize: 7 } }];
+        }
+        const isStrong = r.type === "total" || r.type === "disp";
+        const valCells = r.values.map(v => ({ content: r.type === "pct" ? fmtPctP(v) : fmtCellP(v), styles: isStrong ? { fontStyle: "bold" } : {} }));
+        const totCell = { content: r.type === "pct" ? fmtPctP(r.tot) : fmtCellP(r.tot), styles: { fontStyle: "bold", fillColor: [236,240,238] } };
+        return [{ content: r.label, styles: { fontStyle: isStrong ? "bold" : "normal" } }, ...valCells, totCell];
+      });
 
-      doc.setFontSize(10); doc.text("Entrate", 14, 23);
+      doc.setFontSize(10); doc.setFont("helvetica","normal");
+      doc.text("Prospetto unico dei flussi di liquidità (per mese)", 14, 23);
       doc.autoTable({
         startY: 25,
-        head: [["Categoria", ...MESI.map(m => m.slice(0,3)), "Tot"]],
-        body: buildRfRowsPack(dati.rfEntrate),
-        styles: { fontSize: 7, cellPadding: 1 },
-        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold", fontSize: 7 },
-        columnStyles: { 0: { cellWidth: 35 } },
+        head: [["Voce", ...MESI.map(m => m.slice(0,3)), "Tot"]],
+        body: rfBody,
+        styles: { fontSize: 7, cellPadding: 1, halign: "right" },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold", fontSize: 7, halign: "right" },
+        columnStyles: { 0: { cellWidth: 40, halign: "left" } },
       });
-      let y_rf = doc.lastAutoTable.finalY + 6;
-      doc.setFontSize(10); doc.setFont("helvetica","bold"); doc.text("Uscite", 14, y_rf);
-      doc.autoTable({
-        startY: y_rf + 2,
-        head: [["Categoria", ...MESI.map(m => m.slice(0,3)), "Tot"]],
-        body: buildRfRowsPack(dati.rfUscite),
-        styles: { fontSize: 7, cellPadding: 1 },
-        headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold", fontSize: 7 },
-        columnStyles: { 0: { cellWidth: 35 } },
-      });
+
 
       // === 5. CESPITI (landscape) ===
       doc.addPage("a4", "landscape");
@@ -5210,17 +5493,23 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
         }))
       ), "Bilancio Verifica");
 
-      // 4. Rendiconto Finanziario - Entrate
-      const rfRows = (mappa) => {
-        return Object.entries(mappa).sort(([a],[b]) => a.localeCompare(b)).map(([cat, mesi]) => {
-          const row = { Categoria: cat };
-          MESI.forEach(m => { row[m] = mesi[m] || 0; });
-          row["Totale"] = Object.values(mesi).reduce((s,v) => s+v, 0);
-          return row;
-        });
-      };
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfRows(dati.rfEntrate)), "RF Entrate");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfRows(dati.rfUscite)), "RF Uscite");
+      // 4. Rendiconto Finanziario — prospetto unico
+      const meseCap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
+      const rfSheetRows = rendicontoMatrix(dati.rf).map(r => {
+        const row = { Voce: r.type === "header" ? r.label.toUpperCase() : r.label };
+        if (r.type === "header") {
+          MESI.forEach(m => { row[meseCap(m)] = ""; });
+          row["Totale"] = "";
+        } else if (r.type === "pct") {
+          MESI.forEach((m, i) => { row[meseCap(m)] = Math.round(r.values[i] * 1000) / 10 + "%"; });
+          row["Totale"] = Math.round(r.tot * 1000) / 10 + "%";
+        } else {
+          MESI.forEach((m, i) => { row[meseCap(m)] = Math.round(r.values[i] * 100) / 100; });
+          row["Totale"] = Math.round(r.tot * 100) / 100;
+        }
+        return row;
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfSheetRows), "Rendiconto Finanziario");
 
       // 5. Cespiti
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
@@ -7274,7 +7563,8 @@ function App() {
   const [toast, setToast] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const { conti, movimenti, cespiti, saldiIniziali, bu, loading, seedStagione } = useFirebaseData(stagione);
+  const { conti, movimenti, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione } = useFirebaseData(stagione);
+  const categorieOpzioni = useMemo(() => mergeCategorie(categorieRF, movimenti), [categorieRF, movimenti]);
 
   // Carica lista stagioni esistenti su Firebase
   useEffect(() => {
@@ -7626,13 +7916,13 @@ function App() {
           ) : (
             <>
               {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} />}
-              {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
-              {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
+              {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
+              {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
               {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
-              {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} />}
+              {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
               {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
