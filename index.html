@@ -896,7 +896,7 @@ function useFirebaseData(stagione) {
   const [movimenti, setMovimenti] = useState([]);
   const [cespiti, setCespiti] = useState([]);
   const [saldiIniziali, setSaldiIniziali] = useState({});
-  const [categorieRF, setCategorieRF] = useState({ entrate: [], uscite: [] });
+  const [categorieRF, setCategorieRF] = useState({ entrate: [], uscite: [], investimenti: [] });
   const [bu, setBu] = useState([...BUSINESS_UNITS_DEFAULT]);
   const [loading, setLoading] = useState(true);
   const [seedingDone, setSeedingDone] = useState(false);
@@ -931,9 +931,11 @@ function useFirebaseData(stagione) {
       }),
       refs[5].on("value", snap => {
         const v = snap.val() || {};
+        const arr = (x) => Array.isArray(x) ? x.filter(Boolean) : (x ? Object.values(x).filter(Boolean) : []);
         setCategorieRF({
-          entrate: Array.isArray(v.entrate) ? v.entrate.filter(Boolean) : (v.entrate ? Object.values(v.entrate).filter(Boolean) : []),
-          uscite:  Array.isArray(v.uscite)  ? v.uscite.filter(Boolean)  : (v.uscite  ? Object.values(v.uscite).filter(Boolean)  : []),
+          entrate: arr(v.entrate),
+          uscite:  arr(v.uscite),
+          investimenti: arr(v.investimenti),
         });
       }),
     ];
@@ -3457,13 +3459,14 @@ function mergeCategorie(categorieRF, movimenti) {
 // OPERATIVE -> TOTALE -> SALDO OPERATIVO (A-B) -> INVESTIMENTI -> TOTALE ->
 // DISP. FINALI -> VARIAZIONE %. Le categorie sono quelle dei movimenti.
 // Gli investimenti = uscite su conti immobilizzazione (IMM. *).
-function buildRendiconto(movimenti, conti, saldiIniziali) {
+function buildRendiconto(movimenti, conti, saldiIniziali, investSet) {
   const cMap = {};
   (conti || []).forEach(c => { cMap[c.codice] = c; });
-  const isInvest = (m) => {
-    const cat = (cMap[m.contoPdC] && cMap[m.contoPdC].categoria || "").toUpperCase();
-    return cat.indexOf("IMM.") === 0 || cat.indexOf("IMM.") > -1;
-  };
+  // Una categoria è "investimento" se è nell'elenco gestito; se l'elenco è vuoto,
+  // di default consideriamo investimento la categoria "INVESTIMENTI".
+  const hasSet = investSet && investSet.size > 0;
+  const isInvestCat = (cat) => hasSet ? investSet.has(cat) : ((cat || "").toUpperCase() === "INVESTIMENTI");
+  const isInvest = (m) => isInvestCat(m.categoria || "(senza categoria)");
 
   const entrate = {}, usciteOp = {}, investimenti = {};
   const addTo = (mappa, cat, mese, v) => {
@@ -3552,8 +3555,9 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
   const toggleSez = (k) => setCollapsed(c => ({ ...c, [k]: !c[k] }));
   const mostraMesi = vista === "mensile";
 
+  const investSet = useMemo(() => new Set((categorieRF && categorieRF.investimenti) || []), [categorieRF]);
   const filtered = useMemo(() => movimenti.filter(m => !filterBu || m.bu === filterBu), [movimenti, filterBu]);
-  const rf = useMemo(() => buildRendiconto(filtered, conti, saldiIniziali), [filtered, conti, saldiIniziali]);
+  const rf = useMemo(() => buildRendiconto(filtered, conti, saldiIniziali, investSet), [filtered, conti, saldiIniziali, investSet]);
 
   // Mostro solo i mesi che hanno almeno un movimento (così la tabella sta in pagina)
   const mesiAttivi = MESI.filter(m => (rf.totEntrate[m] || 0) !== 0 || (rf.totUsciteOp[m] || 0) !== 0 || (rf.totInvest[m] || 0) !== 0);
@@ -3792,6 +3796,24 @@ function CategorieManager({ stagione, categorieRF, movimenti, aperto, onToggle, 
     entrate: new Set((categorieRF && categorieRF.entrate) || []),
     uscite: new Set((categorieRF && categorieRF.uscite) || []),
   };
+  const invManaged = (categorieRF && categorieRF.investimenti) || [];
+  const invSet = new Set(invManaged);
+  // Default: se nessuna categoria è marcata, "INVESTIMENTI" è considerata investimento
+  const invEffettivo = (cat) => invSet.size ? invSet.has(cat) : ((cat || "").toUpperCase() === "INVESTIMENTI");
+
+  const salvaInvest = async (lista) => {
+    if (!firebaseReady || !stagione) return;
+    const pulita = Array.from(new Set(lista.map(s => s.trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+    await db.ref(`stagioni/${stagione}/categorieRF/investimenti`).set(pulita);
+  };
+
+  const toggleInvest = async (nome) => {
+    let base = invSet.size ? Array.from(invSet) : ((nome || "").toUpperCase() === "INVESTIMENTI" ? [] : ["INVESTIMENTI"]);
+    // se parto dal default implicito e accendo una categoria diversa, mantengo anche INVESTIMENTI
+    const next = base.includes(nome) ? base.filter(c => c !== nome) : [...base, nome];
+    await salvaInvest(next);
+    if (onToast) onToast(next.includes(nome) ? "Segnata come investimento" : "Tolta dagli investimenti");
+  };
 
   const salva = async (tipo, lista) => {
     if (!firebaseReady || !stagione) return;
@@ -3816,6 +3838,8 @@ function CategorieManager({ stagione, categorieRF, movimenti, aperto, onToggle, 
     // aggiorno la lista gestita
     const attuali = Array.from(gestite[tipo]).map(c => c === vecchio ? nome : c);
     await salva(tipo, attuali);
+    // se era marcata come investimento, aggiorno anche quell'elenco
+    if (invSet.has(vecchio)) await salvaInvest(Array.from(invSet).map(c => c === vecchio ? nome : c));
     // cascata sui movimenti che usano la vecchia categoria (dello stesso tipo)
     const tipoMov = tipo === "entrate" ? "entrata" : "uscita";
     const daAgg = (movimenti || []).filter(m => m.tipo === tipoMov && (m.categoria || "").trim() === vecchio);
@@ -3835,6 +3859,7 @@ function CategorieManager({ stagione, categorieRF, movimenti, aperto, onToggle, 
     }
     if (!confirm(`Eliminare la categoria "${nome}"?`)) return;
     await salva(tipo, Array.from(gestite[tipo]).filter(c => c !== nome));
+    if (invSet.has(nome)) await salvaInvest(Array.from(invSet).filter(c => c !== nome));
     if (onToast) onToast("Categoria eliminata");
   };
 
@@ -3852,12 +3877,18 @@ function CategorieManager({ stagione, categorieRF, movimenti, aperto, onToggle, 
         {lista.map(c => {
           const inUso = usoConta[tipo][c] || 0;
           const soloRilevata = !gestite[tipo].has(c);
+          const isInv = tipo === "uscite" && invEffettivo(c);
           return (
             <div key={c} style={{display:"flex", alignItems:"center", gap:8, padding:"4px 8px", border:"1px solid var(--rule)",
                  borderRadius:5, background: soloRilevata ? "var(--panel-2)" : "var(--panel)"}}>
               <span style={{flex:1, fontSize:12.5}}>{c}</span>
               {inUso > 0 && <span className="pill" style={{fontSize:9.5}}>{inUso} mov.</span>}
+              {isInv && <span className="pill" style={{fontSize:9.5, background:"#e8eef0", color:"#345", borderColor:"#cdd8de"}}>investimento{!invSet.size ? " (default)" : ""}</span>}
               {soloRilevata && <span className="pill" style={{fontSize:9.5, background:"#fff3e0", color:"#e65100", borderColor:"#f0d6a8"}}>solo nei dati</span>}
+              {tipo === "uscite" && (
+                <button className="btn ghost sm" title={isInv ? "Togli dagli investimenti" : "Segna come investimento"}
+                        onClick={() => toggleInvest(c)} style={{opacity: isInv ? 1 : 0.5}}>💰</button>
+              )}
               {soloRilevata
                 ? <button className="btn ghost sm" title="Aggiungi all'elenco gestito" onClick={() => salva(tipo, [...Array.from(gestite[tipo]), c]).then(()=>onToast && onToast("Categoria adottata"))}>adotta</button>
                 : <>
@@ -3890,7 +3921,7 @@ function CategorieManager({ stagione, categorieRF, movimenti, aperto, onToggle, 
             {colonna("uscite", "Categorie uscite", liste.uscite, nuovaU, setNuovaU)}
           </div>
           <div style={{marginTop:12, fontSize:11.5, color:"var(--ink-3)"}}>
-            Le categorie qui elencate sono quelle proposte nel form dei movimenti (contabilità generale). Quelle marcate <span className="pill" style={{fontSize:9.5, background:"#fff3e0", color:"#e65100", borderColor:"#f0d6a8"}}>solo nei dati</span> esistono nei movimenti ma non nell'elenco gestito: premi <strong>adotta</strong> per renderle ufficiali. Rinominando una categoria puoi aggiornare anche i movimenti collegati.
+            Le categorie qui elencate sono quelle proposte nel form dei movimenti (contabilità generale). Le uscite con 💰 attivo finiscono nella sezione <strong>Investimenti</strong> del rendiconto invece che nelle uscite operative (di default è solo la categoria "INVESTIMENTI"). Quelle marcate <span className="pill" style={{fontSize:9.5, background:"#fff3e0", color:"#e65100", borderColor:"#f0d6a8"}}>solo nei dati</span> esistono nei movimenti ma non nell'elenco gestito: premi <strong>adotta</strong> per renderle ufficiali. Rinominando una categoria puoi aggiornare anche i movimenti collegati.
           </div>
         </div>
       )}
@@ -4849,7 +4880,7 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
 // ============================================================
 // PAGINA: EXPORT
 // ============================================================
-function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
+function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, categorieRF }) {
   const [busy, setBusy] = useState(false);
   const [lastAction, setLastAction] = useState(null);
 
@@ -4881,10 +4912,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione }) {
     const passivo = spVoci.filter(m => m.saldo < 0).reduce((s,m) => s-m.saldo, 0);
 
     // RF — schema unico (stesso prospetto della pagina Rendiconto)
-    const rf = buildRendiconto(movimenti, conti, saldiIniziali);
+    const rf = buildRendiconto(movimenti, conti, saldiIniziali, new Set((categorieRF && categorieRF.investimenti) || []));
 
     return { scritture, mastrini, totD, totA, spVoci, ceVoci, ricavi, costi, utile, attivo, passivo, rf };
-  }, [movimenti, saldiIniziali, contiMap, conti]);
+  }, [movimenti, saldiIniziali, contiMap, conti, categorieRF]);
 
   // === HELPER: header pagina PDF ===
   const addHeader = (doc, titoloDoc, pageNum, totPages) => {
@@ -7926,7 +7957,7 @@ function App() {
               {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
-              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} />}
+              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiIniziali} onToast={showToast} />}
