@@ -331,6 +331,7 @@
   table.tbl .pill.entrata { background: var(--accent-soft); border-color: #c8d8ce; color: var(--accent-ink); }
   table.tbl .pill.uscita { background: var(--danger-soft); border-color: #f1d6d6; color: var(--danger); }
   table.tbl .pill.giroconto { background: #f4ebd7; border-color: #e6d5a8; color: #7a5a1d; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 500; background: var(--bg); border: 1px solid var(--rule); color: var(--ink-2); }
 
   .empty-state {
     padding: 40px;
@@ -800,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.16.0";
+const APP_VERSION = "3.17.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -4315,12 +4316,36 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
     return Object.entries(budget)
       .map(([key, b]) => ({
         key,
-        categoria: b.categoria || key,
+        descrizione: b.descrizione || b.categoria || key,
+        categoria: b.categoria || "",
+        bu: b.bu || "",
         ricavi: Number(b.ricavi) || 0,
         costi: Number(b.costi) || 0,
       }))
-      .sort((a, b) => a.categoria.localeCompare(b.categoria));
+      .sort((a, b) => a.descrizione.localeCompare(b.descrizione));
   }, [budget]);
+
+  // Business Unit disponibili per le voci di budget
+  const buOptions = useMemo(() => {
+    const set = new Set(typeof BUSINESS_UNITS_DEFAULT !== "undefined" ? BUSINESS_UNITS_DEFAULT : []);
+    if (typeof BUSINESS_UNITS !== "undefined") (BUSINESS_UNITS || []).forEach(b => set.add(b));
+    movimenti.forEach(m => { if (m.bu) set.add(m.bu); });
+    return [...set].filter(Boolean).sort();
+  }, [movimenti]);
+
+  // Actual di una voce: somma i movimenti per categoria, filtrando per BU se impostata.
+  // Senza categoria → nessun actual (target puro).
+  const actualVoce = (voce) => {
+    if (!voce.categoria) return { ricavi: 0, costi: 0, hasActual: false };
+    let ricavi = 0, costi = 0;
+    movimenti.forEach(m => {
+      if ((m.categoria || "") !== voce.categoria) return;
+      if (voce.bu && (m.bu || "") !== voce.bu) return;
+      if (m.tipo === "entrata") ricavi += m.importo;
+      else if (m.tipo === "uscita") costi += m.importo;
+    });
+    return { ricavi, costi, hasActual: true };
+  };
 
   const actualPerCategoria = useMemo(() => {
     const r = {};
@@ -4344,17 +4369,18 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
     return Math.round((trascorsoMs / totMs) * 100);
   }, [stagione]);
 
-  const saveBudget = async (categoria, dati) => {
+  const saveBudget = async (key, dati) => {
     try {
-      await db.ref(`stagioni/${stagione}/budget/${categoria.replace(/[.#$/\[\]]/g, '_')}`).set(dati);
+      const k = String(key || ("b_" + uid())).replace(/[.#$/\[\]]/g, '_');
+      await db.ref(`stagioni/${stagione}/budget/${k}`).set({ ...dati, id: k });
       onToast("Budget salvato");
       setBudgetEditing(null);
     } catch(e) { alert("Errore: " + e.message); }
   };
 
-  const removeBudget = async (categoria) => {
-    if (!confirm(`Rimuovere il budget per "${categoria}"?`)) return;
-    await db.ref(`stagioni/${stagione}/budget/${categoria.replace(/[.#$/\[\]]/g, '_')}`).remove();
+  const removeBudget = async (key, descr) => {
+    if (!confirm(`Rimuovere la voce di budget "${descr || key}"?`)) return;
+    await db.ref(`stagioni/${stagione}/budget/${String(key).replace(/[.#$/\[\]]/g, '_')}`).remove();
     onToast("Budget rimosso");
   };
 
@@ -4587,9 +4613,9 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
               <div className="hint">su 12 mesi (set-ago)</div>
             </div>
             <div className="kpi">
-              <div className="label">Categorie a budget</div>
+              <div className="label">Voci a budget</div>
               <div className="value">{Object.keys(budget).length}</div>
-              <div className="hint">di {categorieUsate.length} usate</div>
+              <div className="hint">monitorate</div>
             </div>
             <div className="kpi">
               <div className="label">Budget Ricavi tot.</div>
@@ -4602,15 +4628,17 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
           </div>
 
           <div style={{marginTop:18, display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10}}>
-            <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:0}}>Budget vs Actual per categoria</h3>
-            <button className="btn accent sm" onClick={() => setBudgetEditing({ categoria: "", ricavi: "", costi: "", nuovo: true })}>+ Aggiungi voce budget</button>
+            <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:0}}>Budget vs Actual</h3>
+            <button className="btn accent sm" onClick={() => setBudgetEditing({ key: "", descrizione: "", categoria: "", bu: "", ricavi: "", costi: "", nuovo: true })}>+ Aggiungi voce budget</button>
           </div>
 
           <div className="tbl-wrap">
             <table className="tbl">
               <thead>
                 <tr>
+                  <th>Descrizione</th>
                   <th>Categoria</th>
+                  <th>BU</th>
                   <th>Tipo</th>
                   <th className="num">Budget</th>
                   <th className="num">Actual</th>
@@ -4623,24 +4651,22 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
               <tbody>
                 {vociBudget.length === 0 && (
                   <tr>
-                    <td colSpan={8} style={{textAlign:"center", padding:"32px 16px", color:"var(--ink-3)"}}>
-                      Nessuna voce di budget. Usa <strong>+ Aggiungi voce budget</strong> per inserire le categorie che vuoi monitorare.
+                    <td colSpan={10} style={{textAlign:"center", padding:"32px 16px", color:"var(--ink-3)"}}>
+                      Nessuna voce di budget. Usa <strong>+ Aggiungi voce budget</strong> per inserire le voci che vuoi monitorare.
                     </td>
                   </tr>
                 )}
                 {vociBudget.map(v => {
-                  const cat = v.categoria;
                   const b = { ricavi: v.ricavi, costi: v.costi };
-                  const a = actualPerCategoria[cat] || { ricavi: 0, costi: 0 };
+                  const a = actualVoce(v);
                   const isRicavo = (b.ricavi || 0) > 0 || (!(b.costi > 0) && a.ricavi > 0);
                   const budVal = isRicavo ? (b.ricavi || 0) : (b.costi || 0);
                   const actVal = isRicavo ? a.ricavi : a.costi;
                   const delta = actVal - budVal;
                   const deltaP = budVal > 0 ? (delta / budVal * 100) : null;
-                  // semaforo: per ricavi voglio actual >= budget*(% avanzamento), per costi voglio actual <= budget*(% avanzamento)
                   const target = budVal * (avanzamentoStagione / 100);
                   let stato = "🟢";
-                  if (budVal > 0) {
+                  if (budVal > 0 && a.hasActual) {
                     if (isRicavo) {
                       if (actVal < target * 0.7) stato = "🔴";
                       else if (actVal < target * 0.95) stato = "🟡";
@@ -4649,23 +4675,25 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
                       else if (actVal > budVal * 0.9) stato = "🟡";
                     }
                   } else {
-                    stato = "—"; // senza budget non c'è stato
+                    stato = "—";
                   }
                   return (
                     <tr key={v.key}>
-                      <td style={{fontWeight:500}}>{cat}</td>
+                      <td style={{fontWeight:600}}>{v.descrizione}</td>
+                      <td style={{fontSize:12, color:"var(--ink-2)"}}>{v.categoria || <span style={{color:"var(--ink-3)"}}>—</span>}</td>
+                      <td>{v.bu ? <span className="pill">{v.bu}</span> : <span style={{color:"var(--ink-3)"}}>—</span>}</td>
                       <td><span className={"pill " + (isRicavo ? "entrata" : "uscita")}>{isRicavo ? "Ricavo" : "Costo"}</span></td>
                       <td className="num">{budVal > 0 ? fmt(budVal) : <span style={{color:"var(--ink-3)"}}>—</span>}</td>
-                      <td className="num">{fmt(actVal)}</td>
+                      <td className="num">{a.hasActual ? fmt(actVal) : <span style={{color:"var(--ink-3)"}} title="Voce senza categoria: target puro">—</span>}</td>
                       <td className={"num " + (delta > 0 ? (isRicavo ? "pos" : "neg") : (isRicavo ? "neg" : "pos"))}>
-                        {budVal > 0 ? (delta > 0 ? "+" : "") + fmt(delta) : "—"}
+                        {budVal > 0 && a.hasActual ? (delta > 0 ? "+" : "") + fmt(delta) : "—"}
                       </td>
-                      <td className="num">{deltaP !== null ? (deltaP > 0 ? "+" : "") + deltaP.toFixed(1) + "%" : "—"}</td>
+                      <td className="num">{deltaP !== null && a.hasActual ? (deltaP > 0 ? "+" : "") + deltaP.toFixed(1) + "%" : "—"}</td>
                       <td style={{fontSize:18, textAlign:"center"}}>{stato}</td>
                       <td>
                         <div style={{display:"flex", gap:4}}>
-                          <button className="btn ghost sm" onClick={() => setBudgetEditing({ categoria: cat, ricavi: b.ricavi || "", costi: b.costi || "" })}>✎</button>
-                          <button className="btn danger sm" onClick={() => removeBudget(cat)}>🗑</button>
+                          <button className="btn ghost sm" onClick={() => setBudgetEditing({ key: v.key, descrizione: v.descrizione, categoria: v.categoria, bu: v.bu, ricavi: v.ricavi || "", costi: v.costi || "" })}>✎</button>
+                          <button className="btn danger sm" onClick={() => removeBudget(v.key, v.descrizione)}>🗑</button>
                         </div>
                       </td>
                     </tr>
@@ -4683,29 +4711,42 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
             <div className="modal-bg" onClick={() => setBudgetEditing(null)}>
               <div className="modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-head">
-                  <h3>{budgetEditing.nuovo ? "Nuovo budget" : "Modifica budget"}</h3>
+                  <h3>{budgetEditing.nuovo ? "Nuova voce budget" : "Modifica voce budget"}</h3>
                   <button className="btn ghost sm" onClick={() => setBudgetEditing(null)}>✕</button>
                 </div>
                 <div className="modal-body">
                   <form className="form-grid" onSubmit={e => {
                     e.preventDefault();
-                    if (!budgetEditing.categoria.trim()) return alert("Categoria obbligatoria");
-                    saveBudget(budgetEditing.categoria.trim(), {
-                      categoria: budgetEditing.categoria.trim(),
+                    if (!String(budgetEditing.descrizione || "").trim()) return alert("La descrizione è obbligatoria");
+                    saveBudget(budgetEditing.key, {
+                      descrizione: String(budgetEditing.descrizione).trim(),
+                      categoria: String(budgetEditing.categoria || "").trim(),
+                      bu: String(budgetEditing.bu || "").trim(),
                       ricavi: Number(budgetEditing.ricavi) || 0,
                       costi: Number(budgetEditing.costi) || 0,
                     });
                   }}>
                     <div className="form-row">
-                      <label>Categoria</label>
-                      {budgetEditing.nuovo ? (
-                        <input type="text" value={budgetEditing.categoria} onChange={e => setBudgetEditing({...budgetEditing, categoria: e.target.value})} placeholder="es. SPONSOR FUTSAL" list="cat-suggestions" required/>
-                      ) : (
-                        <div style={{fontWeight:600}}>{budgetEditing.categoria}</div>
-                      )}
+                      <label>Descrizione <span className="req">*</span></label>
+                      <input type="text" value={budgetEditing.descrizione} autoFocus
+                             onChange={e => setBudgetEditing({...budgetEditing, descrizione: e.target.value})}
+                             placeholder="es. Incassi serate, Sponsor, Arbitri…" required/>
+                    </div>
+                    <div className="form-row">
+                      <label>Categoria (opzionale)</label>
+                      <input type="text" value={budgetEditing.categoria}
+                             onChange={e => setBudgetEditing({...budgetEditing, categoria: e.target.value})}
+                             placeholder="serve per confrontare l'actual" list="cat-suggestions"/>
                       <datalist id="cat-suggestions">
                         {categorieUsate.map(c => <option key={c} value={c}/>)}
                       </datalist>
+                    </div>
+                    <div className="form-row">
+                      <label>Business Unit (opzionale)</label>
+                      <select value={budgetEditing.bu || ""} onChange={e => setBudgetEditing({...budgetEditing, bu: e.target.value})}>
+                        <option value="">— tutte —</option>
+                        {buOptions.map(b => <option key={b} value={b}>{b}</option>)}
+                      </select>
                     </div>
                     <div className="form-row">
                       <label>Budget Ricavi €</label>
@@ -4716,7 +4757,7 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
                       <input type="number" inputMode="decimal" step="0.01" min="0" value={budgetEditing.costi} onChange={e => setBudgetEditing({...budgetEditing, costi: e.target.value})} placeholder="0"/>
                     </div>
                     <div style={{fontSize:11.5, color:"var(--ink-3)", padding:"8px 0"}}>
-                      Lascia a 0 il campo che non si applica (es. se è una categoria di costo, lascia Ricavi=0).
+                      Lascia a 0 il campo che non si applica. Con una <strong>categoria</strong> l'actual viene confrontato (filtrato per BU se impostata); <strong>senza categoria</strong> la voce resta un target puro.
                     </div>
                     <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
                       <button type="button" className="btn ghost" onClick={() => setBudgetEditing(null)}>Annulla</button>
@@ -6570,408 +6611,427 @@ const METODI_TDP = [
 // Conti P.d.C. di destinazione dei ricavi torneo
 const CONTO_ISCRIZIONE = 6;   // ISCRIZIONI C/ENT.
 const CONTO_ASSICURAZIONE = 7; // ASSICURAZIONI GIOCATORI
+const CONTO_ENTRATE_SERATE = 41; // ENTRATE SERATE TORNEO
+
+// Slug stabile per chiave squadra (sopravvive agli aggiornamenti del master)
+function slugSquadra(nome) {
+  return String(nome || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "SQUADRA";
+}
+// Mappa il metodo di pagamento (testo libero del foglio) → conto di liquidità suggerito
+function contoLiquiditaDaMetodo(metodo) {
+  const m = String(metodo || "").toUpperCase();
+  if (m.includes("PAYPAL")) return 9;
+  if (m.includes("SATISPAY")) return 10;
+  if (m.includes("SUMUP") || m.includes("POS")) return 5;
+  if (m.includes("CONTO FUTSAL") || m.includes("BONIFICO") || m.includes("C/C")) return 1;
+  return 3; // contanti / cash / delta cassa / default
+}
+// Interpreta le colonne RISCOSSI / DA RISCUOTERE (categoriche) → { iscr, ass } pagati
+function parseStatoRiscossi(riscosso, daRiscuotere) {
+  const r = String(riscosso || "").trim().toUpperCase();
+  const d = String(daRiscuotere || "").trim().toUpperCase();
+  if (r.includes("TUTTO")) return { iscr: true, ass: true };
+  if (r.includes("ISCRIZIONE") || r.includes("ASSICURAZIONE")) {
+    return { iscr: r.includes("ISCRIZIONE"), ass: r.includes("ASSICURAZIONE") };
+  }
+  // RISCOSSI vuoto → deduco da "da riscuotere" (complemento)
+  if (!d || d.includes("TUTTO")) return { iscr: false, ass: false };
+  return { iscr: !d.includes("ISCRIZIONE"), ass: !d.includes("ASSICURAZIONE") };
+}
 
 function PageIscrizioniTdP({ stagione, conti, onToast }) {
-  const [iscrizioni, setIscrizioni] = useState([]);
-  const [pagamenti, setPagamenti] = useState({});
+  const [data, setData] = useState(null);     // { filename, importedAt, squadre:{} }
   const [loading, setLoading] = useState(true);
-  const [errore, setErrore] = useState(null);
-  const [modale, setModale] = useState(null); // { team, modo: "pagato"|"parziale" }
+  const [parsing, setParsing] = useState(false);
+  const [regSlug, setRegSlug] = useState(null); // slug squadra in registrazione
+  const fileRef = useRef(null);
 
-  // Legge le iscrizioni pubblicate dal TdP Manager (nodo top-level, condiviso)
   useEffect(() => {
-    if (!firebaseReady) { setLoading(false); setErrore("Firebase non inizializzato."); return; }
-    const ref = db.ref("iscrizioni_tdp");
-    const cb = ref.on("value",
-      snap => {
-        const v = snap.val();
-        setIscrizioni(v ? Object.entries(v).map(([k, t]) => ({ ...t, teamId: t.teamId || k })) : []);
-        setErrore(null);
-        setLoading(false);
-      },
-      err => {
-        // tipicamente "permission_denied": le regole Firebase non coprono /iscrizioni_tdp
-        setErrore(err && err.code === "PERMISSION_DENIED"
-          ? "Accesso negato a /iscrizioni_tdp. Aggiorna le regole di sicurezza Firebase per consentire la lettura di questo nodo."
-          : "Errore lettura iscrizioni: " + (err && err.message ? err.message : err));
-        setLoading(false);
+    if (!firebaseReady) { setLoading(false); return; }
+    const ref = db.ref(`stagioni/${stagione}/iscrizioniTdP`);
+    const cb = ref.on("value", snap => { setData(snap.exists() ? snap.val() : null); setLoading(false); });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  const squadre = useMemo(() => {
+    const s = (data && data.squadre) || {};
+    return Object.entries(s)
+      .map(([slug, t]) => ({ ...t, slug }))
+      .sort((a, b) => (a.nomeSquadra || "").localeCompare(b.nomeSquadra || ""));
+  }, [data]);
+
+  // ---- import / merge dal foglio "STATO SQUADRE" ----
+  const onFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (typeof XLSX === "undefined") { alert("Libreria Excel non caricata. Ricarica la pagina."); return; }
+    setParsing(true);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
+        const norm = (v) => String(v == null ? "" : v).trim().toUpperCase().replace(/\s+/g, " ");
+        const sheetName = wb.SheetNames.find(n => norm(n) === "STATO SQUADRE")
+          || wb.SheetNames.find(n => norm(n).includes("STATO SQUADR"));
+        if (!sheetName) {
+          alert('Nel file non c\'è un foglio "STATO SQUADRE".\nFogli trovati: ' + wb.SheetNames.join(", "));
+          setParsing(false); return;
+        }
+        const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: "" });
+        const hIdx = aoa.findIndex(r => Array.isArray(r) && r.some(c => norm(c) === "SQUADRA"));
+        if (hIdx < 0) { alert('Intestazione "SQUADRA" non trovata nel foglio.'); setParsing(false); return; }
+        const header = aoa[hIdx].map(norm);
+        const exact = (label) => header.findIndex(h => h === label);
+        const incl = (frag) => header.findIndex(h => h.includes(frag));
+        const ci = {
+          squadra: exact("SQUADRA"),
+          resp: exact("RESPONSABILE") >= 0 ? exact("RESPONSABILE") : incl("RESPONSAB"),
+          comp: incl("COMPONENT"),
+          iscr: exact("ISCRIZIONE") >= 0 ? exact("ISCRIZIONE") : incl("ISCRIZION"),
+          ass: incl("ASSICURAZ"),
+          tot: exact("TOTALE") >= 0 ? exact("TOTALE") : incl("TOTALE"),
+          risc: exact("RISCOSSI") >= 0 ? exact("RISCOSSI") : incl("RISCOSS"),
+          dar: incl("DA RISCUOTERE"),
+          met: incl("METODO"),
+        };
+        const parsed = {};
+        for (let i = hIdx + 1; i < aoa.length; i++) {
+          const row = aoa[i] || [];
+          const nome = String(row[ci.squadra] == null ? "" : row[ci.squadra]).trim();
+          if (!nome || norm(nome).startsWith("TOTAL")) continue;
+          const comp = Number(row[ci.comp]) || 0;
+          const quotaIscr = (ci.iscr >= 0 ? Number(row[ci.iscr]) : 0) || 0;
+          const quotaAss = (ci.ass >= 0 ? Number(row[ci.ass]) : 0) || 0;
+          const totale = (ci.tot >= 0 ? Number(row[ci.tot]) : 0) || (quotaIscr + quotaAss);
+          const st = parseStatoRiscossi(ci.risc >= 0 ? row[ci.risc] : "", ci.dar >= 0 ? row[ci.dar] : "");
+          const metodo = ci.met >= 0 ? String(row[ci.met] || "").trim() : "";
+          const deltaCassa = row.some(c => norm(c).includes("DELTA CASSA")) || norm(metodo).includes("DELTA CASSA");
+          const slug = slugSquadra(nome);
+          parsed[slug] = {
+            slug, nomeSquadra: nome, responsabile: String(row[ci.resp] || "").trim(),
+            numeroComponenti: comp, quotaIscrizione: quotaIscr, quotaAssicurazione: quotaAss,
+            totaleDovuto: totale, iscrRiscossa: st.iscr, assRiscossa: st.ass, metodo, deltaCassa,
+          };
+        }
+        if (Object.keys(parsed).length === 0) { alert("Nessuna squadra leggibile nel foglio."); setParsing(false); return; }
+
+        // MERGE: i numeri e lo stato arrivano dal foglio, ma preservo SEMPRE la
+        // registrazione contabile (reg) e le note già presenti → niente duplicati.
+        const prev = (data && data.squadre) || {};
+        const squadreMerge = {};
+        Object.entries(parsed).forEach(([slug, p]) => {
+          const old = prev[slug] || {};
+          squadreMerge[slug] = { ...p, reg: old.reg || null, note: old.note || "" };
+        });
+        // squadre già presenti ma sparite dal foglio: le tengo (con reg) e le segnalo
+        Object.entries(prev).forEach(([slug, old]) => {
+          if (!squadreMerge[slug]) squadreMerge[slug] = { ...old, assenteNelFoglio: true };
+        });
+
+        const payload = { filename: file.name, importedAt: new Date().toISOString(), squadre: squadreMerge };
+        if (firebaseReady) await db.ref(`stagioni/${stagione}/iscrizioniTdP`).set(payload);
+        else setData(payload);
+        onToast(`STATO SQUADRE importato · ${Object.keys(parsed).length} squadre (reg. contabili preservate)`);
+      } catch (err) {
+        alert("Errore lettura file: " + err.message);
+      } finally {
+        setParsing(false);
+        if (fileRef.current) fileRef.current.value = "";
       }
-    );
-    return () => ref.off("value", cb);
-  }, []);
-
-  // Legge i pagamenti già registrati (nodo top-level)
-  useEffect(() => {
-    if (!firebaseReady) return;
-    const ref = db.ref("pagamenti_tdp");
-    const cb = ref.on("value",
-      snap => setPagamenti(snap.val() || {}),
-      err => console.warn("Lettura pagamenti_tdp:", err && err.message ? err.message : err)
-    );
-    return () => ref.off("value", cb);
-  }, []);
-
-  // Stato pagamento per ogni squadra
-  const statoDi = (team) => {
-    const p = pagamenti[team.teamId];
-    const dovuto = Number(team.totaleDovuto) || 0;
-    const pagato = p ? Number(p.importoPagato) || 0 : 0;
-    if (!p || pagato <= 0) return { key: "da_incassare", label: "Da incassare", pagato: 0, residuo: dovuto };
-    if (p.completato || pagato >= dovuto - 0.01) return { key: "pagato", label: "Pagato", pagato, residuo: Math.max(0, dovuto - pagato) };
-    return { key: "parziale", label: "Parziale", pagato, residuo: Math.max(0, dovuto - pagato) };
+    };
+    reader.onerror = () => { alert("Impossibile leggere il file."); setParsing(false); };
+    reader.readAsArrayBuffer(file);
   };
 
-  // KPI
-  const kpi = useMemo(() => {
-    let dovuto = 0, incassato = 0, nPagate = 0;
-    iscrizioni.forEach(t => {
-      dovuto += Number(t.totaleDovuto) || 0;
-      const s = statoDi(t);
-      incassato += s.pagato;
-      if (s.key === "pagato") nPagate++;
-    });
-    return { dovuto, incassato, daIncassare: dovuto - incassato, nSquadre: iscrizioni.length, nPagate };
-  }, [iscrizioni, pagamenti]);
+  const svuota = async () => {
+    if (!confirm("Rimuovere la copia locale delle iscrizioni? (i movimenti già registrati in contabilità NON vengono toccati)")) return;
+    try { await db.ref(`stagioni/${stagione}/iscrizioniTdP`).remove(); onToast("Copia locale rimossa"); }
+    catch (e) { alert("Errore: " + e.message); }
+  };
 
-  // Registra (o aggiorna) un pagamento + genera/aggiorna i movimenti contabili.
-  // `righe` = [{ importo, contoLiquidita }, ...]: il pagamento puo essere ripartito su piu conti.
-  const registraPagamento = async ({ team, righe, dataPagamento, note, completato }) => {
-    if (!firebaseReady) return alert("Firebase non disponibile");
-    const teamId = team.teamId;
+  // ---- modifica stato in-app ----
+  const patchSquadra = async (slug, patch) => {
+    try { await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${slug}`).update(patch); }
+    catch (e) { alert("Errore: " + e.message); }
+  };
+
+  // componenti riscossi ma non ancora a libro giornale
+  const pendentiDi = (t) => {
+    const out = []; const reg = t.reg || {};
+    if (t.iscrRiscossa && !(reg.iscr && reg.iscr.posted) && (Number(t.quotaIscrizione) || 0) > 0)
+      out.push({ tipo: "iscr", label: "Iscrizione", contoPdC: CONTO_ISCRIZIONE, importo: Number(t.quotaIscrizione) || 0 });
+    if (t.assRiscossa && !(reg.ass && reg.ass.posted) && (Number(t.quotaAssicurazione) || 0) > 0)
+      out.push({ tipo: "ass", label: "Assicurazione", contoPdC: CONTO_ASSICURAZIONE, importo: Number(t.quotaAssicurazione) || 0 });
+    return out;
+  };
+  // componenti registrati ma non più riscossi → da stornare
+  const daStornareDi = (t) => {
+    const out = []; const reg = t.reg || {};
+    if (reg.iscr && reg.iscr.posted && !t.iscrRiscossa) out.push({ tipo: "iscr", label: "Iscrizione" });
+    if (reg.ass && reg.ass.posted && !t.assRiscossa) out.push({ tipo: "ass", label: "Assicurazione" });
+    return out;
+  };
+
+  const nPendenti = useMemo(() => squadre.reduce((s, t) => s + pendentiDi(t).length, 0), [squadre]);
+
+  // registra le righe scelte → crea movimenti + aggiorna reg (idempotente per componente)
+  const registra = async (slug, righe, dataPag) => {
+    const t = (data.squadre || {})[slug]; if (!t) return;
     try {
-      // Normalizzo le righe valide
-      const righeValide = (righe || [])
-        .map(r => ({ importo: Number(r.importo) || 0, contoLiquidita: Number(r.contoLiquidita) }))
-        .filter(r => r.importo > 0 && r.contoLiquidita);
-      if (righeValide.length === 0) return alert("Inserisci almeno una riga di incasso valida.");
-      const importoPagato = righeValide.reduce((s, r) => s + r.importo, 0);
-
-      // 1) Rimuovo eventuali movimenti contabili creati in precedenza per questa squadra
-      const precedente = pagamenti[teamId];
-      const vecchiIds = (precedente && precedente.movimentiIds) || [];
-      for (const id of vecchiIds) {
-        await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
-      }
-
-      // 2) Creo i nuovi movimenti (entrata) ripartiti per conto di liquidità
-      const nuoviIds = [];
-      const quotaIscr = Number(team.quotaIscrizione) || 0;
-      const quotaAss = Number(team.quotaAssicurazione) || 0;
-      const base = {
-        tipo: "entrata",
-        data: dataPagamento,
-        contoLiquiditaDest: null,
-        categoria: "ISCRIZIONI TDP",
-        bu: "TDP",
-        mese: meseDaData(dataPagamento),
-        nonMonetario: false,
-        origineTdP: teamId,
-        creatoIl: new Date().toISOString(),
-        modificatoIl: new Date().toISOString(),
-      };
-
-      const pushMov = async (mov) => {
+      const regUpd = { ...(t.reg || {}) };
+      for (const r of righe) {
+        const importo = Math.round((Number(r.importo) || 0) * 100) / 100;
+        if (importo <= 0 || !r.conto) continue;
+        const mov = {
+          tipo: "entrata", data: dataPag, contoLiquidita: Number(r.conto), contoLiquiditaDest: null,
+          contoPdC: r.contoPdC, categoria: "ISCRIZIONI TDP", bu: "TDP", mese: meseDaData(dataPag),
+          nonMonetario: false, importo,
+          descrizione: (r.tipo === "ass" ? "Assicurazione TdP — " : "Iscrizione TdP — ") + t.nomeSquadra,
+          origineTdP: slug, creatoIl: new Date().toISOString(), modificatoIl: new Date().toISOString(),
+        };
         const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
         await ref.set(mov);
-        nuoviIds.push(ref.key);
-      };
-
-      // Quanto destinare a ISCRIZIONE e quanto ad ASSICURAZIONE (in totale).
-      // La separazione la applico solo a saldo completo con assicurazione > 0;
-      // per gli acconti tutto su ISCRIZIONI C/ENT. (come prima).
-      let remIscr = (completato && quotaAss > 0) ? quotaIscr : importoPagato;
-      let remAss  = (completato && quotaAss > 0) ? quotaAss  : 0;
-
-      for (const r of righeValide) {
-        const movBase = { ...base, contoLiquidita: r.contoLiquidita };
-        let amt = r.importo;
-        const iscrPart = Math.min(amt, Math.max(0, remIscr));
-        if (iscrPart > 0.001) {
-          await pushMov({ ...movBase, contoPdC: CONTO_ISCRIZIONE, importo: Math.round(iscrPart * 100) / 100,
-            descrizione: `Iscrizione TdP — ${team.nomeSquadra}${completato ? "" : " (acconto)"}` });
-          remIscr -= iscrPart; amt -= iscrPart;
-        }
-        const assPart = Math.min(amt, Math.max(0, remAss));
-        if (assPart > 0.001) {
-          await pushMov({ ...movBase, contoPdC: CONTO_ASSICURAZIONE, importo: Math.round(assPart * 100) / 100,
-            descrizione: `Assicurazione TdP — ${team.nomeSquadra}` });
-          remAss -= assPart; amt -= assPart;
-        }
-        // Eventuale eccedenza residua su ISCRIZIONI C/ENT.
-        if (amt > 0.001) {
-          await pushMov({ ...movBase, contoPdC: CONTO_ISCRIZIONE, importo: Math.round(amt * 100) / 100,
-            descrizione: `Iscrizione TdP — ${team.nomeSquadra}${completato ? "" : " (acconto)"}` });
-        }
+        regUpd[r.tipo] = { posted: true, importo, conto: Number(r.conto), movId: ref.key, registratoIl: mov.creatoIl };
       }
-
-      // 3) Scrivo il pagamento sul nodo condiviso
-      const metodoLabel = righeValide.length > 1
-        ? "misto"
-        : (METODI_TDP.find(m => m.conto === righeValide[0].contoLiquidita)?.val || "altro");
-      await db.ref(`pagamenti_tdp/${teamId}`).set({
-        importoPagato: Math.round(importoPagato * 100) / 100,
-        righe: righeValide,
-        dataPagamento,
-        metodo: metodoLabel,
-        completato: !!completato,
-        note: note || "",
-        movimentiIds: nuoviIds,
-        registratoIl: new Date().toISOString(),
-      });
-
-      onToast(`Pagamento ${team.nomeSquadra} registrato · ${righeValide.length > 1 ? righeValide.length + " conti" : "entrata"} in contabilità`);
-      setModale(null);
-    } catch (e) {
-      alert("Errore: " + e.message);
-    }
-  };
-
-  const annullaPagamento = async (team) => {
-    const p = pagamenti[team.teamId];
-    if (!p) return;
-    if (!confirm(`Annullare il pagamento di "${team.nomeSquadra}"? Verranno rimossi anche i movimenti contabili collegati.`)) return;
-    try {
-      for (const id of (p.movimentiIds || [])) {
-        await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
-      }
-      await db.ref(`pagamenti_tdp/${team.teamId}`).remove();
-      onToast("Pagamento annullato");
+      await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${slug}/reg`).set(regUpd);
+      onToast(`Scrittura registrata · ${t.nomeSquadra}`);
+      setRegSlug(null);
     } catch (e) { alert("Errore: " + e.message); }
   };
+
+  const annullaRegistrazione = async (t) => {
+    const reg = t.reg || {};
+    const ids = [reg.iscr && reg.iscr.movId, reg.ass && reg.ass.movId].filter(Boolean);
+    if (ids.length === 0) return;
+    if (!confirm(`Annullare la registrazione contabile di "${t.nomeSquadra}"?\nVerranno rimossi ${ids.length} movimento/i dal libro giornale.`)) return;
+    try {
+      for (const id of ids) await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
+      await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${t.slug}/reg`).set(null);
+      onToast("Registrazione annullata");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  const kpi = useMemo(() => {
+    let dovuto = 0, riscosso = 0, registrato = 0;
+    squadre.forEach(t => {
+      dovuto += Number(t.totaleDovuto) || 0;
+      if (t.iscrRiscossa) riscosso += Number(t.quotaIscrizione) || 0;
+      if (t.assRiscossa) riscosso += Number(t.quotaAssicurazione) || 0;
+      const reg = t.reg || {};
+      if (reg.iscr && reg.iscr.posted) registrato += Number(reg.iscr.importo) || 0;
+      if (reg.ass && reg.ass.posted) registrato += Number(reg.ass.importo) || 0;
+    });
+    return { dovuto, riscosso, daRiscuotere: dovuto - riscosso, registrato, nSquadre: squadre.length };
+  }, [squadre]);
+
+  const badge = (t) => {
+    const reg = t.reg || {};
+    const iscrP = reg.iscr && reg.iscr.posted, assP = reg.ass && reg.ass.posted;
+    if (daStornareDi(t).length > 0) return <span className="pill" style={{ background: "#fff3e0", borderColor: "#f0d6a8", color: "#e65100" }}>da stornare</span>;
+    if (pendentiDi(t).length > 0) return <span className="pill" style={{ background: "var(--danger-soft)", borderColor: "#f1d6d6", color: "var(--danger)" }}>da registrare</span>;
+    if (iscrP || assP) return <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }}>registrato</span>;
+    return <span className="pill" style={{ color: "var(--ink-3)" }}>—</span>;
+  };
+
+  const regSquadra = regSlug ? squadre.find(s => s.slug === regSlug) : null;
 
   return (
     <div>
       <div className="page-head">
         <div>
           <h2>Iscrizioni TdP</h2>
-          <div className="sub">Iscrizioni dal TdP Manager · {iscrizioni.length} squadre · ogni pagamento genera l'entrata in contabilità</div>
+          <div className="sub">Copia locale dal foglio <span className="mono">STATO SQUADRE</span> · {kpi.nSquadre} squadre · le scritture si registrano a mano</div>
         </div>
       </div>
 
-      <div className="kpi-grid" style={{marginBottom:20}}>
-        <div className="kpi">
-          <div className="label">Totale dovuto</div>
-          <div className="value">{fmtEuro(kpi.dovuto)}</div>
-          <div className="hint">{kpi.nSquadre} squadre</div>
-        </div>
-        <div className="kpi accent">
-          <div className="label">Incassato</div>
-          <div className="value">{fmtEuro(kpi.incassato)}</div>
-          <div className="hint">{kpi.nPagate} squadre saldate</div>
-        </div>
-        <div className="kpi">
-          <div className="label">Da incassare</div>
-          <div className="value" style={{color: kpi.daIncassare > 0.01 ? "var(--danger)" : "var(--accent-ink)"}}>{fmtEuro(kpi.daIncassare)}</div>
-        </div>
-        <div className="kpi">
-          <div className="label">% incasso</div>
-          <div className="value">{kpi.dovuto > 0 ? Math.round(kpi.incassato / kpi.dovuto * 100) : 0}%</div>
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="empty-state">Caricamento iscrizioni…</div>
-      ) : errore ? (
-        <div className="empty-state" style={{padding:40, textAlign:"center"}}>
-          <div style={{fontSize:32, marginBottom:8}}>⚠️</div>
-          <div style={{color:"var(--danger)", fontWeight:600, marginBottom:6}}>{errore}</div>
-          <div style={{fontSize:12.5, color:"var(--ink-3)", maxWidth:520, margin:"0 auto"}}>
-            Nelle regole del Realtime Database aggiungi una sezione per <span className="mono">"iscrizioni_tdp"</span> (lettura) e <span className="mono">"pagamenti_tdp"</span> (lettura/scrittura), poi ricarica la pagina.
+      <div className="card" style={{ maxWidth: 820 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div>
+            <h3 className="card-title" style={{ margin: "0 0 4px" }}>Importa STATO SQUADRE</h3>
+            <div style={{ fontSize: 12.5, color: "var(--ink-2)", maxWidth: 520 }}>
+              Carica il file Excel del campo: leggo il foglio <span className="mono">STATO SQUADRE</span> e ne tengo una copia locale stabile.
+              Re-importando aggiorno numeri e stato, ma le registrazioni contabili già fatte vengono <strong>sempre preservate</strong> (nessun duplicato).
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={onFile} style={{ display: "none" }} />
+            <button className="btn accent" disabled={parsing} onClick={() => fileRef.current && fileRef.current.click()}>
+              {parsing ? "Lettura…" : (data ? "Reimporta" : "Importa Excel")}
+            </button>
+            {data && <button className="btn ghost" onClick={svuota}>Svuota</button>}
           </div>
         </div>
-      ) : iscrizioni.length === 0 ? (
-        <div className="empty-state" style={{padding:48}}>
-          Nessuna iscrizione pubblicata dal TdP Manager su <span className="mono">/iscrizioni_tdp</span>.
+        {data && (
+          <div style={{ marginTop: 12, fontSize: 12, color: "var(--ink-3)" }}>
+            <span className="mono">{data.filename}</span> · importato il {fmtDate(data.importedAt)}
+          </div>
+        )}
+      </div>
+
+      {kpi.nSquadre > 0 && (
+        <div className="kpi-grid" style={{ marginTop: 20 }}>
+          <div className="kpi">
+            <div className="label">Totale dovuto</div>
+            <div className="value">{fmtEuro(kpi.dovuto)}</div>
+            <div className="hint">{kpi.nSquadre} squadre</div>
+          </div>
+          <div className="kpi accent">
+            <div className="label">Riscosso (dichiarato)</div>
+            <div className="value">{fmtEuro(kpi.riscosso)}</div>
+            <div className="hint">stato dal foglio / app</div>
+          </div>
+          <div className="kpi">
+            <div className="label">Da riscuotere</div>
+            <div className="value" style={{ color: kpi.daRiscuotere > 0.01 ? "var(--danger)" : "var(--accent-ink)" }}>{fmtEuro(kpi.daRiscuotere)}</div>
+          </div>
+          <div className="kpi">
+            <div className="label">Registrato in contabilità</div>
+            <div className="value" style={{ color: "var(--accent)" }}>{fmtEuro(kpi.registrato)}</div>
+            <div className="hint">{nPendenti > 0 ? `${nPendenti} scritture da registrare` : "tutto allineato"}</div>
+          </div>
+        </div>
+      )}
+
+      {nPendenti > 0 && (
+        <div style={{ marginTop: 16, padding: "10px 14px", background: "var(--danger-soft)", border: "1px solid #f1d6d6", borderRadius: 8, fontSize: 13, color: "var(--danger)" }}>
+          <strong>{nPendenti} scrittur{nPendenti === 1 ? "a" : "e"} da registrare.</strong> Apri "Registra" sulla squadra per rivedere conto e importo prima di scrivere a libro giornale.
+        </div>
+      )}
+
+      {loading ? (
+        <div className="empty-state" style={{ marginTop: 24 }}>Caricamento…</div>
+      ) : kpi.nSquadre === 0 ? (
+        <div className="card" style={{ marginTop: 20, textAlign: "center" }}>
+          <h3 className="card-title">Nessuna squadra</h3>
+          <p style={{ fontSize: 13, color: "var(--ink-2)" }}>Usa <strong>Importa Excel</strong> e seleziona il file con il foglio <span className="mono">STATO SQUADRE</span>.</p>
         </div>
       ) : (
-        <div className="tbl-wrap">
+        <div className="tbl-wrap" style={{ marginTop: 18 }}>
           <table className="tbl">
             <thead>
               <tr>
                 <th>Squadra</th>
-                <th className="num" style={{width:60}}>Gioc.</th>
-                <th style={{width:70}}>Girone</th>
-                <th className="num" style={{width:110}}>Iscrizione</th>
-                <th className="num" style={{width:110}}>Assicuraz.</th>
-                <th className="num" style={{width:110}}>Dovuto</th>
-                <th className="num" style={{width:110}}>Pagato</th>
-                <th style={{width:120}}>Stato</th>
-                <th style={{width:230}}></th>
+                <th>Resp.</th>
+                <th className="num" style={{ width: 50 }}>Comp.</th>
+                <th style={{ width: 150 }}>Iscrizione</th>
+                <th style={{ width: 150 }}>Assicuraz.</th>
+                <th className="num" style={{ width: 80 }}>Dovuto</th>
+                <th style={{ width: 150 }}>Metodo</th>
+                <th style={{ width: 110 }}>Contabilità</th>
+                <th style={{ width: 170 }}></th>
               </tr>
             </thead>
             <tbody>
-              {iscrizioni
-                .slice()
-                .sort((a,b) => (a.girone||"").localeCompare(b.girone||"") || (a.nomeSquadra||"").localeCompare(b.nomeSquadra||""))
-                .map(team => {
-                  const s = statoDi(team);
-                  const pill = s.key === "pagato"
-                    ? { background:"var(--accent-soft)", color:"var(--accent-ink)", border:"#c8d8ce" }
-                    : s.key === "parziale"
-                    ? { background:"#fff3e0", color:"#e65100", border:"#f0d6a8" }
-                    : { background:"var(--danger-soft)", color:"var(--danger)", border:"#f1d6d6" };
-                  return (
-                    <tr key={team.teamId}>
-                      <td style={{fontWeight:600}}>{team.nomeSquadra}</td>
-                      <td className="num">{team.numeroGiocatori ?? "—"}</td>
-                      <td>{team.girone ? <span className="pill">{team.girone}</span> : "—"}</td>
-                      <td className="num">{fmt(team.quotaIscrizione || 0)}</td>
-                      <td className="num">{fmt(team.quotaAssicurazione || 0)}</td>
-                      <td className="num" style={{fontWeight:600}}>{fmt(team.totaleDovuto || 0)}</td>
-                      <td className="num" style={{color: s.pagato > 0 ? "var(--accent-ink)" : "var(--ink-3)"}}>{s.pagato > 0 ? fmt(s.pagato) : "—"}</td>
-                      <td>
-                        <span className="pill" style={{background:pill.background, color:pill.color, borderColor:pill.border, fontWeight:600}}>
-                          {s.label}{s.key === "parziale" ? ` · resta ${fmt(s.residuo)}` : ""}
-                        </span>
-                      </td>
-                      <td>
-                        <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
-                          {s.key !== "pagato" && (
-                            <button className="btn accent sm" onClick={() => setModale({ team, modo: "pagato" })}>Segna pagato</button>
-                          )}
-                          {s.key !== "pagato" && (
-                            <button className="btn ghost sm" onClick={() => setModale({ team, modo: "parziale" })}>Parziale</button>
-                          )}
-                          {s.key !== "da_incassare" && (
-                            <button className="btn danger sm" onClick={() => annullaPagamento(team)}>Annulla</button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+              {squadre.map(t => {
+                const pend = pendentiDi(t);
+                const storno = daStornareDi(t);
+                const reg = t.reg || {};
+                const anyPosted = (reg.iscr && reg.iscr.posted) || (reg.ass && reg.ass.posted);
+                return (
+                  <tr key={t.slug}>
+                    <td style={{ fontWeight: 600 }}>
+                      {t.nomeSquadra}
+                      {t.assenteNelFoglio && <span title="Non più nel foglio importato" style={{ color: "var(--warn)", marginLeft: 4 }}>⚠</span>}
+                    </td>
+                    <td style={{ fontSize: 12, color: "var(--ink-2)" }}>{t.responsabile || "—"}</td>
+                    <td className="num">{t.numeroComponenti || "—"}</td>
+                    <td>
+                      <button className={"btn sm " + (t.iscrRiscossa ? "accent" : "ghost")} onClick={() => patchSquadra(t.slug, { iscrRiscossa: !t.iscrRiscossa })}>
+                        {t.iscrRiscossa ? "✓" : "○"} {fmt(t.quotaIscrizione || 0)}
+                      </button>
+                    </td>
+                    <td>
+                      <button className={"btn sm " + (t.assRiscossa ? "accent" : "ghost")} onClick={() => patchSquadra(t.slug, { assRiscossa: !t.assRiscossa })}>
+                        {t.assRiscossa ? "✓" : "○"} {fmt(t.quotaAssicurazione || 0)}
+                      </button>
+                    </td>
+                    <td className="num" style={{ fontWeight: 600 }}>{fmt(t.totaleDovuto || 0)}</td>
+                    <td style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
+                      {t.metodo || "—"}
+                      {t.deltaCassa && <span className="pill" style={{ marginLeft: 4, fontSize: 9.5 }}>Δcassa</span>}
+                    </td>
+                    <td>{badge(t)}</td>
+                    <td>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {pend.length > 0 && <button className="btn accent sm" onClick={() => setRegSlug(t.slug)}>Registra ({pend.length})</button>}
+                        {(storno.length > 0 || anyPosted) && <button className="btn danger sm" onClick={() => annullaRegistrazione(t)}>Annulla reg.</button>}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
 
-      <div style={{marginTop:18, padding:"12px 16px", background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:8, fontSize:12, color:"var(--ink-2)"}}>
-        <strong>💡 Come funziona.</strong> Le iscrizioni arrivano in tempo reale dal TdP Manager. Registrando un pagamento, scrivo il record su <span className="mono">/pagamenti_tdp</span> e genero l'entrata nel libro giornale (BU <strong>TDP</strong>, conti <strong>{CONTO_ISCRIZIONE} ISCRIZIONI C/ENT.</strong> e <strong>{CONTO_ASSICURAZIONE} ASSICURAZIONI GIOCATORI</strong>). Modificando o annullando un pagamento, i movimenti collegati vengono rigenerati o rimossi, senza duplicati.
+      <div style={{ marginTop: 18, padding: "12px 16px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8, fontSize: 12, color: "var(--ink-2)" }}>
+        <strong>💡 Come funziona.</strong> I dati sono una copia locale del foglio <span className="mono">STATO SQUADRE</span> (chiave = nome squadra), quindi non spariscono quando aggiorni il master.
+        Marchi iscrizione/assicurazione come riscosse coi pulsanti; ogni quota riscossa ma non ancora contabilizzata diventa una <strong>scrittura suggerita</strong> (conti {CONTO_ISCRIZIONE} e {CONTO_ASSICURAZIONE}, BU TDP) che registri o ignori. Nulla è automatico e non ci sono duplicati: ogni quota può essere registrata una sola volta.
       </div>
 
-      {modale && (
-        <PagamentoTdPModal
-          team={modale.team}
-          modo={modale.modo}
-          pagamentoEsistente={pagamenti[modale.team.teamId]}
-          conti={conti}
-          onConfirm={registraPagamento}
-          onClose={() => setModale(null)}
+      {regSquadra && (
+        <RegistrazioneTdPModal
+          squadra={regSquadra}
+          pendenti={pendentiDi(regSquadra)}
+          onConfirm={registra}
+          onClose={() => setRegSlug(null)}
         />
       )}
     </div>
   );
 }
 
-function PagamentoTdPModal({ team, modo, pagamentoEsistente, conti, onConfirm, onClose }) {
-  const dovuto = Number(team.totaleDovuto) || 0;
-  const completo = modo === "pagato";
-
-  // Conto suggerito di default (contanti, se presente)
-  const contoDefault = (METODI_TDP.find(m => m.val === "contanti") || {}).conto
-    || (CONTI_LIQUIDITA[0] && CONTI_LIQUIDITA[0].codice);
-
-  // Righe iniziali: dal pagamento esistente se presente, altrimenti una sola riga.
-  const righeIniziali = () => {
-    if (pagamentoEsistente && Array.isArray(pagamentoEsistente.righe) && pagamentoEsistente.righe.length) {
-      return pagamentoEsistente.righe.map(r => ({ importo: String(r.importo), contoLiquidita: Number(r.contoLiquidita) }));
-    }
-    if (pagamentoEsistente && pagamentoEsistente.importoPagato) {
-      const c = (METODI_TDP.find(m => m.val === pagamentoEsistente.metodo) || {}).conto || contoDefault;
-      return [{ importo: String(pagamentoEsistente.importoPagato), contoLiquidita: Number(c) }];
-    }
-    return [{ importo: completo ? String(dovuto) : "", contoLiquidita: Number(contoDefault) }];
-  };
-
-  const [righe, setRighe] = useState(righeIniziali);
-  const [dataPagamento, setDataPagamento] = useState(pagamentoEsistente?.dataPagamento || new Date().toISOString().slice(0,10));
-  const [note, setNote] = useState(pagamentoEsistente?.note || "");
-
-  const totale = righe.reduce((s, r) => s + (Number(r.importo) || 0), 0);
-  const diff = Math.round((dovuto - totale) * 100) / 100;
-
-  const nomeConto = (cod) => {
-    const c = (conti || []).find(c => Number(c.codice) === Number(cod)) || CONTI_LIQUIDITA.find(c => c.codice === Number(cod));
-    return c ? c.nome.trim() : `Conto ${cod}`;
-  };
-
+function RegistrazioneTdPModal({ squadra, pendenti, onConfirm, onClose }) {
+  const contoGuess = contoLiquiditaDaMetodo(squadra.metodo);
+  const [righe, setRighe] = useState(pendenti.map(p => ({ ...p, conto: contoGuess, importo: String(p.importo) })));
+  const [dataPag, setDataPag] = useState(todayISO());
   const setRiga = (i, patch) => setRighe(rs => rs.map((r, idx) => idx === i ? { ...r, ...patch } : r));
-  const addRiga = () => setRighe(rs => [...rs, { importo: completo && diff > 0.01 ? String(diff) : "", contoLiquidita: Number(contoDefault) }]);
-  const removeRiga = (i) => setRighe(rs => rs.length > 1 ? rs.filter((_, idx) => idx !== i) : rs);
+  const totale = righe.reduce((s, r) => s + (Number(r.importo) || 0), 0);
 
   const submit = (e) => {
     e.preventDefault();
-    const righeValide = righe
-      .map(r => ({ importo: Number(r.importo) || 0, contoLiquidita: Number(r.contoLiquidita) }))
-      .filter(r => r.importo > 0 && r.contoLiquidita);
-    if (righeValide.length === 0) return alert("Inserisci almeno una riga con importo e conto.");
-    const tot = righeValide.reduce((s, r) => s + r.importo, 0);
-    if (completo && Math.abs(dovuto - tot) > 0.01) {
-      return alert(`Per segnare la squadra come PAGATA la somma delle righe (${fmt(tot)}) deve coincidere col dovuto (${fmt(dovuto)}).\nDifferenza: ${fmt(dovuto - tot)}.`);
-    }
-    if (tot > dovuto + 0.01 && !confirm(`Il totale inserito (${fmt(tot)}) supera il dovuto (${fmt(dovuto)}). Procedere comunque?`)) return;
-    const completato = completo || tot >= dovuto - 0.01;
-    onConfirm({ team, righe: righeValide, dataPagamento, note, completato });
+    const valide = righe
+      .map(r => ({ ...r, importo: Number(r.importo) || 0, conto: Number(r.conto) }))
+      .filter(r => r.importo > 0 && r.conto);
+    if (valide.length === 0) return alert("Nessuna riga valida da registrare.");
+    onConfirm(squadra.slug, valide, dataPag);
   };
 
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
-          <h3>{completo ? "Segna pagato" : "Pagamento parziale"} — {team.nomeSquadra}</h3>
+          <h3>Scrittura suggerita — {squadra.nomeSquadra}</h3>
           <button className="btn ghost sm" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
-          <div style={{display:"flex", gap:18, marginBottom:14, fontSize:13, color:"var(--ink-2)"}}>
-            <span>Dovuto: <strong>{fmtEuro(dovuto)}</strong></span>
-            <span>Iscrizione {fmt(team.quotaIscrizione||0)} · Assicur. {fmt(team.quotaAssicurazione||0)}</span>
+          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12 }}>
+            Metodo dichiarato: <strong>{squadra.metodo || "—"}</strong>{squadra.deltaCassa ? " · Delta cassa" : ""}.
+            Controlla conto di liquidità e importo, poi conferma. <strong>Niente viene scritto finché non premi Registra.</strong>
           </div>
           <form className="form-grid" onSubmit={submit}>
-            <div className="form-row" style={{gridTemplateColumns:"1fr", gap:8}}>
-              <label>Incasso ripartito per conto</label>
-              {righe.map((r, i) => (
-                <div key={i} style={{display:"flex", gap:8, alignItems:"center"}}>
-                  <input type="number" inputMode="decimal" step="0.01" placeholder="Importo €" value={r.importo}
-                         autoFocus={i === 0}
-                         onChange={e => setRiga(i, { importo: e.target.value })}
-                         style={{flex:"0 0 130px"}}/>
-                  <select value={r.contoLiquidita} onChange={e => setRiga(i, { contoLiquidita: Number(e.target.value) })} style={{flex:1}}>
-                    {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2,"0")} · {c.nome.trim()}</option>)}
-                  </select>
-                  <button type="button" className="btn danger sm" onClick={() => removeRiga(i)}
-                          disabled={righe.length <= 1} title="Rimuovi riga" style={{flex:"0 0 auto"}}>🗑</button>
-                </div>
-              ))}
-              <button type="button" className="btn ghost sm" onClick={addRiga} style={{alignSelf:"flex-start", marginTop:2}}>
-                + Aggiungi conto
-              </button>
-            </div>
-
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:12, padding:"8px 12px",
-                         background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:6, fontSize:13}}>
-              <span>Totale inserito: <strong className="mono">{fmtEuro(totale)}</strong></span>
-              {completo
-                ? <span style={{color: Math.abs(diff) < 0.01 ? "var(--accent-ink)" : "var(--danger)", fontWeight:600}}>
-                    {Math.abs(diff) < 0.01 ? "✓ Coincide col dovuto" : `Differenza col dovuto: ${fmt(diff)}`}
-                  </span>
-                : <span style={{color:"var(--ink-3)"}}>Resto: {fmt(Math.max(0, diff))}</span>}
-            </div>
-
+            {righe.map((r, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span className="pill" style={{ flex: "0 0 96px" }}>{r.label}</span>
+                <span style={{ flex: "0 0 60px", fontSize: 11.5, color: "var(--ink-3)" }}>→ conto {r.contoPdC}</span>
+                <input type="number" inputMode="decimal" step="0.01" value={r.importo}
+                       onChange={e => setRiga(i, { importo: e.target.value })} style={{ flex: "0 0 110px" }} />
+                <select value={r.conto} onChange={e => setRiga(i, { conto: Number(e.target.value) })} style={{ flex: 1 }}>
+                  {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
+                </select>
+              </div>
+            ))}
             <div className="form-row">
-              <label>Data pagamento</label>
-              <input type="date" value={dataPagamento} onChange={e => setDataPagamento(e.target.value)} required/>
+              <label>Data registrazione</label>
+              <input type="date" value={dataPag} onChange={e => setDataPag(e.target.value)} required />
             </div>
-            <div className="form-row">
-              <label>Note (opzionale)</label>
-              <textarea value={note} onChange={e => setNote(e.target.value)} placeholder="es. 100 contanti + resto bonifico"/>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 6, fontSize: 13 }}>
+              <span>Totale da registrare:</span><strong className="mono">{fmtEuro(totale)}</strong>
             </div>
-            <div style={{fontSize:11.5, color:"var(--ink-3)", padding:"2px 0"}}>
-              Verrà registrata un'entrata in contabilità per ogni conto (BU TDP).
-              {completo && (team.quotaAssicurazione > 0) && " Iscrizione e assicurazione vengono separate sui conti 6 e 7 a livello complessivo."}
-            </div>
-            <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
               <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
-              <button type="submit" className="btn accent">Conferma e registra</button>
+              <button type="submit" className="btn accent">Registra in contabilità</button>
             </div>
           </form>
         </div>
@@ -6984,19 +7044,300 @@ function PagamentoTdPModal({ team, modo, pagamentoEsistente, conti, onConfirm, o
 // PAGINA: TORNEO
 // ============================================================
 function PageTorneo({ stagione, onToast }) {
-  const [imp, setImp] = useState(null);        // import salvato su Firebase
+  const [tab, setTab] = useState("serate");
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Torneo del Prete</h2>
+          <div className="sub">Incassi serate · resoconto CassaPro</div>
+        </div>
+      </div>
+
+      <div className="tipo-switch" style={{ maxWidth: 420, marginBottom: 20, gridTemplateColumns: "repeat(2, 1fr)" }}>
+        <button type="button" className={tab === "serate" ? "active entrata" : ""} onClick={() => setTab("serate")}>💶 Incassi serate</button>
+        <button type="button" className={tab === "cassapro" ? "active entrata" : ""} onClick={() => setTab("cassapro")}>📄 Resoconto CassaPro</button>
+      </div>
+
+      {tab === "serate" && <TorneoIncassiSerate stagione={stagione} onToast={onToast} />}
+      {tab === "cassapro" && <TorneoResocontoGenerale stagione={stagione} onToast={onToast} />}
+    </div>
+  );
+}
+
+// ---------- Sottosezione: Incassi serate (una registrazione per serata) ----------
+function TorneoIncassiSerate({ stagione, onToast }) {
+  const [serate, setSerate] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!firebaseReady) { setLoading(false); return; }
+    const ref = db.ref(`stagioni/${stagione}/torneo/serate`);
+    const cb = ref.on("value", snap => { setSerate(snap.val() || {}); setLoading(false); });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  const lista = useMemo(() =>
+    Object.entries(serate).map(([id, s]) => ({ ...s, id }))
+      .sort((a, b) => (a.data || "").localeCompare(b.data || "")), [serate]);
+
+  const aggiungiSerata = async () => {
+    const id = "s_" + uid();
+    try {
+      await db.ref(`stagioni/${stagione}/torneo/serate/${id}`).set({
+        id, etichetta: `Serata ${lista.length + 1}`, data: todayISO(),
+        fondoIniziale: 0, fondoFinale: 0, cassapro: null, reg: null,
+      });
+      onToast("Serata aggiunta");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: "var(--ink-2)" }}>
+          Una scheda per serata: import CassaPro, fondo cassa iniziale/finale e scrittura suggerita (conto {CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO).
+        </div>
+        <button className="btn accent sm" onClick={aggiungiSerata}>+ Aggiungi serata</button>
+      </div>
+
+      {loading ? (
+        <div className="empty-state">Caricamento…</div>
+      ) : lista.length === 0 ? (
+        <div className="card" style={{ textAlign: "center" }}>
+          <h3 className="card-title">Nessuna serata</h3>
+          <p style={{ fontSize: 13, color: "var(--ink-2)" }}>Usa <strong>+ Aggiungi serata</strong> per registrare la prima.</p>
+        </div>
+      ) : (
+        lista.map(s => <SerataCard key={s.id} serata={s} stagione={stagione} onToast={onToast} />)
+      )}
+    </div>
+  );
+}
+
+function SerataCard({ serata, stagione, onToast }) {
+  const fileRef = useRef(null);
+  const [parsing, setParsing] = useState(false);
+  const [righe, setRighe] = useState(null);   // scrittura in composizione (null = chiusa)
+  const [dataPag, setDataPag] = useState(serata.data || todayISO());
+  const path = `stagioni/${stagione}/torneo/serate/${serata.id}`;
+  const patch = (p) => db.ref(path).update(p);
+
+  const contante = Math.round(((Number(serata.fondoFinale) || 0) - (Number(serata.fondoIniziale) || 0)) * 100) / 100;
+  const reg = serata.reg || null;
+  const posted = reg && Array.isArray(reg.movimentiIds) && reg.movimentiIds.length > 0;
+
+  const onFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (typeof XLSX === "undefined") { alert("Libreria Excel non caricata."); return; }
+    setParsing(true);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
+        const sheets = wb.SheetNames.map(name => {
+          const ws = wb.Sheets[name];
+          const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: "" });
+          const nonEmpty = aoa.filter(r => Array.isArray(r) && r.some(c => c !== "" && c !== null && c !== undefined));
+          const header = (nonEmpty[0] || []).map(h => (h === "" || h == null) ? "" : String(h));
+          return { name, header, rows: nonEmpty.slice(1) };
+        }).filter(s => s.header.length > 0 || s.rows.length > 0);
+        if (sheets.length === 0) { alert("Il file non contiene dati leggibili."); setParsing(false); return; }
+        await patch({ cassapro: { filename: file.name, importedAt: new Date().toISOString(), sheets } });
+        onToast("Resoconto CassaPro importato nella serata");
+      } catch (err) { alert("Errore lettura file: " + err.message); }
+      finally { setParsing(false); if (fileRef.current) fileRef.current.value = ""; }
+    };
+    reader.onerror = () => { alert("Impossibile leggere il file."); setParsing(false); };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const totaliColonne = (sheet) => {
+    const tot = {}; let any = false;
+    (sheet.rows || []).forEach(r => (sheet.header || []).forEach((h, i) => {
+      const v = r[i];
+      if (typeof v === "number" && !isNaN(v)) { tot[i] = (tot[i] || 0) + v; any = true; }
+    }));
+    return any ? tot : null;
+  };
+
+  const eliminaSerata = async () => {
+    if (!confirm(`Eliminare "${serata.etichetta || "serata"}"?` + (posted ? " I movimenti registrati verranno rimossi." : ""))) return;
+    try {
+      if (posted) for (const id of reg.movimentiIds) await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
+      await db.ref(path).remove();
+      onToast("Serata eliminata");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  const apriScrittura = () => setRighe([{ conto: 3, importo: String(contante > 0 ? contante : "") }]);
+  const setRiga = (i, p) => setRighe(rs => rs.map((r, idx) => idx === i ? { ...r, ...p } : r));
+  const addRiga = () => setRighe(rs => [...rs, { conto: 5, importo: "" }]);
+  const removeRiga = (i) => setRighe(rs => rs.length > 1 ? rs.filter((_, idx) => idx !== i) : rs);
+  const totScrittura = (righe || []).reduce((s, r) => s + (Number(r.importo) || 0), 0);
+
+  const registra = async () => {
+    const valide = (righe || [])
+      .map(r => ({ conto: Number(r.conto), importo: Math.round((Number(r.importo) || 0) * 100) / 100 }))
+      .filter(r => r.importo > 0 && r.conto);
+    if (valide.length === 0) return alert("Inserisci almeno una riga con importo e conto.");
+    try {
+      const ids = [];
+      for (const r of valide) {
+        const mov = {
+          tipo: "entrata", data: dataPag, contoLiquidita: r.conto, contoLiquiditaDest: null,
+          contoPdC: CONTO_ENTRATE_SERATE, categoria: "INCASSI SERATE TDP", bu: "TDP", mese: meseDaData(dataPag),
+          nonMonetario: false, importo: r.importo,
+          descrizione: "Incasso serata " + (serata.etichetta || fmtDate(serata.data)),
+          origineSerata: serata.id, creatoIl: new Date().toISOString(), modificatoIl: new Date().toISOString(),
+        };
+        const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
+        await ref.set(mov);
+        ids.push(ref.key);
+      }
+      await patch({ reg: { movimentiIds: ids, righe: valide, registratoIl: new Date().toISOString(), totale: Math.round(totScrittura * 100) / 100 } });
+      setRighe(null);
+      onToast(`Serata registrata · ${valide.length} movimento/i`);
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  const annullaRegistrazione = async () => {
+    if (!posted) return;
+    if (!confirm("Annullare la registrazione di questa serata? I movimenti collegati verranno rimossi.")) return;
+    try {
+      for (const id of reg.movimentiIds) await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
+      await patch({ reg: null });
+      onToast("Registrazione serata annullata");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 18 }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <input type="text" value={serata.etichetta || ""} onChange={e => patch({ etichetta: e.target.value })}
+               placeholder="Etichetta serata" style={{ flex: "1 1 200px", fontWeight: 600 }} />
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <label style={{ fontSize: 12, color: "var(--ink-3)" }}>Data</label>
+          <input type="date" value={serata.data || ""} onChange={e => { patch({ data: e.target.value }); setDataPag(e.target.value); }} />
+        </div>
+        {posted
+          ? <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }}>registrata · {fmtEuro(reg.totale || 0)}</span>
+          : <span className="pill" style={{ background: "var(--danger-soft)", borderColor: "#f1d6d6", color: "var(--danger)" }}>da registrare</span>}
+        <button className="btn danger sm" onClick={eliminaSerata} style={{ marginLeft: "auto" }}>🗑 Elimina</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
+        <div className="form-row" style={{ flex: "0 0 150px" }}>
+          <label>Fondo cassa iniziale €</label>
+          <input type="number" inputMode="decimal" step="0.01" value={serata.fondoIniziale ?? 0}
+                 onChange={e => patch({ fondoIniziale: Number(e.target.value) || 0 })} />
+        </div>
+        <div className="form-row" style={{ flex: "0 0 150px" }}>
+          <label>Fondo cassa finale €</label>
+          <input type="number" inputMode="decimal" step="0.01" value={serata.fondoFinale ?? 0}
+                 onChange={e => patch({ fondoFinale: Number(e.target.value) || 0 })} />
+        </div>
+        <div style={{ flex: "0 0 auto", padding: "8px 12px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 6, fontSize: 13 }}>
+          Contante netto: <strong className="mono" style={{ color: contante >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmtEuro(contante)}</strong>
+          <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>finale − iniziale</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={onFile} style={{ display: "none" }} />
+          <button className="btn ghost sm" disabled={parsing} onClick={() => fileRef.current && fileRef.current.click()}>
+            {parsing ? "Lettura…" : (serata.cassapro ? "Sostituisci CassaPro" : "Importa CassaPro")}
+          </button>
+        </div>
+      </div>
+
+      {serata.cassapro && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginBottom: 6 }}>
+            <span className="mono">{serata.cassapro.filename}</span> · {fmtDate(serata.cassapro.importedAt)}
+          </div>
+          {(serata.cassapro.sheets || []).map((sheet, si) => {
+            const tot = totaliColonne(sheet);
+            return (
+              <details key={si} style={{ marginBottom: 6 }}>
+                <summary style={{ cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>{sheet.name} · {sheet.rows.length} righe</summary>
+                <div className="tbl-wrap" style={{ overflowX: "auto", marginTop: 6 }}>
+                  <table className="tbl" style={{ fontSize: 12 }}>
+                    <thead><tr>{sheet.header.map((h, i) => <th key={i} className={typeof (sheet.rows[0] || [])[i] === "number" ? "num" : ""}>{h || ("col " + (i + 1))}</th>)}</tr></thead>
+                    <tbody>
+                      {sheet.rows.slice(0, 200).map((r, ri) => (
+                        <tr key={ri}>{sheet.header.map((_, ci) => {
+                          const v = r[ci]; const isNum = typeof v === "number";
+                          return <td key={ci} className={isNum ? "num" : ""}>{v === "" || v == null ? "" : (isNum ? fmt(v) : String(v))}</td>;
+                        })}</tr>
+                      ))}
+                      {tot && (
+                        <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                          {sheet.header.map((_, ci) => <td key={ci} className={tot[ci] !== undefined ? "num" : ""}>{ci === 0 ? "TOTALI" : (tot[ci] !== undefined ? fmt(tot[ci]) : "")}</td>)}
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Scrittura suggerita */}
+      {posted ? (
+        <div style={{ padding: "10px 14px", background: "var(--accent-soft)", border: "1px solid #c8d8ce", borderRadius: 8, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span>Registrata in contabilità: {(reg.righe || []).map((r, i) => {
+            const c = CONTI_LIQUIDITA.find(x => x.codice === r.conto);
+            return <span key={i} className="pill" style={{ marginLeft: 4 }}>{(c ? c.nome.trim() : "conto " + r.conto)}: {fmt(r.importo)}</span>;
+          })}</span>
+          <button className="btn danger sm" onClick={annullaRegistrazione}>Annulla registrazione</button>
+        </div>
+      ) : righe === null ? (
+        <button className="btn accent sm" onClick={apriScrittura}>Proponi scrittura</button>
+      ) : (
+        <div style={{ padding: "12px 14px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8 }}>
+          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10 }}>
+            Scrittura suggerita: incasso serata in avere su <strong>{CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO</strong>, ripartito per conto di liquidità (BU TDP). Modifica liberamente, poi registra.
+          </div>
+          {righe.map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+              <input type="number" inputMode="decimal" step="0.01" placeholder="Importo €" value={r.importo}
+                     onChange={e => setRiga(i, { importo: e.target.value })} style={{ flex: "0 0 130px" }} />
+              <select value={r.conto} onChange={e => setRiga(i, { conto: Number(e.target.value) })} style={{ flex: 1 }}>
+                {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
+              </select>
+              <button className="btn danger sm" onClick={() => removeRiga(i)} disabled={righe.length <= 1}>🗑</button>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn ghost sm" onClick={addRiga}>+ Aggiungi conto</button>
+              <button className="btn ghost sm" onClick={() => setRiga(0, { conto: 3, importo: String(contante > 0 ? contante : 0) })}>↻ usa contante</button>
+            </div>
+            <span style={{ fontSize: 13 }}>Totale: <strong className="mono">{fmtEuro(totScrittura)}</strong></span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--rule)" }}>
+            <button className="btn ghost" onClick={() => setRighe(null)}>Ignora</button>
+            <button className="btn accent" onClick={registra}>Registra in contabilità</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Sottosezione: Resoconto CassaPro generale (import unico, come prima) ----------
+function TorneoResocontoGenerale({ stagione, onToast }) {
+  const [imp, setImp] = useState(null);
   const [loading, setLoading] = useState(true);
   const [parsing, setParsing] = useState(false);
   const fileRef = useRef(null);
 
-  // Carico l'eventuale import gia salvato
   useEffect(() => {
     if (!firebaseReady) { setLoading(false); return; }
     const ref = db.ref(`stagioni/${stagione}/torneo/cassapro`);
-    const cb = ref.on("value", snap => {
-      setImp(snap.exists() ? snap.val() : null);
-      setLoading(false);
-    });
+    const cb = ref.on("value", snap => { setImp(snap.exists() ? snap.val() : null); setLoading(false); });
     return () => ref.off("value", cb);
   }, [stagione]);
 
@@ -7014,29 +7355,15 @@ function PageTorneo({ stagione, onToast }) {
           const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: "" });
           const nonEmpty = aoa.filter(r => Array.isArray(r) && r.some(c => c !== "" && c !== null && c !== undefined));
           const header = (nonEmpty[0] || []).map(h => (h === "" || h == null) ? "" : String(h));
-          const rows = nonEmpty.slice(1);
-          return { name, header, rows };
+          return { name, header, rows: nonEmpty.slice(1) };
         }).filter(s => s.header.length > 0 || s.rows.length > 0);
-
         if (sheets.length === 0) { alert("Il file non contiene dati leggibili."); setParsing(false); return; }
-
-        const payload = {
-          filename: file.name,
-          importedAt: new Date().toISOString(),
-          sheets,
-        };
-        if (firebaseReady) {
-          await db.ref(`stagioni/${stagione}/torneo/cassapro`).set(payload);
-        } else {
-          setImp(payload);
-        }
+        const payload = { filename: file.name, importedAt: new Date().toISOString(), sheets };
+        if (firebaseReady) await db.ref(`stagioni/${stagione}/torneo/cassapro`).set(payload);
+        else setImp(payload);
         if (onToast) onToast("Resoconto CassaPro importato");
-      } catch (err) {
-        alert("Errore lettura file: " + err.message);
-      } finally {
-        setParsing(false);
-        if (fileRef.current) fileRef.current.value = "";
-      }
+      } catch (err) { alert("Errore lettura file: " + err.message); }
+      finally { setParsing(false); if (fileRef.current) fileRef.current.value = ""; }
     };
     reader.onerror = () => { alert("Impossibile leggere il file."); setParsing(false); };
     reader.readAsArrayBuffer(file);
@@ -7051,41 +7378,27 @@ function PageTorneo({ stagione, onToast }) {
     } catch (e) { alert("Errore: " + e.message); }
   };
 
-  // Totali colonne numeriche per ciascun foglio
   const totaliColonne = (sheet) => {
-    const tot = {};
-    let any = false;
-    (sheet.rows || []).forEach(r => {
-      (sheet.header || []).forEach((h, i) => {
-        const v = r[i];
-        if (typeof v === "number" && !isNaN(v)) {
-          tot[i] = (tot[i] || 0) + v;
-          any = true;
-        }
-      });
-    });
+    const tot = {}; let any = false;
+    (sheet.rows || []).forEach(r => (sheet.header || []).forEach((h, i) => {
+      const v = r[i];
+      if (typeof v === "number" && !isNaN(v)) { tot[i] = (tot[i] || 0) + v; any = true; }
+    }));
     return any ? tot : null;
   };
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h2>Torneo del Prete</h2>
-          <div className="sub">Importa il resoconto Excel esportato da CassaPro</div>
-        </div>
-      </div>
-
-      <div className="card" style={{maxWidth:760}}>
-        <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, flexWrap:"wrap"}}>
+      <div className="card" style={{ maxWidth: 760 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
           <div>
-            <h3 className="card-title" style={{margin:"0 0 4px"}}>Resoconto CassaPro</h3>
-            <div style={{fontSize:12.5, color:"var(--ink-2)"}}>
-              Carica il file <span className="mono">.xlsx</span> (o .xls/.csv) esportato da CassaPro. Tutti i fogli vengono letti e mostrati qui sotto, con i totali delle colonne numeriche.
+            <h3 className="card-title" style={{ margin: "0 0 4px" }}>Resoconto CassaPro (generale)</h3>
+            <div style={{ fontSize: 12.5, color: "var(--ink-2)" }}>
+              Import unico di tutto il torneo, solo consultazione. Per gli incassi da contabilizzare usa la scheda <strong>Incassi serate</strong>.
             </div>
           </div>
-          <div style={{display:"flex", gap:8, alignItems:"center"}}>
-            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={onFile} style={{display:"none"}} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={onFile} style={{ display: "none" }} />
             <button className="btn accent" disabled={parsing} onClick={() => fileRef.current && fileRef.current.click()}>
               {parsing ? "Lettura…" : (imp ? "Sostituisci file" : "Importa Excel")}
             </button>
@@ -7093,59 +7406,40 @@ function PageTorneo({ stagione, onToast }) {
           </div>
         </div>
         {imp && (
-          <div style={{marginTop:12, fontSize:12, color:"var(--ink-3)"}}>
+          <div style={{ marginTop: 12, fontSize: 12, color: "var(--ink-3)" }}>
             <span className="mono">{imp.filename}</span> · importato il {fmtDate(imp.importedAt)} · {imp.sheets ? imp.sheets.length : 0} foglio/i
           </div>
         )}
       </div>
 
       {loading ? (
-        <div className="empty-state" style={{marginTop:24}}>Caricamento…</div>
+        <div className="empty-state" style={{ marginTop: 24 }}>Caricamento…</div>
       ) : !imp ? (
-        <div className="card" style={{marginTop:20, textAlign:"center"}}>
+        <div className="card" style={{ marginTop: 20, textAlign: "center" }}>
           <h3 className="card-title">Nessun resoconto importato</h3>
-          <p style={{fontSize:13, color:"var(--ink-2)"}}>Usa il pulsante <strong>Importa Excel</strong> per caricare l'esportazione di CassaPro.</p>
+          <p style={{ fontSize: 13, color: "var(--ink-2)" }}>Usa <strong>Importa Excel</strong> per caricare l'esportazione di CassaPro.</p>
         </div>
       ) : (
         (imp.sheets || []).map((sheet, si) => {
           const tot = totaliColonne(sheet);
           return (
-            <div key={si} style={{marginTop:24}}>
-              <h3 className="serif" style={{fontWeight:500, fontSize:17, margin:"0 0 10px"}}>
-                {sheet.name} <span style={{color:"var(--ink-3)", fontSize:13, fontWeight:400}}>· {sheet.rows.length} righe</span>
+            <div key={si} style={{ marginTop: 24 }}>
+              <h3 className="serif" style={{ fontWeight: 500, fontSize: 17, margin: "0 0 10px" }}>
+                {sheet.name} <span style={{ color: "var(--ink-3)", fontSize: 13, fontWeight: 400 }}>· {sheet.rows.length} righe</span>
               </h3>
-              <div className="tbl-wrap" style={{overflowX:"auto"}}>
-                <table className="tbl" style={{fontSize:12.5}}>
-                  <thead>
-                    <tr>
-                      {sheet.header.map((h, i) => (
-                        <th key={i} className={typeof (sheet.rows[0] || [])[i] === "number" ? "num" : ""}>
-                          {h || <span style={{color:"var(--ink-3)"}}>col {i+1}</span>}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
+              <div className="tbl-wrap" style={{ overflowX: "auto" }}>
+                <table className="tbl" style={{ fontSize: 12.5 }}>
+                  <thead><tr>{sheet.header.map((h, i) => <th key={i} className={typeof (sheet.rows[0] || [])[i] === "number" ? "num" : ""}>{h || <span style={{ color: "var(--ink-3)" }}>col {i + 1}</span>}</th>)}</tr></thead>
                   <tbody>
                     {sheet.rows.map((r, ri) => (
-                      <tr key={ri}>
-                        {sheet.header.map((_, ci) => {
-                          const v = r[ci];
-                          const isNum = typeof v === "number";
-                          return (
-                            <td key={ci} className={isNum ? "num" : ""}>
-                              {v === "" || v == null ? "" : (isNum ? fmt(v) : String(v))}
-                            </td>
-                          );
-                        })}
-                      </tr>
+                      <tr key={ri}>{sheet.header.map((_, ci) => {
+                        const v = r[ci]; const isNum = typeof v === "number";
+                        return <td key={ci} className={isNum ? "num" : ""}>{v === "" || v == null ? "" : (isNum ? fmt(v) : String(v))}</td>;
+                      })}</tr>
                     ))}
                     {tot && (
-                      <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
-                        {sheet.header.map((_, ci) => (
-                          <td key={ci} className={tot[ci] !== undefined ? "num" : ""}>
-                            {ci === 0 ? "TOTALI" : (tot[ci] !== undefined ? fmt(tot[ci]) : "")}
-                          </td>
-                        ))}
+                      <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                        {sheet.header.map((_, ci) => <td key={ci} className={tot[ci] !== undefined ? "num" : ""}>{ci === 0 ? "TOTALI" : (tot[ci] !== undefined ? fmt(tot[ci]) : "")}</td>)}
                       </tr>
                     )}
                   </tbody>
