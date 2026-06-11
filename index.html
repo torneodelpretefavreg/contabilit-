@@ -6802,12 +6802,30 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
   const annullaRegistrazione = async (t) => {
     const reg = t.reg || {};
     const ids = [reg.iscr && reg.iscr.movId, reg.ass && reg.ass.movId].filter(Boolean);
-    if (ids.length === 0) return;
-    if (!confirm(`Annullare la registrazione contabile di "${t.nomeSquadra}"?\nVerranno rimossi ${ids.length} movimento/i dal libro giornale.`)) return;
+    const msg = ids.length > 0
+      ? `Annullare la registrazione contabile di "${t.nomeSquadra}"?\nVerranno rimossi ${ids.length} movimento/i dal libro giornale.`
+      : `Annullare la registrazione di "${t.nomeSquadra}"?\n(era segnata come "già registrata", nessun movimento da rimuovere)`;
+    if (!confirm(msg)) return;
     try {
       for (const id of ids) await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
       await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${t.slug}/reg`).set(null);
       onToast("Registrazione annullata");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  // marca le quote come GIÀ a libro giornale, senza creare movimenti
+  const segnaGiaRegistrata = async (slug, righe) => {
+    const t = (data.squadre || {})[slug]; if (!t || !righe || righe.length === 0) return;
+    const lab = righe.map(r => r.label).join(" + ");
+    if (!confirm(`Segnare ${lab} di "${t.nomeSquadra}" come GIÀ registrata in contabilità?\nNon verrà creato nessun movimento (utile se l'avevi già messa a libro giornale).`)) return;
+    try {
+      const regUpd = { ...(t.reg || {}) };
+      righe.forEach(r => {
+        regUpd[r.tipo] = { posted: true, manuale: true, importo: Math.round((Number(r.importo) || 0) * 100) / 100, conto: null, movId: null, registratoIl: new Date().toISOString() };
+      });
+      await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${slug}/reg`).set(regUpd);
+      onToast(`Segnata come già registrata · ${t.nomeSquadra}`);
+      setRegSlug(null);
     } catch (e) { alert("Errore: " + e.message); }
   };
 
@@ -6829,7 +6847,10 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
     const iscrP = reg.iscr && reg.iscr.posted, assP = reg.ass && reg.ass.posted;
     if (daStornareDi(t).length > 0) return <span className="pill" style={{ background: "#fff3e0", borderColor: "#f0d6a8", color: "#e65100" }}>da stornare</span>;
     if (pendentiDi(t).length > 0) return <span className="pill" style={{ background: "var(--danger-soft)", borderColor: "#f1d6d6", color: "var(--danger)" }}>da registrare</span>;
-    if (iscrP || assP) return <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }}>registrato</span>;
+    if (iscrP || assP) {
+      const man = (iscrP && reg.iscr.manuale) || (assP && reg.ass.manuale);
+      return <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }} title={man ? "Segnata come già a libro giornale (nessun movimento creato)" : "Movimenti creati a libro giornale"}>{man ? "già registrata" : "registrato"}</span>;
+    }
     return <span className="pill" style={{ color: "var(--ink-3)" }}>—</span>;
   };
 
@@ -6954,6 +6975,7 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
                     <td>
                       <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                         {pend.length > 0 && <button className="btn accent sm" onClick={() => setRegSlug(t.slug)}>Registra ({pend.length})</button>}
+                        {pend.length > 0 && <button className="btn ghost sm" title="Segna come già a libro giornale, senza creare movimenti" onClick={() => segnaGiaRegistrata(t.slug, pend)}>Già reg.</button>}
                         {(storno.length > 0 || anyPosted) && <button className="btn danger sm" onClick={() => annullaRegistrazione(t)}>Annulla reg.</button>}
                       </div>
                     </td>
@@ -6967,7 +6989,7 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
 
       <div style={{ marginTop: 18, padding: "12px 16px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8, fontSize: 12, color: "var(--ink-2)" }}>
         <strong>💡 Come funziona.</strong> I dati sono una copia locale del foglio <span className="mono">STATO SQUADRE</span> (chiave = nome squadra), quindi non spariscono quando aggiorni il master.
-        Marchi iscrizione/assicurazione come riscosse coi pulsanti; ogni quota riscossa ma non ancora contabilizzata diventa una <strong>scrittura suggerita</strong> (conti {CONTO_ISCRIZIONE} e {CONTO_ASSICURAZIONE}, BU TDP) che registri o ignori. Nulla è automatico e non ci sono duplicati: ogni quota può essere registrata una sola volta.
+        Marchi iscrizione/assicurazione come riscosse coi pulsanti; ogni quota riscossa ma non ancora contabilizzata diventa una <strong>scrittura suggerita</strong> (conti {CONTO_ISCRIZIONE} e {CONTO_ASSICURAZIONE}, BU TDP) che registri o ignori. Se una quota era già a libro giornale, usa <strong>"Già reg."</strong> per segnarla senza creare movimenti. Nulla è automatico e non ci sono duplicati: ogni quota può essere registrata una sola volta.
       </div>
 
       {regSquadra && (
@@ -6975,6 +6997,7 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
           squadra={regSquadra}
           pendenti={pendentiDi(regSquadra)}
           onConfirm={registra}
+          onGiaRegistrata={segnaGiaRegistrata}
           onClose={() => setRegSlug(null)}
         />
       )}
@@ -6982,7 +7005,7 @@ function PageIscrizioniTdP({ stagione, conti, onToast }) {
   );
 }
 
-function RegistrazioneTdPModal({ squadra, pendenti, onConfirm, onClose }) {
+function RegistrazioneTdPModal({ squadra, pendenti, onConfirm, onGiaRegistrata, onClose }) {
   const contoGuess = contoLiquiditaDaMetodo(squadra.metodo);
   const [righe, setRighe] = useState(pendenti.map(p => ({ ...p, conto: contoGuess, importo: String(p.importo) })));
   const [dataPag, setDataPag] = useState(todayISO());
@@ -6996,6 +7019,12 @@ function RegistrazioneTdPModal({ squadra, pendenti, onConfirm, onClose }) {
       .filter(r => r.importo > 0 && r.conto);
     if (valide.length === 0) return alert("Nessuna riga valida da registrare.");
     onConfirm(squadra.slug, valide, dataPag);
+  };
+
+  const giaRegistrata = () => {
+    const valide = righe.map(r => ({ ...r, importo: Number(r.importo) || 0 })).filter(r => r.importo > 0);
+    if (valide.length === 0) return alert("Nessuna riga valida.");
+    onGiaRegistrata(squadra.slug, valide);
   };
 
   return (
@@ -7029,8 +7058,9 @@ function RegistrazioneTdPModal({ squadra, pendenti, onConfirm, onClose }) {
             <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 6, fontSize: 13 }}>
               <span>Totale da registrare:</span><strong className="mono">{fmtEuro(totale)}</strong>
             </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 14, borderTop: "1px solid var(--rule)", flexWrap: "wrap" }}>
               <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
+              <button type="button" className="btn ghost" title="Marca come già a libro giornale, senza creare movimenti" onClick={giaRegistrata}>Già registrata</button>
               <button type="submit" className="btn accent">Registra in contabilità</button>
             </div>
           </form>
