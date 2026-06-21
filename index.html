@@ -7080,7 +7080,7 @@ function PageTorneo({ stagione, onToast }) {
       <div className="page-head">
         <div>
           <h2>Torneo del Prete</h2>
-          <div className="sub">Incassi serate · resoconto CassaPro</div>
+          <div className="sub">Composizione cassa per serata · netto incassato</div>
         </div>
       </div>
 
@@ -7095,7 +7095,71 @@ function PageTorneo({ stagione, onToast }) {
   );
 }
 
-// ---------- Sottosezione: Incassi serate (una registrazione per serata) ----------
+// ---------- Sottosezione: Incassi serate (composizione fondo cassa per serata) ----------
+const TAGLI_TDP = [
+  { val: 500, tipo: "banconota" }, { val: 200, tipo: "banconota" }, { val: 100, tipo: "banconota" },
+  { val: 50, tipo: "banconota" }, { val: 20, tipo: "banconota" }, { val: 10, tipo: "banconota" },
+  { val: 5, tipo: "banconota" },
+  { val: 2, tipo: "moneta" }, { val: 1, tipo: "moneta" }, { val: 0.50, tipo: "moneta" },
+  { val: 0.20, tipo: "moneta" }, { val: 0.10, tipo: "moneta" }, { val: 0.05, tipo: "moneta" },
+  { val: 0.02, tipo: "moneta" }, { val: 0.01, tipo: "moneta" },
+];
+const totaleTagli = (q) => TAGLI_TDP.reduce((s, t) => s + (Number(q && q[t.val]) || 0) * t.val, 0);
+const totFondoSerata = (s) => { const c = totaleTagli(s.fondo); return c > 0 ? c : (Number(s.fondoIniziale) || 0); };
+const totContaSerata = (s) => { const c = totaleTagli(s.conta); return c > 0 ? c : (Number(s.fondoFinale) || 0); };
+
+function GrigliaTagli({ titolo, emoji, quantita, onSet, onAzzera, accentColor }) {
+  const subtot = (tipo) => TAGLI_TDP.filter(t => t.tipo === tipo).reduce((s, t) => s + (Number(quantita && quantita[t.val]) || 0) * t.val, 0);
+  const tot = subtot("banconota") + subtot("moneta");
+  const renderTabella = (tipo, intestazione) => (
+    <table className="tbl" style={{ margin: 0 }}>
+      <thead>
+        <tr>
+          <th className="num" style={{ width: 66 }}>{intestazione}</th>
+          <th className="num" style={{ width: 60 }}>Pezzi</th>
+          <th className="num">Totale</th>
+        </tr>
+      </thead>
+      <tbody>
+        {TAGLI_TDP.filter(t => t.tipo === tipo).map(t => {
+          const n = Number(quantita && quantita[t.val]) || 0;
+          const r = n * t.val;
+          return (
+            <tr key={t.val}>
+              <td className="num" style={{ fontWeight: 600 }}>{fmtEuro(t.val)}</td>
+              <td className="num">
+                <input type="number" inputMode="numeric" min="0" value={n || ""} placeholder="0"
+                       onChange={e => onSet(t.val, Number(e.target.value))}
+                       style={{ width: 54, padding: "3px 6px", border: "1px solid var(--rule)", borderRadius: 4, textAlign: "right" }} />
+              </td>
+              <td className="num" style={{ color: r > 0 ? "var(--accent-ink)" : "var(--ink-3)" }}>{r > 0 ? fmt(r) : "—"}</td>
+            </tr>
+          );
+        })}
+        <tr style={{ borderTop: "1px solid var(--rule-2)", fontWeight: 600, background: "var(--panel-2)" }}>
+          <td colSpan={2} style={{ fontSize: 11.5, color: "var(--ink-3)" }}>SUBTOT.</td>
+          <td className="num">{fmt(subtot(tipo))}</td>
+        </tr>
+      </tbody>
+    </table>
+  );
+  return (
+    <div style={{ flex: "1 1 320px", border: "1px solid var(--rule)", borderRadius: 8, padding: 14, background: "var(--panel)" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+        <h4 style={{ margin: 0, fontSize: 14 }}>{emoji} {titolo}</h4>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span className="mono" style={{ fontSize: 13.5, fontWeight: 700, color: accentColor || "var(--accent-ink)" }}>{fmtEuro(tot)}</span>
+          <button className="btn ghost sm" onClick={onAzzera} title="Azzera questa composizione">↺</button>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {renderTabella("banconota", "Banconote")}
+        {renderTabella("moneta", "Monete")}
+      </div>
+    </div>
+  );
+}
+
 function TorneoIncassiSerate({ stagione, onToast }) {
   const [serate, setSerate] = useState({});
   const [loading, setLoading] = useState(true);
@@ -7111,12 +7175,22 @@ function TorneoIncassiSerate({ stagione, onToast }) {
     Object.entries(serate).map(([id, s]) => ({ ...s, id }))
       .sort((a, b) => (a.data || "").localeCompare(b.data || "")), [serate]);
 
+  const tot = useMemo(() => {
+    let f = 0, c = 0, reg = 0;
+    lista.forEach(s => {
+      f += totFondoSerata(s);
+      c += totContaSerata(s);
+      if (s.reg && s.reg.totale) reg += Number(s.reg.totale) || 0;
+    });
+    return { fondo: f, conta: c, netto: c - f, registrato: reg, n: lista.length };
+  }, [lista]);
+
   const aggiungiSerata = async () => {
     const id = "s_" + uid();
     try {
       await db.ref(`stagioni/${stagione}/torneo/serate/${id}`).set({
         id, etichetta: `Serata ${lista.length + 1}`, data: todayISO(),
-        fondoIniziale: 0, fondoFinale: 0, cassapro: null, reg: null,
+        fondo: {}, conta: {}, reg: null,
       });
       onToast("Serata aggiunta");
     } catch (e) { alert("Errore: " + e.message); }
@@ -7124,9 +7198,33 @@ function TorneoIncassiSerate({ stagione, onToast }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+      {/* Complessivo finale */}
+      <div className="kpi-grid" style={{ marginBottom: 18 }}>
+        <div className="kpi">
+          <div className="label">Serate</div>
+          <div className="value">{tot.n}</div>
+          <div className="hint">registrate nel torneo</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Totale fondi cassa</div>
+          <div className="value" style={{ color: "var(--ink-2)" }}>{fmtEuro(tot.fondo)}</div>
+          <div className="hint">somma fondi iniziali</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Totale contato a fine</div>
+          <div className="value" style={{ color: "var(--ink-2)" }}>{fmtEuro(tot.conta)}</div>
+          <div className="hint">somma conte finali</div>
+        </div>
+        <div className="kpi accent">
+          <div className="label">Netto incassato complessivo</div>
+          <div className="value">{fmtEuro(tot.netto)}</div>
+          <div className="hint">contato − fondo · {fmtEuro(tot.registrato)} in contabilità</div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
         <div style={{ fontSize: 13, color: "var(--ink-2)" }}>
-          Una scheda per serata: import CassaPro, fondo cassa iniziale/finale e scrittura suggerita (conto {CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO).
+          Una scheda per serata: <strong>composizione del fondo cassa iniziale</strong> e <strong>conta di fine serata</strong>. Il <strong>netto incassato</strong> è la differenza, registrabile in contabilità (conto {CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO).
         </div>
         <button className="btn accent sm" onClick={aggiungiSerata}>+ Aggiungi serata</button>
       </div>
@@ -7141,55 +7239,87 @@ function TorneoIncassiSerate({ stagione, onToast }) {
       ) : (
         lista.map(s => <SerataCard key={s.id} serata={s} stagione={stagione} onToast={onToast} />)
       )}
+
+      {lista.length > 0 && (
+        <div className="card" style={{ marginTop: 20 }}>
+          <h3 style={{ margin: "0 0 12px" }}>📊 Riepilogo serate</h3>
+          <div className="tbl-wrap" style={{ margin: 0 }}>
+            <table className="tbl" style={{ margin: 0 }}>
+              <thead>
+                <tr>
+                  <th>Serata</th>
+                  <th style={{ width: 110 }}>Data</th>
+                  <th className="num">Fondo cassa</th>
+                  <th className="num">Contato fine</th>
+                  <th className="num">Netto incassato</th>
+                  <th style={{ width: 120 }}>Contabilità</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lista.map(s => {
+                  const f = totFondoSerata(s), c = totContaSerata(s), netto = Math.round((c - f) * 100) / 100;
+                  const posted = s.reg && Array.isArray(s.reg.movimentiIds) && s.reg.movimentiIds.length > 0;
+                  return (
+                    <tr key={s.id}>
+                      <td style={{ fontWeight: 600 }}>{s.etichetta || "—"}</td>
+                      <td style={{ fontSize: 12, color: "var(--ink-2)" }}>{fmtDate(s.data)}</td>
+                      <td className="num">{fmt(f)}</td>
+                      <td className="num">{fmt(c)}</td>
+                      <td className="num" style={{ fontWeight: 700, color: netto >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmt(netto)}</td>
+                      <td>{posted
+                        ? <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }}>✓ {fmt(s.reg.totale || 0)}</span>
+                        : <span className="pill" style={{ background: "var(--danger-soft)", borderColor: "#f1d6d6", color: "var(--danger)" }}>da reg.</span>}</td>
+                    </tr>
+                  );
+                })}
+                <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                  <td colSpan={2} style={{ fontFamily: "'Fraunces',serif" }}>COMPLESSIVO</td>
+                  <td className="num">{fmt(tot.fondo)}</td>
+                  <td className="num">{fmt(tot.conta)}</td>
+                  <td className="num" style={{ color: tot.netto >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmt(tot.netto)}</td>
+                  <td className="num" style={{ fontSize: 12, color: "var(--ink-3)" }}>{fmt(tot.registrato)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function SerataCard({ serata, stagione, onToast }) {
-  const fileRef = useRef(null);
-  const [parsing, setParsing] = useState(false);
-  const [righe, setRighe] = useState(null);   // scrittura in composizione (null = chiusa)
-  const [dataPag, setDataPag] = useState(serata.data || todayISO());
   const path = `stagioni/${stagione}/torneo/serate/${serata.id}`;
   const patch = (p) => db.ref(path).update(p);
 
-  const contante = Math.round(((Number(serata.fondoFinale) || 0) - (Number(serata.fondoIniziale) || 0)) * 100) / 100;
+  const [fondo, setFondo] = useState(serata.fondo || {});
+  const [conta, setConta] = useState(serata.conta || {});
+  const [righe, setRighe] = useState(null);
+  const [dataPag, setDataPag] = useState(serata.data || todayISO());
+  const [aperta, setAperta] = useState(true);
+
+  // Persisto le composizioni con un piccolo debounce: evita scatti del cursore mentre si digita.
+  const skipFirst = useRef(true);
+  useEffect(() => {
+    if (skipFirst.current) { skipFirst.current = false; return; }
+    const t = setTimeout(() => { patch({ fondo, conta }); }, 600);
+    return () => clearTimeout(t);
+  }, [fondo, conta]);
+
+  const totFondo = useMemo(() => { const c = totaleTagli(fondo); return c > 0 ? c : (Number(serata.fondoIniziale) || 0); }, [fondo, serata.fondoIniziale]);
+  const totConta = useMemo(() => { const c = totaleTagli(conta); return c > 0 ? c : (Number(serata.fondoFinale) || 0); }, [conta, serata.fondoFinale]);
+  const netto = Math.round((totConta - totFondo) * 100) / 100;
+
   const reg = serata.reg || null;
   const posted = reg && Array.isArray(reg.movimentiIds) && reg.movimentiIds.length > 0;
 
-  const onFile = (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    if (typeof XLSX === "undefined") { alert("Libreria Excel non caricata."); return; }
-    setParsing(true);
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      try {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
-        const sheets = wb.SheetNames.map(name => {
-          const ws = wb.Sheets[name];
-          const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: "" });
-          const nonEmpty = aoa.filter(r => Array.isArray(r) && r.some(c => c !== "" && c !== null && c !== undefined));
-          const header = (nonEmpty[0] || []).map(h => (h === "" || h == null) ? "" : String(h));
-          return { name, header, rows: nonEmpty.slice(1) };
-        }).filter(s => s.header.length > 0 || s.rows.length > 0);
-        if (sheets.length === 0) { alert("Il file non contiene dati leggibili."); setParsing(false); return; }
-        await patch({ cassapro: { filename: file.name, importedAt: new Date().toISOString(), sheets } });
-        onToast("Resoconto CassaPro importato nella serata");
-      } catch (err) { alert("Errore lettura file: " + err.message); }
-      finally { setParsing(false); if (fileRef.current) fileRef.current.value = ""; }
-    };
-    reader.onerror = () => { alert("Impossibile leggere il file."); setParsing(false); };
-    reader.readAsArrayBuffer(file);
+  const setQ = (which, val, n) => {
+    if (which === "fondo") setFondo(prev => ({ ...prev, [val]: n }));
+    else setConta(prev => ({ ...prev, [val]: n }));
   };
-
-  const totaliColonne = (sheet) => {
-    const tot = {}; let any = false;
-    (sheet.rows || []).forEach(r => (sheet.header || []).forEach((h, i) => {
-      const v = r[i];
-      if (typeof v === "number" && !isNaN(v)) { tot[i] = (tot[i] || 0) + v; any = true; }
-    }));
-    return any ? tot : null;
+  const azzera = (which) => {
+    if (!confirm(`Azzerare la composizione ${which === "fondo" ? "del fondo cassa iniziale" : "della conta finale"}?`)) return;
+    if (which === "fondo") setFondo({}); else setConta({});
   };
 
   const eliminaSerata = async () => {
@@ -7201,7 +7331,7 @@ function SerataCard({ serata, stagione, onToast }) {
     } catch (e) { alert("Errore: " + e.message); }
   };
 
-  const apriScrittura = () => setRighe([{ conto: 3, importo: String(contante > 0 ? contante : "") }]);
+  const apriScrittura = () => setRighe([{ conto: 3, importo: String(netto > 0 ? netto : "") }]);
   const setRiga = (i, p) => setRighe(rs => rs.map((r, idx) => idx === i ? { ...r, ...p } : r));
   const addRiga = () => setRighe(rs => [...rs, { conto: 5, importo: "" }]);
   const removeRiga = (i) => setRighe(rs => rs.length > 1 ? rs.filter((_, idx) => idx !== i) : rs);
@@ -7213,6 +7343,7 @@ function SerataCard({ serata, stagione, onToast }) {
       .filter(r => r.importo > 0 && r.conto);
     if (valide.length === 0) return alert("Inserisci almeno una riga con importo e conto.");
     try {
+      await patch({ fondo, conta }); // salvo eventuali modifiche pendenti
       const ids = [];
       for (const r of valide) {
         const mov = {
@@ -7244,7 +7375,8 @@ function SerataCard({ serata, stagione, onToast }) {
 
   return (
     <div className="card" style={{ marginBottom: 18 }}>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <button className="btn ghost sm" onClick={() => setAperta(a => !a)} title={aperta ? "Comprimi" : "Espandi"}>{aperta ? "▾" : "▸"}</button>
         <input type="text" value={serata.etichetta || ""} onChange={e => patch({ etichetta: e.target.value })}
                placeholder="Etichetta serata" style={{ flex: "1 1 200px", fontWeight: 600 }} />
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -7257,101 +7389,76 @@ function SerataCard({ serata, stagione, onToast }) {
         <button className="btn danger sm" onClick={eliminaSerata} style={{ marginLeft: "auto" }}>🗑 Elimina</button>
       </div>
 
-      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
-        <div className="form-row" style={{ flex: "0 0 150px" }}>
-          <label>Fondo cassa iniziale €</label>
-          <input type="number" inputMode="decimal" step="0.01" value={serata.fondoIniziale ?? 0}
-                 onChange={e => patch({ fondoIniziale: Number(e.target.value) || 0 })} />
+      {/* KPI della serata: fondo, conta, netto */}
+      <div className="kpi-grid" style={{ marginBottom: aperta ? 16 : 0 }}>
+        <div className="kpi">
+          <div className="label">Fondo cassa iniziale</div>
+          <div className="value" style={{ fontSize: 20, color: "var(--ink-2)" }}>{fmtEuro(totFondo)}</div>
+          <div className="hint">composizione di partenza</div>
         </div>
-        <div className="form-row" style={{ flex: "0 0 150px" }}>
-          <label>Fondo cassa finale €</label>
-          <input type="number" inputMode="decimal" step="0.01" value={serata.fondoFinale ?? 0}
-                 onChange={e => patch({ fondoFinale: Number(e.target.value) || 0 })} />
+        <div className="kpi">
+          <div className="label">Contato a fine serata</div>
+          <div className="value" style={{ fontSize: 20, color: "var(--ink-2)" }}>{fmtEuro(totConta)}</div>
+          <div className="hint">conta fisica finale</div>
         </div>
-        <div style={{ flex: "0 0 auto", padding: "8px 12px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 6, fontSize: 13 }}>
-          Contante netto: <strong className="mono" style={{ color: contante >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmtEuro(contante)}</strong>
-          <div style={{ fontSize: 10.5, color: "var(--ink-3)" }}>finale − iniziale</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={onFile} style={{ display: "none" }} />
-          <button className="btn ghost sm" disabled={parsing} onClick={() => fileRef.current && fileRef.current.click()}>
-            {parsing ? "Lettura…" : (serata.cassapro ? "Sostituisci CassaPro" : "Importa CassaPro")}
-          </button>
+        <div className="kpi accent">
+          <div className="label">Netto incassato</div>
+          <div className="value" style={{ fontSize: 20, color: netto >= 0 ? undefined : "var(--danger)" }}>{fmtEuro(netto)}</div>
+          <div className="hint">contato − fondo</div>
         </div>
       </div>
 
-      {serata.cassapro && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginBottom: 6 }}>
-            <span className="mono">{serata.cassapro.filename}</span> · {fmtDate(serata.cassapro.importedAt)}
+      {aperta && (
+        <>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14 }}>
+            <GrigliaTagli titolo="Composizione fondo cassa" emoji="🏦" quantita={fondo}
+                          onSet={(v, n) => setQ("fondo", v, n)} onAzzera={() => azzera("fondo")} accentColor="var(--ink-2)" />
+            <GrigliaTagli titolo="Conta di fine serata" emoji="🧮" quantita={conta}
+                          onSet={(v, n) => setQ("conta", v, n)} onAzzera={() => azzera("conta")} accentColor="var(--accent-ink)" />
           </div>
-          {(serata.cassapro.sheets || []).map((sheet, si) => {
-            const tot = totaliColonne(sheet);
-            return (
-              <details key={si} style={{ marginBottom: 6 }}>
-                <summary style={{ cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>{sheet.name} · {sheet.rows.length} righe</summary>
-                <div className="tbl-wrap" style={{ overflowX: "auto", marginTop: 6 }}>
-                  <table className="tbl" style={{ fontSize: 12 }}>
-                    <thead><tr>{sheet.header.map((h, i) => <th key={i} className={typeof (sheet.rows[0] || [])[i] === "number" ? "num" : ""}>{h || ("col " + (i + 1))}</th>)}</tr></thead>
-                    <tbody>
-                      {sheet.rows.slice(0, 200).map((r, ri) => (
-                        <tr key={ri}>{sheet.header.map((_, ci) => {
-                          const v = r[ci]; const isNum = typeof v === "number";
-                          return <td key={ci} className={isNum ? "num" : ""}>{v === "" || v == null ? "" : (isNum ? fmt(v) : String(v))}</td>;
-                        })}</tr>
-                      ))}
-                      {tot && (
-                        <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
-                          {sheet.header.map((_, ci) => <td key={ci} className={tot[ci] !== undefined ? "num" : ""}>{ci === 0 ? "TOTALI" : (tot[ci] !== undefined ? fmt(tot[ci]) : "")}</td>)}
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </details>
-            );
-          })}
-        </div>
-      )}
 
-      {/* Scrittura suggerita */}
-      {posted ? (
-        <div style={{ padding: "10px 14px", background: "var(--accent-soft)", border: "1px solid #c8d8ce", borderRadius: 8, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <span>Registrata in contabilità: {(reg.righe || []).map((r, i) => {
-            const c = CONTI_LIQUIDITA.find(x => x.codice === r.conto);
-            return <span key={i} className="pill" style={{ marginLeft: 4 }}>{(c ? c.nome.trim() : "conto " + r.conto)}: {fmt(r.importo)}</span>;
-          })}</span>
-          <button className="btn danger sm" onClick={annullaRegistrazione}>Annulla registrazione</button>
-        </div>
-      ) : righe === null ? (
-        <button className="btn accent sm" onClick={apriScrittura}>Proponi scrittura</button>
-      ) : (
-        <div style={{ padding: "12px 14px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8 }}>
-          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10 }}>
-            Scrittura suggerita: incasso serata in avere su <strong>{CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO</strong>, ripartito per conto di liquidità (BU TDP). Modifica liberamente, poi registra.
-          </div>
-          {righe.map((r, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-              <input type="number" inputMode="decimal" step="0.01" placeholder="Importo €" value={r.importo}
-                     onChange={e => setRiga(i, { importo: e.target.value })} style={{ flex: "0 0 130px" }} />
-              <select value={r.conto} onChange={e => setRiga(i, { conto: Number(e.target.value) })} style={{ flex: 1 }}>
-                {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
-              </select>
-              <button className="btn danger sm" onClick={() => removeRiga(i)} disabled={righe.length <= 1}>🗑</button>
+          {/* Scrittura suggerita: netto incassato → conto ENTRATE SERATE TORNEO */}
+          {posted ? (
+            <div style={{ padding: "10px 14px", background: "var(--accent-soft)", border: "1px solid #c8d8ce", borderRadius: 8, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span>Registrata in contabilità: {(reg.righe || []).map((r, i) => {
+                const c = CONTI_LIQUIDITA.find(x => x.codice === r.conto);
+                return <span key={i} className="pill" style={{ marginLeft: 4 }}>{(c ? c.nome.trim() : "conto " + r.conto)}: {fmt(r.importo)}</span>;
+              })}</span>
+              <button className="btn danger sm" onClick={annullaRegistrazione}>Annulla registrazione</button>
             </div>
-          ))}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn ghost sm" onClick={addRiga}>+ Aggiungi conto</button>
-              <button className="btn ghost sm" onClick={() => setRiga(0, { conto: 3, importo: String(contante > 0 ? contante : 0) })}>↻ usa contante</button>
+          ) : righe === null ? (
+            <button className="btn accent sm" onClick={apriScrittura} disabled={netto <= 0}>
+              {netto > 0 ? "Proponi scrittura (netto incassato)" : "Netto a zero — niente da registrare"}
+            </button>
+          ) : (
+            <div style={{ padding: "12px 14px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8 }}>
+              <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10 }}>
+                Scrittura suggerita: netto incassato in avere su <strong>{CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO</strong>, ripartito per conto di liquidità (BU TDP). Di norma è tutto in <strong>CASSA</strong>. Modifica liberamente, poi registra.
+              </div>
+              {righe.map((r, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <input type="number" inputMode="decimal" step="0.01" placeholder="Importo €" value={r.importo}
+                         onChange={e => setRiga(i, { importo: e.target.value })} style={{ flex: "0 0 130px" }} />
+                  <select value={r.conto} onChange={e => setRiga(i, { conto: Number(e.target.value) })} style={{ flex: 1 }}>
+                    {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
+                  </select>
+                  <button className="btn danger sm" onClick={() => removeRiga(i)} disabled={righe.length <= 1}>🗑</button>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn ghost sm" onClick={addRiga}>+ Aggiungi conto</button>
+                  <button className="btn ghost sm" onClick={() => setRiga(0, { conto: 3, importo: String(netto > 0 ? netto : 0) })}>↻ usa netto</button>
+                </div>
+                <span style={{ fontSize: 13 }}>Totale: <strong className="mono">{fmtEuro(totScrittura)}</strong></span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--rule)" }}>
+                <button className="btn ghost" onClick={() => setRighe(null)}>Ignora</button>
+                <button className="btn accent" onClick={registra}>Registra in contabilità</button>
+              </div>
             </div>
-            <span style={{ fontSize: 13 }}>Totale: <strong className="mono">{fmtEuro(totScrittura)}</strong></span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--rule)" }}>
-            <button className="btn ghost" onClick={() => setRighe(null)}>Ignora</button>
-            <button className="btn accent" onClick={registra}>Registra in contabilità</button>
-          </div>
-        </div>
+          )}
+        </>
       )}
     </div>
   );
