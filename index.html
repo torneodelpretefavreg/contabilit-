@@ -7107,6 +7107,7 @@ const TAGLI_TDP = [
 const totaleTagli = (q) => TAGLI_TDP.reduce((s, t) => s + (Number(q && q[t.val]) || 0) * t.val, 0);
 const totFondoSerata = (s) => { const c = totaleTagli(s.fondo); return c > 0 ? c : (Number(s.fondoIniziale) || 0); };
 const totContaSerata = (s) => { const c = totaleTagli(s.conta); return c > 0 ? c : (Number(s.fondoFinale) || 0); };
+const posSerata = (s) => Number(s.pos) || 0;
 
 function GrigliaTagli({ titolo, emoji, quantita, onSet, onAzzera, accentColor }) {
   const subtot = (tipo) => TAGLI_TDP.filter(t => t.tipo === tipo).reduce((s, t) => s + (Number(quantita && quantita[t.val]) || 0) * t.val, 0);
@@ -7176,13 +7177,14 @@ function TorneoIncassiSerate({ stagione, onToast }) {
       .sort((a, b) => (a.data || "").localeCompare(b.data || "")), [serate]);
 
   const tot = useMemo(() => {
-    let f = 0, c = 0, reg = 0;
+    let f = 0, c = 0, p = 0, reg = 0;
     lista.forEach(s => {
       f += totFondoSerata(s);
       c += totContaSerata(s);
+      p += posSerata(s);
       if (s.reg && s.reg.totale) reg += Number(s.reg.totale) || 0;
     });
-    return { fondo: f, conta: c, netto: c - f, registrato: reg, n: lista.length };
+    return { fondo: f, conta: c, pos: p, netto: c - f, registrato: reg, n: lista.length };
   }, [lista]);
 
   const aggiungiSerata = async () => {
@@ -7218,7 +7220,12 @@ function TorneoIncassiSerate({ stagione, onToast }) {
         <div className="kpi accent">
           <div className="label">Netto incassato complessivo</div>
           <div className="value">{fmtEuro(tot.netto)}</div>
-          <div className="hint">contato − fondo · {fmtEuro(tot.registrato)} in contabilità</div>
+          <div className="hint">contante: contato − fondo</div>
+        </div>
+        <div className="kpi">
+          <div className="label">POS incassato</div>
+          <div className="value" style={{ color: "var(--ink-2)" }}>{fmtEuro(tot.pos)}</div>
+          <div className="hint">va su POS C/C · {fmtEuro(tot.registrato)} in contabilità</div>
         </div>
       </div>
 
@@ -7251,13 +7258,17 @@ function TorneoIncassiSerate({ stagione, onToast }) {
                   <th style={{ width: 110 }}>Data</th>
                   <th className="num">Fondo cassa</th>
                   <th className="num">Contato fine</th>
-                  <th className="num">Netto incassato</th>
+                  <th className="num">Netto contante</th>
+                  <th className="num">POS</th>
+                  <th className="num">Totale</th>
                   <th style={{ width: 120 }}>Contabilità</th>
                 </tr>
               </thead>
               <tbody>
                 {lista.map(s => {
-                  const f = totFondoSerata(s), c = totContaSerata(s), netto = Math.round((c - f) * 100) / 100;
+                  const f = totFondoSerata(s), c = totContaSerata(s), p = posSerata(s);
+                  const netto = Math.round((c - f) * 100) / 100;
+                  const totSer = Math.round((netto + p) * 100) / 100;
                   const posted = s.reg && Array.isArray(s.reg.movimentiIds) && s.reg.movimentiIds.length > 0;
                   return (
                     <tr key={s.id}>
@@ -7265,7 +7276,9 @@ function TorneoIncassiSerate({ stagione, onToast }) {
                       <td style={{ fontSize: 12, color: "var(--ink-2)" }}>{fmtDate(s.data)}</td>
                       <td className="num">{fmt(f)}</td>
                       <td className="num">{fmt(c)}</td>
-                      <td className="num" style={{ fontWeight: 700, color: netto >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmt(netto)}</td>
+                      <td className="num" style={{ fontWeight: 600, color: netto >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmt(netto)}</td>
+                      <td className="num" style={{ color: p > 0 ? "var(--ink-2)" : "var(--ink-3)" }}>{p > 0 ? fmt(p) : "—"}</td>
+                      <td className="num" style={{ fontWeight: 700, color: totSer >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmt(totSer)}</td>
                       <td>{posted
                         ? <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }}>✓ {fmt(s.reg.totale || 0)}</span>
                         : <span className="pill" style={{ background: "var(--danger-soft)", borderColor: "#f1d6d6", color: "var(--danger)" }}>da reg.</span>}</td>
@@ -7277,6 +7290,8 @@ function TorneoIncassiSerate({ stagione, onToast }) {
                   <td className="num">{fmt(tot.fondo)}</td>
                   <td className="num">{fmt(tot.conta)}</td>
                   <td className="num" style={{ color: tot.netto >= 0 ? "var(--accent-ink)" : "var(--danger)" }}>{fmt(tot.netto)}</td>
+                  <td className="num">{fmt(tot.pos)}</td>
+                  <td className="num" style={{ color: "var(--accent-ink)" }}>{fmt(tot.netto + tot.pos)}</td>
                   <td className="num" style={{ fontSize: 12, color: "var(--ink-3)" }}>{fmt(tot.registrato)}</td>
                 </tr>
               </tbody>
@@ -7294,21 +7309,23 @@ function SerataCard({ serata, stagione, onToast }) {
 
   const [fondo, setFondo] = useState(serata.fondo || {});
   const [conta, setConta] = useState(serata.conta || {});
+  const [pos, setPos] = useState(serata.pos != null ? String(serata.pos) : "");
   const [righe, setRighe] = useState(null);
   const [dataPag, setDataPag] = useState(serata.data || todayISO());
   const [aperta, setAperta] = useState(true);
 
-  // Persisto le composizioni con un piccolo debounce: evita scatti del cursore mentre si digita.
+  // Persisto le composizioni (e la voce POS) con un piccolo debounce: evita scatti del cursore mentre si digita.
   const skipFirst = useRef(true);
   useEffect(() => {
     if (skipFirst.current) { skipFirst.current = false; return; }
-    const t = setTimeout(() => { patch({ fondo, conta }); }, 600);
+    const t = setTimeout(() => { patch({ fondo, conta, pos: Number(pos) || 0 }); }, 600);
     return () => clearTimeout(t);
-  }, [fondo, conta]);
+  }, [fondo, conta, pos]);
 
   const totFondo = useMemo(() => { const c = totaleTagli(fondo); return c > 0 ? c : (Number(serata.fondoIniziale) || 0); }, [fondo, serata.fondoIniziale]);
   const totConta = useMemo(() => { const c = totaleTagli(conta); return c > 0 ? c : (Number(serata.fondoFinale) || 0); }, [conta, serata.fondoFinale]);
   const netto = Math.round((totConta - totFondo) * 100) / 100;
+  const posVal = Math.round((Number(pos) || 0) * 100) / 100;
 
   const reg = serata.reg || null;
   const posted = reg && Array.isArray(reg.movimentiIds) && reg.movimentiIds.length > 0;
@@ -7331,7 +7348,13 @@ function SerataCard({ serata, stagione, onToast }) {
     } catch (e) { alert("Errore: " + e.message); }
   };
 
-  const apriScrittura = () => setRighe([{ conto: 3, importo: String(netto > 0 ? netto : "") }]);
+  const proponiRighe = () => {
+    const r = [];
+    if (netto > 0) r.push({ conto: 3, importo: String(netto) });
+    if (posVal > 0) r.push({ conto: 5, importo: String(posVal) });
+    return r.length ? r : [{ conto: 3, importo: "" }];
+  };
+  const apriScrittura = () => setRighe(proponiRighe());
   const setRiga = (i, p) => setRighe(rs => rs.map((r, idx) => idx === i ? { ...r, ...p } : r));
   const addRiga = () => setRighe(rs => [...rs, { conto: 5, importo: "" }]);
   const removeRiga = (i) => setRighe(rs => rs.length > 1 ? rs.filter((_, idx) => idx !== i) : rs);
@@ -7343,7 +7366,7 @@ function SerataCard({ serata, stagione, onToast }) {
       .filter(r => r.importo > 0 && r.conto);
     if (valide.length === 0) return alert("Inserisci almeno una riga con importo e conto.");
     try {
-      await patch({ fondo, conta }); // salvo eventuali modifiche pendenti
+      await patch({ fondo, conta, pos: posVal }); // salvo eventuali modifiche pendenti
       const ids = [];
       for (const r of valide) {
         const mov = {
@@ -7417,7 +7440,20 @@ function SerataCard({ serata, stagione, onToast }) {
                           onSet={(v, n) => setQ("conta", v, n)} onAzzera={() => azzera("conta")} accentColor="var(--accent-ink)" />
           </div>
 
-          {/* Scrittura suggerita: netto incassato → conto ENTRATE SERATE TORNEO */}
+          {/* Voce POS della serata → andrà su POS C/C in registrazione */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14, padding: "10px 14px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8 }}>
+            <label style={{ fontSize: 13, fontWeight: 600 }}>💳 Incasso POS</label>
+            <input type="number" inputMode="decimal" step="0.01" min="0" placeholder="0,00" value={pos}
+                   onChange={e => setPos(e.target.value)}
+                   style={{ width: 130, padding: "5px 8px", border: "1px solid var(--rule)", borderRadius: 4, textAlign: "right" }} />
+            <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>€ · in registrazione va su <strong>POS C/C</strong> (conto 5), separato dal netto contante</span>
+            {posVal > 0 && (
+              <span className="mono" style={{ marginLeft: "auto", fontSize: 13 }}>
+                Totale serata: <strong style={{ color: "var(--accent-ink)" }}>{fmtEuro(netto + posVal)}</strong>
+                <span style={{ color: "var(--ink-3)", fontWeight: 400 }}> (contante {fmtEuro(netto)} + POS {fmtEuro(posVal)})</span>
+              </span>
+            )}
+          </div>
           {posted ? (
             <div style={{ padding: "10px 14px", background: "var(--accent-soft)", border: "1px solid #c8d8ce", borderRadius: 8, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span>Registrata in contabilità: {(reg.righe || []).map((r, i) => {
@@ -7427,13 +7463,13 @@ function SerataCard({ serata, stagione, onToast }) {
               <button className="btn danger sm" onClick={annullaRegistrazione}>Annulla registrazione</button>
             </div>
           ) : righe === null ? (
-            <button className="btn accent sm" onClick={apriScrittura} disabled={netto <= 0}>
-              {netto > 0 ? "Proponi scrittura (netto incassato)" : "Netto a zero — niente da registrare"}
+            <button className="btn accent sm" onClick={apriScrittura} disabled={netto <= 0 && posVal <= 0}>
+              {(netto > 0 || posVal > 0) ? "Proponi scrittura (contante + POS)" : "Nulla da registrare"}
             </button>
           ) : (
             <div style={{ padding: "12px 14px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8 }}>
               <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10 }}>
-                Scrittura suggerita: netto incassato in avere su <strong>{CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO</strong>, ripartito per conto di liquidità (BU TDP). Di norma è tutto in <strong>CASSA</strong>. Modifica liberamente, poi registra.
+                Scrittura suggerita: incasso serata in avere su <strong>{CONTO_ENTRATE_SERATE} ENTRATE SERATE TORNEO</strong>, ripartito per conto di liquidità (BU TDP). Netto contante su <strong>CASSA</strong>, POS su <strong>POS C/C</strong>. Modifica liberamente, poi registra.
               </div>
               {righe.map((r, i) => (
                 <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
@@ -7448,7 +7484,7 @@ function SerataCard({ serata, stagione, onToast }) {
               <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="btn ghost sm" onClick={addRiga}>+ Aggiungi conto</button>
-                  <button className="btn ghost sm" onClick={() => setRiga(0, { conto: 3, importo: String(netto > 0 ? netto : 0) })}>↻ usa netto</button>
+                  <button className="btn ghost sm" onClick={() => setRighe(proponiRighe())}>↻ ricalcola</button>
                 </div>
                 <span style={{ fontSize: 13 }}>Totale: <strong className="mono">{fmtEuro(totScrittura)}</strong></span>
               </div>
