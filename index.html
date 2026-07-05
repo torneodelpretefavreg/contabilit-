@@ -8053,6 +8053,377 @@ function ContoForm({ conto, existingCodes, onSave, onCancel }) {
 // ============================================================
 // APP ROOT
 // ============================================================
+/* ============================================================
+   PAGINA: IMPORT MOVIMENTI (estratto conto / lista -> scritture)
+   Formato atteso (intestazioni, ordine libero):
+   Data | Conto | Tipo | Contropartita | Categoria | BU | Descrizione | Importo
+   - Conto        = conto liquidità (FUTSAL C/C, CASSA, POS C/C, PAYPAL, SATISPAY, "TIZIO")
+   - Tipo         = Entrata / Uscita / Giroconto (se manca, dedotto dal segno)
+   - Contropartita= conto del Piano dei Conti (codice o nome). Per i Giroconti = conto liquidità di destinazione
+   - Categoria    = etichetta libera; propone in automatico la contropartita (mappatura ricordata)
+   - BU           = business unit (default GENERAL)
+   - Importo      = numero positivo (il verso lo dà il Tipo)
+   Crea un movimento per riga con la STESSA struttura di "Nuovo movimento".
+   ============================================================ */
+function normKimp(v){
+  return String(v == null ? "" : v).toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/["'.]/g,"").replace(/[\s\-\/]+/g," ").trim();
+}
+const r2imp = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// alias comodi per riconoscere i conti liquidità da estratto conto / POS
+const LIQ_ALIAS_IMP = {
+  "FUTSAL C C":1, "FUTSAL":1, "CONTO":1, "C C":1, "BANCA":1, "BONIFICO":1,
+  "CASSA":3, "CONTANTI":3, "CONTANTE":3,
+  "TIZIO C C":4, "TIZIO":4,
+  "POS C C":5, "POS":5, "SUMUP":5, "NEXI":5,
+  "PAYPAL C C":9, "PAYPAL":9,
+  "SATISPAY C C":10, "SATISPAY":10,
+};
+function resolveLiqImp(v){
+  if (v == null || v === "") return "";
+  if (typeof v === "number" && [1,3,4,5,9,10].includes(v)) return v;
+  const k = normKimp(v);
+  if (/^\d+$/.test(k)) { const n = Number(k); return [1,3,4,5,9,10].includes(n) ? n : ""; }
+  if (LIQ_ALIAS_IMP[k] != null) return LIQ_ALIAS_IMP[k];
+  for (const a in LIQ_ALIAS_IMP){ if (k === a || k.includes(a) || a.includes(k)) return LIQ_ALIAS_IMP[a]; }
+  return "";
+}
+function parseDataImp(v){
+  if (v instanceof Date && !isNaN(v)) {
+    const y=v.getFullYear(), m=String(v.getMonth()+1).padStart(2,"0"), d=String(v.getDate()).padStart(2,"0");
+    return `${y}-${m}-${d}`;
+  }
+  if (typeof v === "number") { const d = new Date(Math.round((v-25569)*86400*1000)); if(!isNaN(d)) return d.toISOString().slice(0,10); }
+  const s = String(v||"").trim();
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m){ let[_,d,mo,y]=m; if(y.length===2) y="20"+y; return `${y}-${mo.padStart(2,"0")}-${d.padStart(2,"0")}`; }
+  m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  if (m){ return `${m[1]}-${m[2].padStart(2,"0")}-${m[3].padStart(2,"0")}`; }
+  return "";
+}
+function parseImportoImp(raw){
+  if (raw == null || raw === "") return NaN;
+  if (typeof raw === "number") return raw;
+  let str = String(raw).replace(/[€\s]/g,"").trim();
+  if (str.includes(",")) str = str.replace(/\./g,"").replace(",",".");   // 1.234,56 -> 1234.56
+  return parseFloat(str);
+}
+
+function PageImportMovimenti({ conti, bu, movimenti, stagione, onToast, onDone }){
+  const [rows, setRows] = useState([]);
+  const [fileName, setFileName] = useState("");
+  const [sheets, setSheets] = useState([]);
+  const [wbRef, setWbRef] = useState(null);
+  const [mappa, setMappa] = useState({});      // normKey(categoria) -> contoPdC
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  const buList = (bu && bu.length ? bu : BUSINESS_UNITS_DEFAULT);
+
+  // mappa nome/codice PdC -> codice
+  const pdcByKey = useMemo(() => {
+    const m = {};
+    conti.forEach(c => { m[normKimp(c.nome)] = c.codice; });
+    return m;
+  }, [conti]);
+  const contiMap = useMemo(() => { const m={}; conti.forEach(c=>m[c.codice]=c); return m; }, [conti]);
+  const contiPdC = useMemo(() => conti.filter(c => c.categoria !== "DISP. LIQUIDE"), [conti]);
+
+  function resolvePdCImp(v){
+    if (v == null || v === "") return "";
+    if (typeof v === "number") return contiMap[v] ? v : "";
+    const k = normKimp(v);
+    if (/^\d+$/.test(k)) { const n = Number(k); return contiMap[n] ? n : ""; }
+    if (pdcByKey[k] != null) return pdcByKey[k];
+    // match parziale sul nome
+    for (const c of conti){ const nk = normKimp(c.nome); if (nk === k || nk.includes(k) || k.includes(nk)) return c.codice; }
+    return "";
+  }
+
+  // carico mappatura categoria->conto ricordata dagli import precedenti
+  useEffect(() => {
+    if (!firebaseReady || !stagione) return;
+    db.ref(`stagioni/${stagione}/mappaImport`).once("value")
+      .then(s => { if (s.exists()) setMappa(s.val() || {}); })
+      .catch(() => {});
+  }, [stagione]);
+
+  // quando arriva la mappa, propongo la contropartita alle righe che non ce l'hanno
+  useEffect(() => {
+    if (!Object.keys(mappa).length) return;
+    setRows(rs => rs.map(r => (!r.pdc && r.tipo !== "G" && r.cat && mappa[normKimp(r.cat)] != null)
+      ? { ...r, pdc: mappa[normKimp(r.cat)] } : r));
+  }, [mappa]);
+
+  function detect(headers){
+    const H = headers.map(h => normKimp(h));
+    const used = new Set();
+    const find = (cands) => {
+      const C = cands.map(c => normKimp(c));
+      // 1° giro: match esatto
+      for (let i=0;i<H.length;i++){ if(!used.has(i) && C.includes(H[i])){ used.add(i); return i; } }
+      // 2° giro: contiene
+      for (let i=0;i<H.length;i++){ if(!used.has(i) && C.some(c => H[i].includes(c) || c.includes(H[i]))){ used.add(i); return i; } }
+      return -1;
+    };
+    // i più specifici prima, così "CONTO PDC" non viene preso da "conto"
+    const data  = find(["data","date","giorno","valuta","data valuta","data contabile"]);
+    const importo = find(["importo","amount","valore","euro","saldo","dare avere"]);
+    const tipo  = find(["tipo","segno","entrata uscita","movimento","causale abi"]);
+    const pdc   = find(["contropartita","conto pdc","pdc","conto contabile","conto contropartita","contro"]);
+    const cat   = find(["categoria","category","causale contabile"]);
+    const bu    = find(["bu","business unit","centro di costo","centro","unita","area"]);
+    const descr = find(["descrizione","causale","dettaglio","operazione","note","note contabili","motivo"]);
+    const conto = find(["conto liquidita","liquidita","conto","metodo","banca","cassa"]);
+    return { data, importo, tipo, pdc, cat, bu, descr, conto };
+  }
+
+  function parseSheet(wb, name){
+    try{
+      const ws = wb.Sheets[name];
+      const aoa = XLSX.utils.sheet_to_json(ws, { header:1, raw:true, defval:"" });
+      if (aoa.length < 2){ onToast("Foglio vuoto o senza dati"); setRows([]); return; }
+      const col = detect(aoa[0]);
+      if (col.importo < 0 || col.data < 0){ onToast("Nel foglio mancano le colonne Data e/o Importo"); setRows([]); return; }
+      const buKeys = {}; buList.forEach(b => buKeys[normKimp(b)] = b);
+      const out = [];
+      for (let i=1;i<aoa.length;i++){
+        const r = aoa[i]; if (!r || r.every(c => c===""||c==null)) continue;
+        const imp = parseImportoImp(r[col.importo]);
+        if (isNaN(imp) || imp === 0) continue;
+        // tipo
+        let tipo;
+        if (col.tipo >= 0){
+          const t = normKimp(r[col.tipo]);
+          if (t.includes("GIRO")) tipo = "G";
+          else if (t.startsWith("E") || t.includes("ENTRAT") || t.includes("ACCRED") || t.includes("INCASS") || t === "DARE" || t === "+") tipo = "E";
+          else if (t.startsWith("U") || t.includes("USCIT") || t.includes("ADDEB") || t.includes("PAGAM") || t === "AVERE" || t === "-") tipo = "U";
+          else tipo = imp < 0 ? "U" : "E";
+        } else tipo = imp < 0 ? "U" : "E";
+        // contropartita / dest
+        const rawContro = col.pdc >= 0 ? r[col.pdc] : "";
+        let pdc = tipo === "G" ? resolveLiqImp(rawContro) : resolvePdCImp(rawContro);
+        const cat = col.cat >= 0 ? String(r[col.cat]||"").trim() : "";
+        if (!pdc && tipo !== "G" && cat && mappa[normKimp(cat)] != null) pdc = mappa[normKimp(cat)];
+        // bu
+        let buVal = "GENERAL";
+        if (col.bu >= 0){ const bk = normKimp(r[col.bu]); if (buKeys[bk]) buVal = buKeys[bk]; else if (String(r[col.bu]||"").trim()) buVal = String(r[col.bu]).trim().toUpperCase(); }
+        out.push({
+          data: parseDataImp(r[col.data]),
+          cod: col.conto >= 0 ? resolveLiqImp(r[col.conto]) : "",
+          tipo, pdc, cat, bu: buVal,
+          descr: col.descr >= 0 ? String(r[col.descr]||"").trim() : "",
+          importo: r2imp(Math.abs(imp)),
+        });
+      }
+      setRows(out);
+      onToast(`${out.length} movimenti letti da "${name}"`);
+    } catch(err){ console.error(err); onToast("Errore nella lettura del foglio"); }
+  }
+
+  function onFile(e){
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    if (typeof XLSX === "undefined"){ onToast("Libreria Excel non caricata. Ricarica la pagina."); return; }
+    setFileName(f.name); setRows([]); setSheets([]); setWbRef(null);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try{
+        const wb = XLSX.read(new Uint8Array(ev.target.result), { type:"array", cellDates:true });
+        setWbRef(wb); setSheets(wb.SheetNames);
+        if (wb.SheetNames.length === 1) parseSheet(wb, wb.SheetNames[0]);
+      } catch(err){ console.error(err); onToast("Errore nella lettura del file"); }
+    };
+    reader.readAsArrayBuffer(f);
+    e.target.value = "";
+  }
+
+  const setRow = (i,k,v) => setRows(rs => rs.map((r,j) => j===i ? {...r,[k]:v} : r));
+  const delRow = (i) => setRows(rs => rs.filter((_,j) => j!==i));
+
+  const isValid = (r) => {
+    if (!r.data || !r.cod || r.importo <= 0) return false;
+    if (r.tipo === "G") return r.pdc && r.pdc !== r.cod;
+    return (r.tipo === "E" || r.tipo === "U") && !!r.pdc;
+  };
+  const validi = rows.filter(isValid);
+  const incompleti = rows.length - validi.length;
+  const totE = validi.filter(r=>r.tipo==="E").reduce((s,r)=>s+r.importo,0);
+  const totU = validi.filter(r=>r.tipo==="U").reduce((s,r)=>s+r.importo,0);
+
+  async function importa(){
+    if (!firebaseReady){ onToast("Firebase non configurato"); return; }
+    if (validi.length === 0){ onToast("Nessuna riga completa da importare"); return; }
+    if (!confirm(`Registrare ${validi.length} movimenti nella stagione ${stagione}?\n\nEntrate: ${fmtEuro(totE)} · Uscite: ${fmtEuro(totU)}`)) return;
+    setBusy(true);
+    try{
+      const nowISO = new Date().toISOString();
+      const updates = {};
+      validi.forEach(r => {
+        const base = {
+          data: r.data,
+          contoLiquidita: Number(r.cod),
+          categoria: (r.cat || "").trim() || (r.tipo === "G" ? "GIROCONTO" : ""),
+          bu: r.bu || "GENERAL",
+          importo: r2imp(r.importo),
+          descrizione: (r.descr || "").trim() || (r.tipo === "E" ? "Entrata" : r.tipo === "U" ? "Uscita" : "Giroconto"),
+          mese: meseDaData(r.data),
+          nonMonetario: false,
+          importato: true,
+          creatoIl: nowISO,
+          modificatoIl: nowISO,
+        };
+        let payload;
+        if (r.tipo === "G"){
+          payload = { ...base, tipo: "giroconto", contoLiquiditaDest: Number(r.pdc), contoPdC: null, contoContropartita: null };
+        } else {
+          payload = { ...base, tipo: r.tipo === "E" ? "entrata" : "uscita", contoLiquiditaDest: null, contoPdC: Number(r.pdc), contoContropartita: null };
+        }
+        const key = db.ref(`stagioni/${stagione}/movimenti`).push().key;
+        updates[key] = payload;
+      });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+      // memorizzo la mappatura categoria -> contropartita per i prossimi import
+      const nuovaMappa = { ...(mappa || {}) };
+      validi.forEach(r => { if (r.tipo !== "G" && r.cat && r.pdc) nuovaMappa[normKimp(r.cat)] = Number(r.pdc); });
+      await db.ref(`stagioni/${stagione}/mappaImport`).set(nuovaMappa);
+      setMappa(nuovaMappa);
+      onToast(`${validi.length} movimenti importati`);
+      setRows([]); setFileName(""); setSheets([]); setWbRef(null);
+      if (onDone) onDone();
+    } catch(e){ console.error(e); onToast("Errore durante l'import: " + e.message); }
+    finally { setBusy(false); }
+  }
+
+  function scaricaModello(){
+    if (typeof XLSX === "undefined"){ onToast("Libreria non caricata"); return; }
+    const aoa = [
+      ["Data","Conto","Tipo","Contropartita","Categoria","BU","Descrizione","Importo"],
+      ["2026-06-05","POS C/C","Entrata","ENTRATE SERATE TORNEO","INCASSI SERATE TDP","TDP","Incasso serata 1",850.00],
+      ["2026-06-08","FUTSAL C/C","Uscita","ONERI VS BANCA","SPESE TENUTA CONTO","GENERAL","Commissioni bonifico",1.00],
+      ["2026-06-12","CASSA","Uscita","PERDITE DA EVENTI","PAGAMENTI PER EVENTI","TDP","Pagamento fornitore serata",120.00],
+      ["2026-06-20","POS C/C","Giroconto","CASSA","","GENERAL","Prelievo POS in cassa",500.00],
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Movimenti");
+    // foglio legenda con conti validi
+    const legLiq = [["CONTI LIQUIDITÀ (colonna \"Conto\")"],["Codice","Nome"]];
+    conti.filter(c=>c.categoria==="DISP. LIQUIDE").forEach(c=>legLiq.push([c.codice,c.nome]));
+    legLiq.push([]); legLiq.push(["TIPI VALIDI"],["Entrata"],["Uscita"],["Giroconto (Contropartita = conto destinazione)"]);
+    legLiq.push([]); legLiq.push(["BUSINESS UNIT (colonna \"BU\")"]); buList.forEach(b=>legLiq.push([b]));
+    legLiq.push([]); legLiq.push(["CONTI PIANO DEI CONTI (colonna \"Contropartita\": codice o nome)"],["Codice","Nome","Tipo"]);
+    conti.filter(c=>c.categoria!=="DISP. LIQUIDE").sort((a,b)=>a.codice-b.codice).forEach(c=>legLiq.push([c.codice,c.nome,c.categoria]));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(legLiq), "Legenda");
+    XLSX.writeFile(wb, `Modello_import_movimenti_${stagione}.xlsx`);
+  }
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Import movimenti</h2>
+          <div className="sub">Carica un Excel (estratto conto, POS, lista spese) e registra le scritture in blocco · stagione {stagione}</div>
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          <button className="btn ghost" onClick={scaricaModello}>↓ Scarica modello</button>
+          <button className="btn accent" onClick={() => fileRef.current && fileRef.current.click()}>↑ Carica Excel</button>
+          <input type="file" ref={fileRef} accept=".xlsx,.xls,.csv" style={{ display:"none" }} onChange={onFile}/>
+        </div>
+      </div>
+
+      {sheets.length > 1 &&
+        <div className="card" style={{ marginBottom:14, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+          <span style={{ fontSize:13, color:"var(--ink-2)" }}><b>{fileName}</b> · {sheets.length} fogli. Scegli quale importare:</span>
+          <select onChange={e => { if (e.target.value !== "") parseSheet(wbRef, e.target.value); else setRows([]); }} defaultValue="">
+            <option value="">— seleziona foglio —</option>
+            {sheets.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>}
+
+      {rows.length === 0 && sheets.length <= 1 &&
+        <div className="card">
+          <h3 className="card-title">Formato del foglio</h3>
+          <p style={{ color:"var(--ink-2)", fontSize:13, marginTop:0 }}>Serve una riga di intestazione con queste colonne (l'ordine è libero, i nomi sono riconosciuti anche con piccole varianti):</p>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:10 }}>
+            {["Data","Conto","Tipo","Contropartita","Categoria","BU","Descrizione","Importo"].map(c =>
+              <span key={c} style={{ fontSize:12, padding:"3px 9px", borderRadius:20, background:"var(--bg)", border:"1px solid var(--line)", color:"var(--ink-2)" }}>{c}</span>)}
+          </div>
+          <ul style={{ color:"var(--ink-2)", fontSize:13, lineHeight:1.7, marginBottom:0 }}>
+            <li><b>Conto</b>: il conto di liquidità (FUTSAL C/C, CASSA, POS C/C, PAYPAL, SATISPAY, "TIZIO").</li>
+            <li><b>Tipo</b>: Entrata, Uscita o Giroconto. Se manca, viene dedotto dal segno dell'importo.</li>
+            <li><b>Contropartita</b>: conto del Piano dei Conti (codice es. <span className="mono">28</span> o nome es. <span className="mono">ENTRATE DA EVENTI</span>). Per i <b>Giroconti</b> è il conto liquidità di destinazione.</li>
+            <li><b>Categoria</b>: etichetta libera; propone in automatico la contropartita (la scelta viene ricordata per gli import successivi).</li>
+            <li><b>Importo</b>: numero positivo (il verso lo dà il Tipo). Accetta il formato italiano <span className="mono">1.234,56</span>.</li>
+          </ul>
+          <div style={{ fontSize:12.5, color:"var(--ink-3)", marginTop:10 }}>Usa <b>Scarica modello</b> per ottenere il file pronto, con un foglio <b>Legenda</b> che elenca tutti i conti validi.</div>
+        </div>}
+
+      {rows.length > 0 && <>
+        <div className="card" style={{ marginBottom:14, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10 }}>
+          <div style={{ fontSize:13, color:"var(--ink-2)" }}>
+            <b>{fileName}</b> · {rows.length} movimenti · <span style={{ color:"var(--accent-ink,#2e7d32)" }}>{validi.length} pronti</span>
+            {incompleti>0 && <span style={{ color:"var(--danger)" }}> · {incompleti} da completare (assegna la contropartita)</span>}
+            <span style={{ marginLeft:10 }}>Entrate {fmtEuro(totE)} · Uscite {fmtEuro(totU)}</span>
+          </div>
+          <div style={{ display:"flex", gap:8 }}>
+            <button className="btn ghost" onClick={() => { setRows([]); setFileName(""); setSheets([]); setWbRef(null); }}>Annulla</button>
+            <button className="btn accent" onClick={importa} disabled={busy || validi.length===0}>{busy ? "Registro…" : `Importa ${validi.length} movimenti`}</button>
+          </div>
+        </div>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr>
+              <th>Data</th><th>Conto liquidità</th><th>Tipo</th><th>Contropartita</th><th>Categoria</th><th>BU</th><th>Descrizione</th><th className="num">Importo</th><th></th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r,i) => (
+                <tr key={i} style={isValid(r) ? {} : { background:"#fbf6e8" }}>
+                  <td><input type="date" value={r.data} onChange={e=>setRow(i,"data",e.target.value)} style={{ minWidth:130 }}/></td>
+                  <td>
+                    <select value={r.cod} onChange={e=>setRow(i,"cod",e.target.value===""?"":Number(e.target.value))}>
+                      <option value="">— scegli —</option>
+                      {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <select value={r.tipo} onChange={e=>setRow(i,"tipo",e.target.value)}>
+                      <option value="E">Entrata</option><option value="U">Uscita</option><option value="G">Giroconto</option>
+                    </select>
+                  </td>
+                  <td>
+                    {r.tipo === "G" ? (
+                      <select value={r.pdc} onChange={e=>setRow(i,"pdc",e.target.value===""?"":Number(e.target.value))}>
+                        <option value="">— conto dest. —</option>
+                        {CONTI_LIQUIDITA.filter(c=>c.codice!==Number(r.cod)).map(c => <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome}</option>)}
+                      </select>
+                    ) : (
+                      <select value={r.pdc} onChange={e=>setRow(i,"pdc",e.target.value===""?"":Number(e.target.value))} style={{ minWidth:170 }}>
+                        <option value="">— assegna conto —</option>
+                        {contiPdC.map(c => <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome}</option>)}
+                      </select>
+                    )}
+                  </td>
+                  <td><input type="text" value={r.cat} onChange={e=>setRow(i,"cat",e.target.value)} style={{ minWidth:130 }} placeholder="—"/></td>
+                  <td>
+                    <select value={r.bu} onChange={e=>setRow(i,"bu",e.target.value)}>
+                      {(buList.includes(r.bu) ? buList : [r.bu, ...buList]).map(b => <option key={b} value={b}>{b}</option>)}
+                    </select>
+                  </td>
+                  <td><input type="text" value={r.descr} onChange={e=>setRow(i,"descr",e.target.value)} style={{ minWidth:170 }}/></td>
+                  <td className="num"><input type="number" step="0.01" value={r.importo} onChange={e=>setRow(i,"importo",r2imp(e.target.value))} style={{ width:90, textAlign:"right" }}/></td>
+                  <td><button className="btn ghost" style={{ padding:"4px 8px" }} onClick={()=>delRow(i)}>✕</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize:12, color:"var(--ink-3)", marginTop:10, fontStyle:"italic" }}>Le righe evidenziate non hanno ancora un conto di contropartita valido e non verranno importate finché non lo scegli. La scelta per categoria viene ricordata per gli import successivi.</div>
+      </>}
+    </div>
+  );
+}
+
+
 function App() {
   const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
   const [stagione, setStagione] = useState(STAGIONE_DEFAULT);
@@ -8384,6 +8755,7 @@ function App() {
           <div className="section-label">Operatività</div>
           <button className={"navlink " + (page==="dashboard"?"active":"")} onClick={() => setPage("dashboard")}><span className="ico">◆</span> Dashboard</button>
           <button className={"navlink " + (page==="nuovo"?"active":"")} onClick={() => setPage("nuovo")}><span className="ico">+</span> Nuovo movimento</button>
+          <button className={"navlink " + (page==="import"?"active":"")} onClick={() => setPage("import")}><span className="ico">↑</span> Import movimenti</button>
           <button className={"navlink " + (page==="movimenti"?"active":"")} onClick={() => setPage("movimenti")}><span className="ico">≡</span> Movimenti</button>
 
           <div className="section-label">Anagrafiche</div>
@@ -8415,6 +8787,7 @@ function App() {
             <>
               {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} />}
               {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
+              {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
               {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
