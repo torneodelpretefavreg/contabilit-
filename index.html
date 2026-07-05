@@ -8424,6 +8424,299 @@ function PageImportMovimenti({ conti, bu, movimenti, stagione, onToast, onDone }
 }
 
 
+/* ============================================================
+   PAGINA: CHIUSURA MENSILE
+   Stato dei conti a fine mese, filtrabile per Business Unit.
+   Due modalità:
+     - Progressivo: saldi da inizio stagione fino a fine mese scelto
+     - Solo mese: solo i movimenti del mese scelto (variazioni del periodo)
+   Export Excel e PDF.
+   ============================================================ */
+function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, onToast }){
+  const contiMap = useMemo(() => {
+    const m = {};
+    conti.forEach(c => { m[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome }; });
+    return m;
+  }, [conti]);
+
+  const idxMese = (m) => MESI.indexOf(m.mese || meseDaData(m.data));
+
+  // mesi presenti nei dati (per l'help e il default)
+  const mesiConDati = useMemo(() => {
+    const s = new Set();
+    movimenti.forEach(m => { const nm = m.mese || meseDaData(m.data); if (nm) s.add(nm); });
+    return s;
+  }, [movimenti]);
+
+  const meseDefault = useMemo(() => {
+    for (let i = MESI.length - 1; i >= 0; i--) if (mesiConDati.has(MESI[i])) return MESI[i];
+    return MESI[(new Date().getMonth() + 4) % 12];
+  }, [mesiConDati]);
+
+  const [mese, setMese] = useState(meseDefault);
+  const [modo, setModo] = useState("progressivo"); // progressivo | mese
+  const [buFilter, setBuFilter] = useState("ALL");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setMese(meseDefault); }, [meseDefault]);
+
+  const buOptions = useMemo(() => {
+    const set = new Set((bu && bu.length ? bu : BUSINESS_UNITS_DEFAULT));
+    movimenti.forEach(m => { if (m.bu) set.add(m.bu); });
+    return [...set];
+  }, [bu, movimenti]);
+
+  // === CALCOLO STATO CONTI ===
+  const dati = useMemo(() => {
+    const meseIdx = MESI.indexOf(mese);
+    let movs, scritture;
+    if (modo === "mese") {
+      movs = movimenti.filter(m => idxMese(m) === meseIdx);
+      scritture = generaLibroGiornale(movs, {}, contiMap)
+        .filter(s => !s.apertura && s.origine !== "apertura");
+    } else {
+      movs = movimenti.filter(m => idxMese(m) <= meseIdx);
+      scritture = generaLibroGiornale(movs, saldiIniziali, contiMap);
+    }
+    if (buFilter !== "ALL") scritture = scritture.filter(s => s.bu === buFilter);
+
+    const mastrini = calcolaMastrini(scritture).map(x => ({
+      ...x,
+      categoria: contiMap[x.codice]?.categoria || "",
+      prospetto: contiMap[x.codice]?.prospetto || "",
+    })).sort((a, b) => a.codice - b.codice).filter(m => Math.abs(m.dare) > 0.001 || Math.abs(m.avere) > 0.001);
+
+    const totD = mastrini.reduce((s, m) => s + m.dare, 0);
+    const totA = mastrini.reduce((s, m) => s + m.avere, 0);
+    const ricavi = mastrini.filter(m => m.categoria === "RICAVI").reduce((s, m) => s + m.avere - m.dare, 0);
+    const costi  = mastrini.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).reduce((s, m) => s + m.dare - m.avere, 0);
+    const utile  = ricavi - costi;
+    const liquidita = mastrini.filter(m => contiMap[m.codice]?.categoria === "DISP. LIQUIDE").reduce((s, m) => s + m.saldo, 0);
+    return { mastrini, totD, totA, ricavi, costi, utile, liquidita, nMov: movs.length };
+  }, [mese, modo, buFilter, movimenti, saldiIniziali, contiMap]);
+
+  const meseCap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
+  const modoLabel = modo === "mese" ? "Solo mese" : "Progressivo";
+  const buLabel = buFilter === "ALL" ? "Tutte le BU" : buFilter;
+  const contesto = `${meseCap(mese)} ${stagione} · ${modoLabel} · ${buLabel}`;
+  const quadra = Math.abs(dati.totD - dati.totA) < 0.01;
+  const safe = (s) => String(s).replace(/[^A-Za-z0-9]+/g, "-");
+
+  // === EXPORT EXCEL ===
+  function exportExcel(){
+    if (typeof XLSX === "undefined"){ onToast("Libreria Excel non caricata"); return; }
+    setBusy(true);
+    try{
+      const aoa = [
+        ["FUTSAL FABBRICO ASD — Chiusura mensile"],
+        [`Mese: ${meseCap(mese)}`, `Stagione: ${stagione}`, `Modalità: ${modoLabel}`, `Business Unit: ${buLabel}`],
+        [`Generato il ${new Date().toLocaleString("it-IT")}`],
+        [],
+        ["Codice","Conto","Categoria","Prospetto","Dare","Avere","Saldo","D/A"],
+      ];
+      dati.mastrini.forEach(m => aoa.push([
+        m.codice, m.nome.trim(), m.categoria, m.prospetto,
+        r2imp(m.dare), r2imp(m.avere), r2imp(Math.abs(m.saldo)),
+        m.saldo < 0 ? "A" : m.saldo > 0 ? "D" : "",
+      ]));
+      aoa.push(["", "TOTALI", "", "", r2imp(dati.totD), r2imp(dati.totA), quadra ? 0 : r2imp(dati.totD - dati.totA), quadra ? "OK" : "SBIL."]);
+      aoa.push([]);
+      aoa.push(["Ricavi periodo", r2imp(dati.ricavi)]);
+      aoa.push(["Costi periodo", r2imp(dati.costi)]);
+      aoa.push(["Risultato periodo", r2imp(dati.utile)]);
+      aoa.push([modo === "mese" ? "Variazione liquidità" : "Liquidità a fine mese", r2imp(dati.liquidita)]);
+
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws["!cols"] = [{ wch: 8 }, { wch: 34 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 6 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Chiusura");
+      XLSX.writeFile(wb, `Chiusura_${safe(mese)}_${modo}_${safe(buLabel)}_${stagione}.xlsx`);
+      onToast("Chiusura mensile esportata (Excel)");
+    } catch(e){ onToast("Errore export Excel: " + e.message); }
+    finally { setBusy(false); }
+  }
+
+  // === EXPORT PDF ===
+  function exportPDF(){
+    if (!window.jspdf){ onToast("Libreria PDF non caricata"); return; }
+    setBusy(true);
+    try{
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const W = doc.internal.pageSize.width;
+
+      doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+      doc.text("FUTSAL FABBRICO ASD", W/2, 18, { align: "center" });
+      doc.setFontSize(11); doc.setFont("helvetica", "normal");
+      doc.text(`Chiusura mensile · ${meseCap(mese)} ${stagione}`, W/2, 25, { align: "center" });
+      doc.setFontSize(9); doc.setTextColor(100);
+      doc.text(`${modoLabel} · ${buLabel} · ${dati.nMov} movimenti`, W/2, 31, { align: "center" });
+      doc.text(`Generato il ${new Date().toLocaleDateString("it-IT")} alle ${new Date().toLocaleTimeString("it-IT")}`, W/2, 36, { align: "center" });
+      doc.setTextColor(0);
+
+      // riquadro KPI
+      const kpi = [
+        ["Ricavi periodo", fmtEuro(dati.ricavi)],
+        ["Costi periodo", fmtEuro(dati.costi)],
+        ["Risultato periodo", fmtEuro(dati.utile)],
+        [modo === "mese" ? "Variazione liquidità" : "Liquidità a fine mese", fmtEuro(dati.liquidita)],
+      ];
+      doc.autoTable({
+        startY: 42,
+        body: kpi,
+        theme: "plain",
+        styles: { fontSize: 9, cellPadding: 1.5 },
+        columnStyles: { 0: { fontStyle: "bold", cellWidth: 60 }, 1: { halign: "right" } },
+      });
+
+      const rows = dati.mastrini.map(m => [
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, m.prospetto,
+        m.dare > 0 ? m.dare.toFixed(2) : "",
+        m.avere > 0 ? m.avere.toFixed(2) : "",
+        Math.abs(m.saldo).toFixed(2) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : ""),
+      ]);
+      rows.push([
+        "", { content: "TOTALI", styles: { fontStyle: "bold" } }, "", "",
+        { content: dati.totD.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: dati.totA.toFixed(2), styles: { fontStyle: "bold" } },
+        quadra ? "OK" : (dati.totD - dati.totA).toFixed(2),
+      ]);
+      doc.autoTable({
+        startY: doc.lastAutoTable.finalY + 4,
+        head: [["Cod.","Conto","Categoria","Prosp.","Dare","Avere","Saldo"]],
+        body: rows,
+        styles: { fontSize: 8, cellPadding: 1.4 },
+        headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
+        columnStyles: { 0: { cellWidth: 12, halign: "center" }, 3: { cellWidth: 14, halign: "center" }, 4: { cellWidth: 22, halign: "right" }, 5: { cellWidth: 22, halign: "right" }, 6: { cellWidth: 24, halign: "right" } },
+      });
+
+      doc.save(`Chiusura_${safe(mese)}_${modo}_${safe(buLabel)}_${stagione}.pdf`);
+      onToast("Chiusura mensile esportata (PDF)");
+    } catch(e){ onToast("Errore export PDF: " + e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Chiusura mensile</h2>
+          <div className="sub">Stato dei conti a fine mese, per Business Unit · {contesto}</div>
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          <button className="btn ghost" disabled={busy} onClick={exportExcel}>↧ Excel</button>
+          <button className="btn ghost" disabled={busy} onClick={exportPDF}>↧ PDF</button>
+        </div>
+      </div>
+
+      {/* Controlli */}
+      <div className="card" style={{ marginBottom:16, display:"flex", gap:18, flexWrap:"wrap", alignItems:"flex-end" }}>
+        <div>
+          <label style={{ display:"block", fontSize:11, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-3)", marginBottom:5 }}>Mese di chiusura</label>
+          <select value={mese} onChange={e => setMese(e.target.value)}>
+            {MESI.map(m => <option key={m} value={m}>{meseCap(m)}{mesiConDati.has(m) ? "" : " · (nessun dato)"}</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:11, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-3)", marginBottom:5 }}>Modalità</label>
+          <div className="tipo-switch">
+            <button type="button" className={modo === "progressivo" ? "active entrata" : ""} onClick={() => setModo("progressivo")}>Progressivo</button>
+            <button type="button" className={modo === "mese" ? "active entrata" : ""} onClick={() => setModo("mese")}>Solo mese</button>
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:11, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-3)", marginBottom:5 }}>Business Unit</label>
+          <select value={buFilter} onChange={e => setBuFilter(e.target.value)}>
+            <option value="ALL">Tutte le BU</option>
+            {buOptions.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        </div>
+        <div style={{ fontSize:12, color:"var(--ink-3)", maxWidth:280 }}>
+          {modo === "progressivo"
+            ? "Saldi cumulati da inizio stagione fino a fine mese."
+            : "Solo le variazioni dei conti nel mese selezionato."}
+        </div>
+      </div>
+
+      {/* KPI */}
+      <div className="kpi-grid">
+        <div className="kpi">
+          <div className="label">Ricavi periodo</div>
+          <div className="value" style={{ color:"var(--accent)" }}>{fmtEuro(dati.ricavi)}</div>
+          <div className="hint">Conto Economico</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Costi periodo</div>
+          <div className="value" style={{ color:"var(--danger)" }}>{fmtEuro(dati.costi)}</div>
+          <div className="hint">Conto Economico</div>
+        </div>
+        <div className="kpi accent">
+          <div className="label">Risultato periodo</div>
+          <div className={"value" + (dati.utile < 0 ? " neg" : "")}>{fmtEuro(dati.utile)}</div>
+          <div className="hint">{dati.utile >= 0 ? "Utile" : "Perdita"}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">{modo === "mese" ? "Variazione liquidità" : "Liquidità a fine mese"}</div>
+          <div className="value">{fmtEuro(dati.liquidita)}</div>
+          <div className="hint">Disponibilità liquide</div>
+        </div>
+      </div>
+
+      {/* Tabella stato conti */}
+      <h3 className="serif" style={{ fontWeight:500, fontSize:18, margin:"26px 0 12px" }}>
+        Stato dei conti — {meseCap(mese)} <span style={{ fontSize:13, color:"var(--ink-3)", fontFamily:"inherit" }}>({modoLabel}, {buLabel})</span>
+      </h3>
+      {dati.mastrini.length === 0 ? (
+        <div className="empty-state">Nessun movimento per i filtri selezionati.</div>
+      ) : (
+        <div className="tbl-wrap" style={{ maxHeight:600, overflowY:"auto" }}>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th style={{ width:50 }}>Cod.</th>
+                <th>Conto</th>
+                <th>Categoria</th>
+                <th style={{ width:55 }}>Prosp.</th>
+                <th className="num" style={{ width:110 }}>Dare</th>
+                <th className="num" style={{ width:110 }}>Avere</th>
+                <th className="num" style={{ width:120 }}>{modo === "mese" ? "Variazione" : "Saldo"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dati.mastrini.map(m => (
+                <tr key={m.codice}>
+                  <td className="mono" style={{ fontWeight:600 }}>{String(m.codice).padStart(2,"0")}</td>
+                  <td>{m.nome.trim()}</td>
+                  <td><span className="pill">{m.categoria || "—"}</span></td>
+                  <td>{m.prospetto || "—"}</td>
+                  <td className="num">{m.dare > 0 ? fmt(m.dare) : ""}</td>
+                  <td className="num">{m.avere > 0 ? fmt(m.avere) : ""}</td>
+                  <td className={"num " + (m.saldo < 0 ? "neg" : m.saldo > 0 ? "pos" : "")}>
+                    {fmt(Math.abs(m.saldo))} {m.saldo < 0 ? "A" : m.saldo > 0 ? "D" : ""}
+                  </td>
+                </tr>
+              ))}
+              <tr style={{ borderTop:"2px solid var(--ink)", fontWeight:600, background:"var(--panel-2)" }}>
+                <td colSpan={4} style={{ fontFamily:"'Fraunces',serif", fontSize:14 }}>TOTALI</td>
+                <td className="num" style={{ fontWeight:700 }}>{fmt(dati.totD)}</td>
+                <td className="num" style={{ fontWeight:700 }}>{fmt(dati.totA)}</td>
+                <td className="num">{quadra ? "✓" : fmt(dati.totD - dati.totA)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div style={{ fontSize:12, color:"var(--ink-3)", marginTop:10, fontStyle:"italic" }}>
+        {modo === "mese"
+          ? "In modalità «Solo mese» il saldo di ogni conto è la variazione generata dai movimenti del mese (D = aumento dare, A = aumento avere)."
+          : "In modalità «Progressivo» il saldo è il valore cumulato del conto a fine mese, come in un bilancio di verifica alla data."}
+        {buFilter !== "ALL" && " Filtro BU attivo: sono incluse solo le scritture della business unit selezionata."}
+      </div>
+    </div>
+  );
+}
+
+
 function App() {
   const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
   const [stagione, setStagione] = useState(STAGIONE_DEFAULT);
@@ -8765,6 +9058,7 @@ function App() {
           <div className="section-label">Reports contabili</div>
           <button className={"navlink " + (page==="libro"?"active":"")} onClick={() => setPage("libro")}><span className="ico">▤</span> Libro Giornale</button>
           <button className={"navlink " + (page==="bilancio"?"active":"")} onClick={() => setPage("bilancio")}><span className="ico">⚖</span> Bilancio Verifica</button>
+          <button className={"navlink " + (page==="chiusura"?"active":"")} onClick={() => setPage("chiusura")}><span className="ico">🗓</span> Chiusura mensile</button>
           <button className={"navlink " + (page==="rf"?"active":"")} onClick={() => setPage("rf")}><span className="ico">≋</span> Rendiconto Fin.</button>
           <button className={"navlink " + (page==="pivot"?"active":"")} onClick={() => setPage("pivot")}><span className="ico">⊞</span> Pivot Conti</button>
           <button className={"navlink " + (page==="controller"?"active":"")} onClick={() => setPage("controller")}><span className="ico">🎯</span> Controller</button>
@@ -8793,6 +9087,7 @@ function App() {
               {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
+              {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} onToast={showToast} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
               {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
