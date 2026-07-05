@@ -1451,6 +1451,11 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
       if (m.tipo === "giroconto" && map[m.contoLiquiditaDest]) {
         map[m.contoLiquiditaDest].push({ ...m, _segno: 1, _giroIn: true });
       }
+      // scritture libere/composte e rettifiche non monetarie su un conto di liquidità
+      const eff = effettoLiquiditaNascosto(m);
+      if (eff && map[eff.codice]) {
+        map[eff.codice].push({ ...m, importo: Math.abs(eff.delta), _segno: eff.delta > 0 ? 1 : -1, _composta: true });
+      }
     });
     return map;
   }, [movimenti]);
@@ -1484,6 +1489,12 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
       if (m.tipo === "giroconto" && map[m.contoLiquiditaDest]) {
         map[m.contoLiquiditaDest].entrate += m.importo;
         if (!m.importato) map[m.contoLiquiditaDest].entrate_nuove += m.importo;
+      }
+      // scritture libere/composte e rettifiche non monetarie su un conto di liquidità
+      const eff = effettoLiquiditaNascosto(m);
+      if (eff && map[eff.codice]) {
+        if (eff.delta > 0) { map[eff.codice].entrate += eff.delta; if (!m.importato) map[eff.codice].entrate_nuove += eff.delta; }
+        else { map[eff.codice].uscite += -eff.delta; if (!m.importato) map[eff.codice].uscite_nuove += -eff.delta; }
       }
     });
     return map;
@@ -2535,6 +2546,27 @@ function calcolaMastrini(scritture) {
   return Object.values(m).map(x => ({...x, saldo: x.dare - x.avere}));
 }
 
+// Effetto "nascosto" sulla liquidità: righe di scritture libere/composte o rettifiche
+// non monetarie il cui conto è un conto di liquidità. Questi movimenti hanno
+// contoLiquidita = null (il conto sta in contoPdC), quindi i calcoli di cassa
+// basati su contoLiquidita non li vedrebbero. Restituisce {codice, delta} con
+// convenzione DARE = +liquidità, AVERE = -liquidità (oppure null).
+const CODICI_LIQUIDITA = [1, 3, 4, 5, 9, 10];
+function effettoLiquiditaNascosto(m) {
+  if (!m) return null;
+  // Scrittura composta / libera: ogni riga porta contoPdC + dare/avere
+  if (m.scritturaComposta && CODICI_LIQUIDITA.includes(Number(m.contoPdC))) {
+    const delta = (Number(m.dare) || 0) - (Number(m.avere) || 0);
+    return delta !== 0 ? { codice: Number(m.contoPdC), delta } : null;
+  }
+  // Rettifica non monetaria semplice (nessun conto liquidità "monetario") su un conto di liquidità
+  if (!m.scritturaComposta && !m.contoLiquidita && m.tipo !== "giroconto" && CODICI_LIQUIDITA.includes(Number(m.contoPdC))) {
+    const delta = (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
+    return delta !== 0 ? { codice: Number(m.contoPdC), delta } : null;
+  }
+  return null;
+}
+
 // ============================================================
 // PAGINA: LIBRO GIORNALE (con tab Cronologico e Mastrini)
 // ============================================================
@@ -2946,6 +2978,8 @@ function PageSnapshot({ conti, movimenti, saldiIniziali, stagione, onToast }) {
         if (liq[m.contoLiquidita] !== undefined) liq[m.contoLiquidita] -= m.importo;
         if (liq[m.contoLiquiditaDest] !== undefined) liq[m.contoLiquiditaDest] += m.importo;
       }
+      const eff = effettoLiquiditaNascosto(m);
+      if (eff && liq[eff.codice] !== undefined) liq[eff.codice] += eff.delta;
     });
 
     // mastrini di tutti i conti
@@ -4482,6 +4516,8 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
           if (m.contoLiquidita === c.codice) saldo -= m.importo;
           if (m.contoLiquiditaDest === c.codice) saldo += m.importo;
         }
+        const eff = effettoLiquiditaNascosto(m);
+        if (eff && eff.codice === c.codice) saldo += eff.delta;
       });
       return s + saldo;
     }, 0);
@@ -6063,6 +6099,8 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
       } else if (m.contoLiquiditaDest === 3 && m.tipo === "giroconto") {
         s += m.importo;
       }
+      const eff = effettoLiquiditaNascosto(m);
+      if (eff && eff.codice === 3) s += eff.delta;
     });
     return s;
   }, [movimenti, saldiIniziali]);
