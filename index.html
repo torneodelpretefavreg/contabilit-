@@ -8470,7 +8470,7 @@ function PageImportMovimenti({ conti, bu, movimenti, stagione, onToast, onDone }
      - Solo mese: solo i movimenti del mese scelto (variazioni del periodo)
    Export Excel e PDF.
    ============================================================ */
-function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, onToast }){
+function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, categorieRF, onToast }){
   const contiMap = useMemo(() => {
     const m = {};
     conti.forEach(c => { m[c.codice] = c; });
@@ -8479,21 +8479,18 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, on
   }, [conti]);
 
   const idxMese = (m) => MESI.indexOf(m.mese || meseDaData(m.data));
-
-  // mesi presenti nei dati (per l'help e il default)
   const mesiConDati = useMemo(() => {
     const s = new Set();
     movimenti.forEach(m => { const nm = m.mese || meseDaData(m.data); if (nm) s.add(nm); });
     return s;
   }, [movimenti]);
-
   const meseDefault = useMemo(() => {
     for (let i = MESI.length - 1; i >= 0; i--) if (mesiConDati.has(MESI[i])) return MESI[i];
     return MESI[(new Date().getMonth() + 4) % 12];
   }, [mesiConDati]);
 
   const [mese, setMese] = useState(meseDefault);
-  const [modo, setModo] = useState("progressivo"); // progressivo | mese
+  const [modo, setModo] = useState("progressivo");
   const [buFilter, setBuFilter] = useState("ALL");
   const [busy, setBusy] = useState(false);
   useEffect(() => { setMese(meseDefault); }, [meseDefault]);
@@ -8504,146 +8501,291 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, on
     return [...set];
   }, [bu, movimenti]);
 
-  // === CALCOLO STATO CONTI ===
+  const investSet = useMemo(() => new Set((categorieRF && categorieRF.investimenti) || []), [categorieRF]);
+  const meseCap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
+  const modoLabel = modo === "mese" ? "Solo mese" : "Progressivo";
+  const buLabel = buFilter === "ALL" ? "Tutte le BU" : buFilter;
+  const safe = (s) => String(s).replace(/[^A-Za-z0-9]+/g, "-");
+
+  // effetto di un movimento su un conto liquidità (include scritture libere e giroconti)
+  const liqDelta = (m, code) => {
+    let d = 0;
+    if (m.contoLiquidita === code) { if (m.tipo === "entrata") d += m.importo; else if (m.tipo === "uscita") d -= m.importo; else if (m.tipo === "giroconto") d -= m.importo; }
+    if (m.tipo === "giroconto" && m.contoLiquiditaDest === code) d += m.importo;
+    const eff = effettoLiquiditaNascosto(m); if (eff && eff.codice === code) d += eff.delta;
+    return d;
+  };
+
   const dati = useMemo(() => {
     const meseIdx = MESI.indexOf(mese);
-    let movs, scritture;
+    const movsBU = buFilter === "ALL" ? movimenti : movimenti.filter(m => m.bu === buFilter);
+
+    // ---- scritture / mastrini (CE, SP, dettaglio conti) ----
+    let scr;
     if (modo === "mese") {
-      movs = movimenti.filter(m => idxMese(m) === meseIdx);
-      scritture = generaLibroGiornale(movs, {}, contiMap)
+      scr = generaLibroGiornale(movsBU.filter(m => idxMese(m) === meseIdx), {}, contiMap)
         .filter(s => !s.apertura && s.origine !== "apertura");
     } else {
-      movs = movimenti.filter(m => idxMese(m) <= meseIdx);
-      scritture = generaLibroGiornale(movs, saldiIniziali, contiMap);
+      scr = generaLibroGiornale(movsBU.filter(m => idxMese(m) <= meseIdx), saldiIniziali, contiMap);
     }
-    if (buFilter !== "ALL") scritture = scritture.filter(s => s.bu === buFilter);
-
-    const mastrini = calcolaMastrini(scritture).map(x => ({
-      ...x,
-      categoria: contiMap[x.codice]?.categoria || "",
-      prospetto: contiMap[x.codice]?.prospetto || "",
+    const mastrini = calcolaMastrini(scr).map(x => ({
+      ...x, categoria: contiMap[x.codice]?.categoria || "", prospetto: contiMap[x.codice]?.prospetto || "",
     })).sort((a, b) => a.codice - b.codice).filter(m => Math.abs(m.dare) > 0.001 || Math.abs(m.avere) > 0.001);
 
     const totD = mastrini.reduce((s, m) => s + m.dare, 0);
     const totA = mastrini.reduce((s, m) => s + m.avere, 0);
-    const ricavi = mastrini.filter(m => m.categoria === "RICAVI").reduce((s, m) => s + m.avere - m.dare, 0);
-    const costi  = mastrini.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).reduce((s, m) => s + m.dare - m.avere, 0);
-    const utile  = ricavi - costi;
-    const liquidita = mastrini.filter(m => contiMap[m.codice]?.categoria === "DISP. LIQUIDE").reduce((s, m) => s + m.saldo, 0);
-    return { mastrini, totD, totA, ricavi, costi, utile, liquidita, nMov: movs.length };
-  }, [mese, modo, buFilter, movimenti, saldiIniziali, contiMap]);
 
-  const meseCap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
-  const modoLabel = modo === "mese" ? "Solo mese" : "Progressivo";
-  const buLabel = buFilter === "ALL" ? "Tutte le BU" : buFilter;
+    // ---- CONTO ECONOMICO ----
+    const ceRicavi = mastrini.filter(m => m.categoria === "RICAVI").map(m => ({ ...m, val: m.avere - m.dare })).filter(m => Math.abs(m.val) > 0.001);
+    const ceCosti  = mastrini.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).map(m => ({ ...m, val: m.dare - m.avere })).filter(m => Math.abs(m.val) > 0.001);
+    const totRicavi = ceRicavi.reduce((s, m) => s + m.val, 0);
+    const totCosti  = ceCosti.reduce((s, m) => s + m.val, 0);
+    const utile = totRicavi - totCosti;
+
+    // ---- STATO PATRIMONIALE ----
+    const spVoci = mastrini.filter(m => (m.prospetto === "SP" || m.prospetto === "SP/CE") && Math.abs(m.saldo) > 0.001);
+    const attivo = spVoci.filter(m => m.saldo > 0).map(m => ({ ...m, val: m.saldo }));
+    const passivo = spVoci.filter(m => m.saldo < 0).map(m => ({ ...m, val: -m.saldo }));
+    const totAttivo = attivo.reduce((s, m) => s + m.val, 0);
+    const totPassivo = passivo.reduce((s, m) => s + m.val, 0);
+    const liquidita = mastrini.filter(m => contiMap[m.codice]?.categoria === "DISP. LIQUIDE").reduce((s, m) => s + m.saldo, 0);
+
+    // ---- RENDICONTO FINANZIARIO (sul periodo) ----
+    const rfFull = buildRendiconto(movsBU, conti, saldiIniziali, investSet);
+    const monthsIn = modo === "mese" ? [MESI[meseIdx]] : MESI.slice(0, meseIdx + 1);
+    const aggCat = (mappa) => {
+      const out = {};
+      Object.entries(mappa).forEach(([cat, perMese]) => {
+        let s = 0; monthsIn.forEach(mm => s += perMese[mm] || 0);
+        if (Math.abs(s) > 0.001) out[cat] = s;
+      });
+      return out;
+    };
+    const rfEntrate = aggCat(rfFull.entrate), rfUscite = aggCat(rfFull.usciteOp), rfInvest = aggCat(rfFull.investimenti);
+    const rfTotEntrate = Object.values(rfEntrate).reduce((s, v) => s + v, 0);
+    const rfTotUscite = Object.values(rfUscite).reduce((s, v) => s + v, 0);
+    const rfTotInvest = Object.values(rfInvest).reduce((s, v) => s + v, 0);
+    const rfDispIniz = modo === "mese" ? rfFull.dispIniz[MESI[meseIdx]] : rfFull.openingTot;
+    const rfDispFin = rfFull.dispFin[MESI[meseIdx]];
+    const rf = {
+      entrate: rfEntrate, uscite: rfUscite, invest: rfInvest,
+      totEntrate: rfTotEntrate, totUscite: rfTotUscite, totInvest: rfTotInvest,
+      saldoOp: rfTotEntrate - rfTotUscite, dispIniz: rfDispIniz, dispFin: rfDispFin,
+      variaz: Math.abs(rfDispIniz) > 0.001 ? (rfDispFin - rfDispIniz) / rfDispIniz : 0,
+    };
+
+    // ---- DASHBOARD LIQUIDITÀ (sempre progressivo + mensile) ----
+    const saldoAlMese = (code, upTo) => {
+      let s = saldiIniziali[code] || 0;
+      movsBU.forEach(m => { if (m.apertura || idxMese(m) <= upTo) s += liqDelta(m, code); });
+      return s;
+    };
+    const liqDash = CONTI_LIQUIDITA.map(c => {
+      const iniz = saldoAlMese(c.codice, -1);
+      const prec = saldoAlMese(c.codice, meseIdx - 1);
+      const fine = saldoAlMese(c.codice, meseIdx);
+      return { codice: c.codice, nome: c.nome, iniz, prec, fine, varMese: fine - prec, varProg: fine - iniz };
+    }).filter(x => Math.abs(x.iniz) > 0.001 || Math.abs(x.fine) > 0.001 || Math.abs(x.varMese) > 0.001);
+    const liqTot = liqDash.reduce((a, x) => ({
+      iniz: a.iniz + x.iniz, prec: a.prec + x.prec, fine: a.fine + x.fine, varMese: a.varMese + x.varMese, varProg: a.varProg + x.varProg,
+    }), { iniz: 0, prec: 0, fine: 0, varMese: 0, varProg: 0 });
+
+    return {
+      mastrini, totD, totA, ceRicavi, ceCosti, totRicavi, totCosti, utile,
+      attivo, passivo, totAttivo, totPassivo, liquidita, rf, liqDash, liqTot,
+    };
+  }, [mese, modo, buFilter, movimenti, saldiIniziali, contiMap, conti, investSet]);
+
   const contesto = `${meseCap(mese)} ${stagione} · ${modoLabel} · ${buLabel}`;
   const quadra = Math.abs(dati.totD - dati.totA) < 0.01;
-  const safe = (s) => String(s).replace(/[^A-Za-z0-9]+/g, "-");
 
-  // === EXPORT EXCEL ===
-  function exportExcel(){
+  // ===================== EXPORT: builders di righe (aoa) =====================
+  const ceAoa = () => {
+    const a = [["CONTO ECONOMICO"], [contesto], [], ["", "Codice", "Voce", "Importo"], ["RICAVI"]];
+    dati.ceRicavi.forEach(m => a.push(["", m.codice, m.nome.trim(), r2imp(m.val)]));
+    a.push(["", "", "TOTALE RICAVI", r2imp(dati.totRicavi)], [], ["COSTI"]);
+    dati.ceCosti.forEach(m => a.push(["", m.codice, m.nome.trim(), r2imp(m.val)]));
+    a.push(["", "", "TOTALE COSTI", r2imp(dati.totCosti)], []);
+    a.push(["", "", dati.utile >= 0 ? "UTILE D'ESERCIZIO" : "PERDITA D'ESERCIZIO", r2imp(dati.utile)]);
+    return a;
+  };
+  const spAoa = () => {
+    const a = [["STATO PATRIMONIALE"], [contesto], [], ["ATTIVO", "", "PASSIVO E NETTO", ""]];
+    const nA = dati.attivo.length, nP = dati.passivo.length + 1; // +1 per risultato d'esercizio
+    const rows = Math.max(nA, nP);
+    const passRows = dati.passivo.map(m => [m.nome.trim(), r2imp(m.val)]);
+    passRows.push([dati.utile >= 0 ? "Risultato d'esercizio (utile)" : "Risultato d'esercizio (perdita)", r2imp(dati.utile)]);
+    for (let i = 0; i < rows; i++) {
+      const A = dati.attivo[i] ? [dati.attivo[i].nome.trim(), r2imp(dati.attivo[i].val)] : ["", ""];
+      const P = passRows[i] || ["", ""];
+      a.push([A[0], A[1], P[0], P[1]]);
+    }
+    a.push(["TOTALE ATTIVO", r2imp(dati.totAttivo), "TOTALE PASSIVO E NETTO", r2imp(dati.totPassivo + dati.utile)]);
+    return a;
+  };
+  const rfAoa = () => {
+    const a = [["RENDICONTO FINANZIARIO"], [contesto], [], ["Voce", "Importo"]];
+    a.push(["DISPONIBILITÀ INIZIALI", r2imp(dati.rf.dispIniz)], [], ["ENTRATE OPERATIVE"]);
+    Object.keys(dati.rf.entrate).sort().forEach(c => a.push([c, r2imp(dati.rf.entrate[c])]));
+    a.push(["Totale entrate operative (A)", r2imp(dati.rf.totEntrate)], [], ["USCITE OPERATIVE"]);
+    Object.keys(dati.rf.uscite).sort().forEach(c => a.push([c, r2imp(dati.rf.uscite[c])]));
+    a.push(["Totale uscite operative (B)", r2imp(dati.rf.totUscite)]);
+    a.push(["Saldo operativo (A - B)", r2imp(dati.rf.saldoOp)], [], ["INVESTIMENTI"]);
+    Object.keys(dati.rf.invest).sort().forEach(c => a.push([c, r2imp(dati.rf.invest[c])]));
+    a.push(["Totale investimenti", r2imp(dati.rf.totInvest)], []);
+    a.push(["DISPONIBILITÀ FINALI", r2imp(dati.rf.dispFin)]);
+    a.push(["Variazione %", Math.round(dati.rf.variaz * 1000) / 10 + "%"]);
+    return a;
+  };
+  const liqAoa = () => {
+    const a = [["LIQUIDITÀ — STATO E VARIAZIONI"], [contesto], [], ["Conto", "Saldo iniziale", "Fine mese prec.", "Fine mese", "Var. mese", "Var. da inizio"]];
+    dati.liqDash.forEach(x => a.push([x.nome.trim(), r2imp(x.iniz), r2imp(x.prec), r2imp(x.fine), r2imp(x.varMese), r2imp(x.varProg)]));
+    a.push(["TOTALE", r2imp(dati.liqTot.iniz), r2imp(dati.liqTot.prec), r2imp(dati.liqTot.fine), r2imp(dati.liqTot.varMese), r2imp(dati.liqTot.varProg)]);
+    return a;
+  };
+  const contiAoa = () => {
+    const a = [["DETTAGLIO CONTI (bilancio di verifica)"], [contesto], [], ["Codice", "Conto", "Categoria", "Prospetto", "Dare", "Avere", "Saldo", "D/A"]];
+    dati.mastrini.forEach(m => a.push([m.codice, m.nome.trim(), m.categoria, m.prospetto, r2imp(m.dare), r2imp(m.avere), r2imp(Math.abs(m.saldo)), m.saldo < 0 ? "A" : m.saldo > 0 ? "D" : ""]));
+    a.push(["", "TOTALI", "", "", r2imp(dati.totD), r2imp(dati.totA), quadra ? 0 : r2imp(dati.totD - dati.totA), quadra ? "OK" : "SBIL."]);
+    return a;
+  };
+
+  const saveWb = (sheets, fname) => {
+    const wb = XLSX.utils.book_new();
+    sheets.forEach(([name, aoa, cols]) => {
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      if (cols) ws["!cols"] = cols.map(w => ({ wch: w }));
+      XLSX.utils.book_append_sheet(wb, ws, name);
+    });
+    XLSX.writeFile(wb, fname);
+  };
+  const fn = (what) => `Chiusura_${what}_${safe(mese)}_${modo}_${safe(buLabel)}_${stagione}`;
+
+  function exportExcel(kind){
     if (typeof XLSX === "undefined"){ onToast("Libreria Excel non caricata"); return; }
     setBusy(true);
     try{
-      const aoa = [
-        ["FUTSAL FABBRICO ASD — Chiusura mensile"],
-        [`Mese: ${meseCap(mese)}`, `Stagione: ${stagione}`, `Modalità: ${modoLabel}`, `Business Unit: ${buLabel}`],
-        [`Generato il ${new Date().toLocaleString("it-IT")}`],
-        [],
-        ["Codice","Conto","Categoria","Prospetto","Dare","Avere","Saldo","D/A"],
-      ];
-      dati.mastrini.forEach(m => aoa.push([
-        m.codice, m.nome.trim(), m.categoria, m.prospetto,
-        r2imp(m.dare), r2imp(m.avere), r2imp(Math.abs(m.saldo)),
-        m.saldo < 0 ? "A" : m.saldo > 0 ? "D" : "",
-      ]));
-      aoa.push(["", "TOTALI", "", "", r2imp(dati.totD), r2imp(dati.totA), quadra ? 0 : r2imp(dati.totD - dati.totA), quadra ? "OK" : "SBIL."]);
-      aoa.push([]);
-      aoa.push(["Ricavi periodo", r2imp(dati.ricavi)]);
-      aoa.push(["Costi periodo", r2imp(dati.costi)]);
-      aoa.push(["Risultato periodo", r2imp(dati.utile)]);
-      aoa.push([modo === "mese" ? "Variazione liquidità" : "Liquidità a fine mese", r2imp(dati.liquidita)]);
-
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws["!cols"] = [{ wch: 8 }, { wch: 34 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 6 }];
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Chiusura");
-      XLSX.writeFile(wb, `Chiusura_${safe(mese)}_${modo}_${safe(buLabel)}_${stagione}.xlsx`);
-      onToast("Chiusura mensile esportata (Excel)");
-    } catch(e){ onToast("Errore export Excel: " + e.message); }
+      if (kind === "ce") saveWb([["Conto Economico", ceAoa(), [4, 8, 40, 14]]], fn("CE") + ".xlsx");
+      else if (kind === "sp") saveWb([["Stato Patrimoniale", spAoa(), [34, 14, 34, 14]]], fn("SP") + ".xlsx");
+      else if (kind === "rf") saveWb([["Rendiconto", rfAoa(), [40, 16]]], fn("RF") + ".xlsx");
+      else saveWb([
+        ["Liquidità", liqAoa(), [26, 14, 14, 14, 14, 14]],
+        ["Conto Economico", ceAoa(), [4, 8, 40, 14]],
+        ["Stato Patrimoniale", spAoa(), [34, 14, 34, 14]],
+        ["Rendiconto", rfAoa(), [40, 16]],
+        ["Dettaglio Conti", contiAoa(), [8, 34, 18, 10, 12, 12, 12, 6]],
+      ], fn("completa") + ".xlsx");
+      onToast("Esportazione Excel completata");
+    } catch(e){ onToast("Errore Excel: " + e.message); }
     finally { setBusy(false); }
   }
 
-  // === EXPORT PDF ===
-  function exportPDF(){
+  // ---- PDF helpers ----
+  const pdfHead = (doc, titolo) => {
+    const W = doc.internal.pageSize.width;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+    doc.text("FUTSAL FABBRICO ASD", W/2, 16, { align: "center" });
+    doc.setFontSize(11); doc.setFont("helvetica", "normal");
+    doc.text(titolo, W/2, 23, { align: "center" });
+    doc.setFontSize(9); doc.setTextColor(100);
+    doc.text(contesto, W/2, 29, { align: "center" });
+    doc.setTextColor(0);
+    return 34;
+  };
+  const pdfCE = (doc, y) => {
+    doc.setFont("helvetica","bold"); doc.setFontSize(11); doc.text("CONTO ECONOMICO", 14, y);
+    doc.autoTable({ startY: y + 2,
+      head: [["Cod.","Ricavi","Importo"]],
+      body: [...dati.ceRicavi.map(m => [String(m.codice).padStart(2,"0"), m.nome.trim(), m.val.toFixed(2)]),
+        [{ content:"Totale Ricavi", colSpan:2, styles:{fontStyle:"bold"} }, { content: dati.totRicavi.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]} }]],
+      styles:{ fontSize:8.5, cellPadding:1.6 }, headStyles:{ fillColor:[45,94,62], textColor:240 },
+      columnStyles:{ 0:{cellWidth:14, halign:"center"}, 2:{cellWidth:32, halign:"right"} } });
+    let y2 = doc.lastAutoTable.finalY + 6;
+    doc.autoTable({ startY: y2,
+      head: [["Cod.","Costi","Importo"]],
+      body: [...dati.ceCosti.map(m => [String(m.codice).padStart(2,"0"), m.nome.trim(), m.val.toFixed(2)]),
+        [{ content:"Totale Costi", colSpan:2, styles:{fontStyle:"bold"} }, { content: dati.totCosti.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]} }]],
+      styles:{ fontSize:8.5, cellPadding:1.6 }, headStyles:{ fillColor:[181,67,67], textColor:240 },
+      columnStyles:{ 0:{cellWidth:14, halign:"center"}, 2:{cellWidth:32, halign:"right"} } });
+    let y3 = doc.lastAutoTable.finalY + 8; const W = doc.internal.pageSize.width;
+    doc.setFillColor(26,26,26); doc.rect(14, y3 - 5, W - 28, 9, "F");
+    doc.setTextColor(255); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+    doc.text(dati.utile >= 0 ? "UTILE D'ESERCIZIO" : "PERDITA D'ESERCIZIO", 16, y3 + 1);
+    doc.text(fmtEuro(dati.utile), W - 16, y3 + 1, { align: "right" });
+    doc.setTextColor(0);
+    return y3 + 10;
+  };
+  const pdfSP = (doc, y) => {
+    doc.setFont("helvetica","bold"); doc.setFontSize(11); doc.text("STATO PATRIMONIALE", 14, y);
+    const passBody = dati.passivo.map(m => [m.nome.trim(), m.val.toFixed(2)]);
+    passBody.push([dati.utile >= 0 ? "Risultato d'esercizio (utile)" : "Risultato d'esercizio (perdita)", dati.utile.toFixed(2)]);
+    doc.autoTable({ startY: y + 2, head: [["ATTIVO","Importo"]],
+      body: [...dati.attivo.map(m => [m.nome.trim(), m.val.toFixed(2)]), [{content:"TOTALE ATTIVO", styles:{fontStyle:"bold"}}, {content: dati.totAttivo.toFixed(2), styles:{fontStyle:"bold"}}]],
+      styles:{ fontSize:8.5, cellPadding:1.6 }, headStyles:{ fillColor:[26,26,26], textColor:240 },
+      columnStyles:{ 1:{halign:"right"} }, tableWidth: (doc.internal.pageSize.width - 28) / 2 - 3, margin:{ left:14 } });
+    const yTop = y + 2;
+    doc.autoTable({ startY: yTop, head: [["PASSIVO E NETTO","Importo"]],
+      body: [...passBody, [{content:"TOTALE PASSIVO E NETTO", styles:{fontStyle:"bold"}}, {content:(dati.totPassivo + dati.utile).toFixed(2), styles:{fontStyle:"bold"}}]],
+      styles:{ fontSize:8.5, cellPadding:1.6 }, headStyles:{ fillColor:[26,26,26], textColor:240 },
+      columnStyles:{ 1:{halign:"right"} }, tableWidth: (doc.internal.pageSize.width - 28) / 2 - 3, margin:{ left: doc.internal.pageSize.width/2 + 3 } });
+    return doc.lastAutoTable.finalY + 8;
+  };
+  const pdfRF = (doc, y) => {
+    doc.setFont("helvetica","bold"); doc.setFontSize(11); doc.text("RENDICONTO FINANZIARIO", 14, y);
+    const body = [];
+    body.push([{ content:"Disponibilità iniziali", styles:{fontStyle:"bold"} }, { content: dati.rf.dispIniz.toFixed(2), styles:{fontStyle:"bold", halign:"right"} }]);
+    body.push([{ content:"ENTRATE OPERATIVE", colSpan:2, styles:{fontStyle:"bold", fillColor:[236,240,236]} }]);
+    Object.keys(dati.rf.entrate).sort().forEach(c => body.push([c, { content: dati.rf.entrate[c].toFixed(2), styles:{halign:"right"} }]));
+    body.push([{content:"Totale entrate (A)", styles:{fontStyle:"bold"}}, {content: dati.rf.totEntrate.toFixed(2), styles:{fontStyle:"bold", halign:"right"}}]);
+    body.push([{ content:"USCITE OPERATIVE", colSpan:2, styles:{fontStyle:"bold", fillColor:[248,236,236]} }]);
+    Object.keys(dati.rf.uscite).sort().forEach(c => body.push([c, { content: dati.rf.uscite[c].toFixed(2), styles:{halign:"right"} }]));
+    body.push([{content:"Totale uscite (B)", styles:{fontStyle:"bold"}}, {content: dati.rf.totUscite.toFixed(2), styles:{fontStyle:"bold", halign:"right"}}]);
+    body.push([{content:"Saldo operativo (A - B)", styles:{fontStyle:"bold"}}, {content: dati.rf.saldoOp.toFixed(2), styles:{fontStyle:"bold", halign:"right"}}]);
+    if (Object.keys(dati.rf.invest).length){
+      body.push([{ content:"INVESTIMENTI", colSpan:2, styles:{fontStyle:"bold", fillColor:[240,238,230]} }]);
+      Object.keys(dati.rf.invest).sort().forEach(c => body.push([c, { content: dati.rf.invest[c].toFixed(2), styles:{halign:"right"} }]));
+      body.push([{content:"Totale investimenti", styles:{fontStyle:"bold"}}, {content: dati.rf.totInvest.toFixed(2), styles:{fontStyle:"bold", halign:"right"}}]);
+    }
+    body.push([{content:"Disponibilità finali", styles:{fontStyle:"bold", fillColor:[26,26,26], textColor:255}}, {content: dati.rf.dispFin.toFixed(2), styles:{fontStyle:"bold", halign:"right", fillColor:[26,26,26], textColor:255}}]);
+    doc.autoTable({ startY: y + 2, body, styles:{ fontSize:8.5, cellPadding:1.6 }, columnStyles:{ 1:{cellWidth:36} } });
+    return doc.lastAutoTable.finalY + 8;
+  };
+
+  function exportPDF(kind){
     if (!window.jspdf){ onToast("Libreria PDF non caricata"); return; }
     setBusy(true);
     try{
       const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-      const W = doc.internal.pageSize.width;
-
-      doc.setFont("helvetica", "bold"); doc.setFontSize(16);
-      doc.text("FUTSAL FABBRICO ASD", W/2, 18, { align: "center" });
-      doc.setFontSize(11); doc.setFont("helvetica", "normal");
-      doc.text(`Chiusura mensile · ${meseCap(mese)} ${stagione}`, W/2, 25, { align: "center" });
-      doc.setFontSize(9); doc.setTextColor(100);
-      doc.text(`${modoLabel} · ${buLabel} · ${dati.nMov} movimenti`, W/2, 31, { align: "center" });
-      doc.text(`Generato il ${new Date().toLocaleDateString("it-IT")} alle ${new Date().toLocaleTimeString("it-IT")}`, W/2, 36, { align: "center" });
-      doc.setTextColor(0);
-
-      // riquadro KPI
-      const kpi = [
-        ["Ricavi periodo", fmtEuro(dati.ricavi)],
-        ["Costi periodo", fmtEuro(dati.costi)],
-        ["Risultato periodo", fmtEuro(dati.utile)],
-        [modo === "mese" ? "Variazione liquidità" : "Liquidità a fine mese", fmtEuro(dati.liquidita)],
-      ];
-      doc.autoTable({
-        startY: 42,
-        body: kpi,
-        theme: "plain",
-        styles: { fontSize: 9, cellPadding: 1.5 },
-        columnStyles: { 0: { fontStyle: "bold", cellWidth: 60 }, 1: { halign: "right" } },
-      });
-
-      const rows = dati.mastrini.map(m => [
-        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, m.prospetto,
-        m.dare > 0 ? m.dare.toFixed(2) : "",
-        m.avere > 0 ? m.avere.toFixed(2) : "",
-        Math.abs(m.saldo).toFixed(2) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : ""),
-      ]);
-      rows.push([
-        "", { content: "TOTALI", styles: { fontStyle: "bold" } }, "", "",
-        { content: dati.totD.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: dati.totA.toFixed(2), styles: { fontStyle: "bold" } },
-        quadra ? "OK" : (dati.totD - dati.totA).toFixed(2),
-      ]);
-      doc.autoTable({
-        startY: doc.lastAutoTable.finalY + 4,
-        head: [["Cod.","Conto","Categoria","Prosp.","Dare","Avere","Saldo"]],
-        body: rows,
-        styles: { fontSize: 8, cellPadding: 1.4 },
-        headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
-        columnStyles: { 0: { cellWidth: 12, halign: "center" }, 3: { cellWidth: 14, halign: "center" }, 4: { cellWidth: 22, halign: "right" }, 5: { cellWidth: 22, halign: "right" }, 6: { cellWidth: 24, halign: "right" } },
-      });
-
-      doc.save(`Chiusura_${safe(mese)}_${modo}_${safe(buLabel)}_${stagione}.pdf`);
-      onToast("Chiusura mensile esportata (PDF)");
-    } catch(e){ onToast("Errore export PDF: " + e.message); }
+      if (kind === "ce"){ const doc = new jsPDF(); pdfCE(doc, pdfHead(doc, "Conto Economico")); doc.save(fn("CE") + ".pdf"); }
+      else if (kind === "sp"){ const doc = new jsPDF(); pdfSP(doc, pdfHead(doc, "Stato Patrimoniale")); doc.save(fn("SP") + ".pdf"); }
+      else if (kind === "rf"){ const doc = new jsPDF(); pdfRF(doc, pdfHead(doc, "Rendiconto Finanziario")); doc.save(fn("RF") + ".pdf"); }
+      else {
+        const doc = new jsPDF();
+        let y = pdfHead(doc, "Chiusura mensile — CE · SP · RF");
+        y = pdfCE(doc, y);
+        if (y > 210){ doc.addPage(); y = 18; }
+        y = pdfSP(doc, y);
+        doc.addPage(); pdfRF(doc, 18);
+        doc.save(fn("completa") + ".pdf");
+      }
+      onToast("Esportazione PDF completata");
+    } catch(e){ onToast("Errore PDF: " + e.message); }
     finally { setBusy(false); }
   }
+
+  const signCol = (v) => v > 0.001 ? "pos" : v < -0.001 ? "neg" : "";
+  const signStr = (v) => (v > 0 ? "+" : v < 0 ? "−" : "") + fmt(Math.abs(v));
 
   return (
     <div>
       <div className="page-head">
         <div>
           <h2>Chiusura mensile</h2>
-          <div className="sub">Stato dei conti a fine mese, per Business Unit · {contesto}</div>
+          <div className="sub">Liquidità, Conto Economico, Stato Patrimoniale e Rendiconto · {contesto}</div>
         </div>
         <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-          <button className="btn ghost" disabled={busy} onClick={exportExcel}>↧ Excel</button>
-          <button className="btn ghost" disabled={busy} onClick={exportPDF}>↧ PDF</button>
+          <button className="btn ghost" disabled={busy} onClick={() => exportExcel("all")}>↧ Excel (tutto)</button>
+          <button className="btn accent" disabled={busy} onClick={() => exportPDF("all")}>↧ PDF (tutto)</button>
         </div>
       </div>
 
@@ -8656,7 +8798,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, on
           </select>
         </div>
         <div>
-          <label style={{ display:"block", fontSize:11, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-3)", marginBottom:5 }}>Modalità</label>
+          <label style={{ display:"block", fontSize:11, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-3)", marginBottom:5 }}>Modalità (CE / SP / RF)</label>
           <div className="tipo-switch">
             <button type="button" className={modo === "progressivo" ? "active entrata" : ""} onClick={() => setModo("progressivo")}>Progressivo</button>
             <button type="button" className={modo === "mese" ? "active entrata" : ""} onClick={() => setModo("mese")}>Solo mese</button>
@@ -8669,57 +8811,167 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, on
             {buOptions.map(b => <option key={b} value={b}>{b}</option>)}
           </select>
         </div>
-        <div style={{ fontSize:12, color:"var(--ink-3)", maxWidth:280 }}>
-          {modo === "progressivo"
-            ? "Saldi cumulati da inizio stagione fino a fine mese."
-            : "Solo le variazioni dei conti nel mese selezionato."}
-        </div>
       </div>
 
-      {/* KPI */}
-      <div className="kpi-grid">
-        <div className="kpi">
-          <div className="label">Ricavi periodo</div>
-          <div className="value" style={{ color:"var(--accent)" }}>{fmtEuro(dati.ricavi)}</div>
-          <div className="hint">Conto Economico</div>
-        </div>
-        <div className="kpi">
-          <div className="label">Costi periodo</div>
-          <div className="value" style={{ color:"var(--danger)" }}>{fmtEuro(dati.costi)}</div>
-          <div className="hint">Conto Economico</div>
-        </div>
+      {/* DASHBOARD LIQUIDITÀ */}
+      <h3 className="serif" style={{ fontWeight:500, fontSize:18, margin:"4px 0 12px" }}>Stato liquidità — {meseCap(mese)}</h3>
+      <div className="kpi-grid" style={{ marginBottom:10 }}>
         <div className="kpi accent">
-          <div className="label">Risultato periodo</div>
-          <div className={"value" + (dati.utile < 0 ? " neg" : "")}>{fmtEuro(dati.utile)}</div>
-          <div className="hint">{dati.utile >= 0 ? "Utile" : "Perdita"}</div>
+          <div className="label">Liquidità totale a fine mese</div>
+          <div className="value">{fmtEuro(dati.liqTot.fine)}</div>
+          <div className="hint">{dati.liqDash.length} conti</div>
         </div>
         <div className="kpi">
-          <div className="label">{modo === "mese" ? "Variazione liquidità" : "Liquidità a fine mese"}</div>
-          <div className="value">{fmtEuro(dati.liquidita)}</div>
-          <div className="hint">Disponibilità liquide</div>
+          <div className="label">Variazione nel mese</div>
+          <div className={"value" + (dati.liqTot.varMese < 0 ? " neg" : "")}>{signStr(dati.liqTot.varMese)}</div>
+          <div className="hint">rispetto a fine {MESI[(MESI.indexOf(mese)+11)%12]}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Variazione da inizio</div>
+          <div className={"value" + (dati.liqTot.varProg < 0 ? " neg" : "")}>{signStr(dati.liqTot.varProg)}</div>
+          <div className="hint">rispetto ai saldi iniziali</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Liquidità iniziale</div>
+          <div className="value">{fmtEuro(dati.liqTot.iniz)}</div>
+          <div className="hint">inizio stagione</div>
+        </div>
+      </div>
+      <div className="tbl-wrap" style={{ marginBottom:8 }}>
+        <table className="tbl">
+          <thead><tr>
+            <th>Conto liquidità</th>
+            <th className="num">Saldo iniziale</th>
+            <th className="num">Fine mese prec.</th>
+            <th className="num">Fine mese</th>
+            <th className="num">Var. mese</th>
+            <th className="num">Var. da inizio</th>
+          </tr></thead>
+          <tbody>
+            {dati.liqDash.map(x => (
+              <tr key={x.codice}>
+                <td>{x.nome.trim()}</td>
+                <td className="num">{fmt(x.iniz)}</td>
+                <td className="num">{fmt(x.prec)}</td>
+                <td className="num" style={{ fontWeight:600 }}>{fmt(x.fine)}</td>
+                <td className={"num " + signCol(x.varMese)}>{signStr(x.varMese)}</td>
+                <td className={"num " + signCol(x.varProg)}>{signStr(x.varProg)}</td>
+              </tr>
+            ))}
+            <tr style={{ borderTop:"2px solid var(--ink)", fontWeight:600, background:"var(--panel-2)" }}>
+              <td>TOTALE</td>
+              <td className="num">{fmt(dati.liqTot.iniz)}</td>
+              <td className="num">{fmt(dati.liqTot.prec)}</td>
+              <td className="num">{fmt(dati.liqTot.fine)}</td>
+              <td className={"num " + signCol(dati.liqTot.varMese)}>{signStr(dati.liqTot.varMese)}</td>
+              <td className={"num " + signCol(dati.liqTot.varProg)}>{signStr(dati.liqTot.varProg)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* CONTO ECONOMICO */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"26px 0 12px", flexWrap:"wrap", gap:8 }}>
+        <h3 className="serif" style={{ fontWeight:500, fontSize:18, margin:0 }}>Conto Economico <span style={{ fontSize:13, color:"var(--ink-3)", fontFamily:"inherit" }}>({modoLabel})</span></h3>
+        <div style={{ display:"flex", gap:6 }}>
+          <button className="btn ghost" style={{ padding:"5px 10px", fontSize:12 }} disabled={busy} onClick={() => exportExcel("ce")}>↧ Excel</button>
+          <button className="btn ghost" style={{ padding:"5px 10px", fontSize:12 }} disabled={busy} onClick={() => exportPDF("ce")}>↧ PDF</button>
+        </div>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18 }}>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>Ricavi</th><th className="num">Importo</th></tr></thead>
+            <tbody>
+              {dati.ceRicavi.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}</td><td className="num">{fmt(m.val)}</td></tr>)}
+              <tr style={{ fontWeight:700, background:"var(--accent-soft)" }}><td>Totale Ricavi</td><td className="num">{fmt(dati.totRicavi)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>Costi</th><th className="num">Importo</th></tr></thead>
+            <tbody>
+              {dati.ceCosti.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}</td><td className="num">{fmt(m.val)}</td></tr>)}
+              <tr style={{ fontWeight:700, background:"var(--danger-soft)" }}><td>Totale Costi</td><td className="num">{fmt(dati.totCosti)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style={{ marginTop:12, padding:"12px 16px", background:"var(--ink)", color:"#f0eee7", borderRadius:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <span className="serif" style={{ fontSize:16 }}>{dati.utile >= 0 ? "Utile d'esercizio" : "Perdita d'esercizio"}</span>
+        <span style={{ fontSize:20, fontWeight:700 }}>{fmtEuro(dati.utile)}</span>
+      </div>
+
+      {/* STATO PATRIMONIALE */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"26px 0 12px", flexWrap:"wrap", gap:8 }}>
+        <h3 className="serif" style={{ fontWeight:500, fontSize:18, margin:0 }}>Stato Patrimoniale <span style={{ fontSize:13, color:"var(--ink-3)", fontFamily:"inherit" }}>({modo === "mese" ? "variazioni del mese" : "saldi a fine mese"})</span></h3>
+        <div style={{ display:"flex", gap:6 }}>
+          <button className="btn ghost" style={{ padding:"5px 10px", fontSize:12 }} disabled={busy} onClick={() => exportExcel("sp")}>↧ Excel</button>
+          <button className="btn ghost" style={{ padding:"5px 10px", fontSize:12 }} disabled={busy} onClick={() => exportPDF("sp")}>↧ PDF</button>
+        </div>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18 }}>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>Attivo</th><th className="num">Importo</th></tr></thead>
+            <tbody>
+              {dati.attivo.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}<div style={{ fontSize:10.5, color:"var(--ink-3)" }}>{m.categoria}</div></td><td className="num">{fmt(m.val)}</td></tr>)}
+              <tr style={{ fontWeight:700, background:"var(--panel-2)" }}><td>Totale Attivo</td><td className="num">{fmt(dati.totAttivo)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>Passivo e Netto</th><th className="num">Importo</th></tr></thead>
+            <tbody>
+              {dati.passivo.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}<div style={{ fontSize:10.5, color:"var(--ink-3)" }}>{m.categoria}</div></td><td className="num">{fmt(m.val)}</td></tr>)}
+              <tr><td style={{ fontStyle:"italic" }}>{dati.utile >= 0 ? "Risultato d'esercizio (utile)" : "Risultato d'esercizio (perdita)"}</td><td className="num">{fmt(dati.utile)}</td></tr>
+              <tr style={{ fontWeight:700, background:"var(--panel-2)" }}><td>Totale Passivo e Netto</td><td className="num">{fmt(dati.totPassivo + dati.utile)}</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
-      {/* Tabella stato conti */}
-      <h3 className="serif" style={{ fontWeight:500, fontSize:18, margin:"26px 0 12px" }}>
-        Stato dei conti — {meseCap(mese)} <span style={{ fontSize:13, color:"var(--ink-3)", fontFamily:"inherit" }}>({modoLabel}, {buLabel})</span>
-      </h3>
-      {dati.mastrini.length === 0 ? (
-        <div className="empty-state">Nessun movimento per i filtri selezionati.</div>
-      ) : (
-        <div className="tbl-wrap" style={{ maxHeight:600, overflowY:"auto" }}>
+      {/* RENDICONTO FINANZIARIO */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"26px 0 12px", flexWrap:"wrap", gap:8 }}>
+        <h3 className="serif" style={{ fontWeight:500, fontSize:18, margin:0 }}>Rendiconto Finanziario <span style={{ fontSize:13, color:"var(--ink-3)", fontFamily:"inherit" }}>({modoLabel})</span></h3>
+        <div style={{ display:"flex", gap:6 }}>
+          <button className="btn ghost" style={{ padding:"5px 10px", fontSize:12 }} disabled={busy} onClick={() => exportExcel("rf")}>↧ Excel</button>
+          <button className="btn ghost" style={{ padding:"5px 10px", fontSize:12 }} disabled={busy} onClick={() => exportPDF("rf")}>↧ PDF</button>
+        </div>
+      </div>
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <tbody>
+            <tr style={{ fontWeight:600 }}><td>Disponibilità iniziali</td><td className="num">{fmt(dati.rf.dispIniz)}</td></tr>
+            <tr style={{ background:"var(--accent-soft)" }}><td colSpan={2} style={{ fontWeight:600 }}>Entrate operative</td></tr>
+            {Object.keys(dati.rf.entrate).sort().map(c => <tr key={"e"+c}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.entrate[c])}</td></tr>)}
+            <tr style={{ fontWeight:600 }}><td>Totale entrate operative (A)</td><td className="num">{fmt(dati.rf.totEntrate)}</td></tr>
+            <tr style={{ background:"var(--danger-soft)" }}><td colSpan={2} style={{ fontWeight:600 }}>Uscite operative</td></tr>
+            {Object.keys(dati.rf.uscite).sort().map(c => <tr key={"u"+c}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.uscite[c])}</td></tr>)}
+            <tr style={{ fontWeight:600 }}><td>Totale uscite operative (B)</td><td className="num">{fmt(dati.rf.totUscite)}</td></tr>
+            <tr style={{ fontWeight:600, background:"var(--panel-2)" }}><td>Saldo operativo (A − B)</td><td className={"num " + signCol(dati.rf.saldoOp)}>{fmt(dati.rf.saldoOp)}</td></tr>
+            {Object.keys(dati.rf.invest).length > 0 && <>
+              <tr style={{ background:"#f4ebd7" }}><td colSpan={2} style={{ fontWeight:600 }}>Investimenti</td></tr>
+              {Object.keys(dati.rf.invest).sort().map(c => <tr key={"i"+c}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.invest[c])}</td></tr>)}
+              <tr style={{ fontWeight:600 }}><td>Totale investimenti</td><td className="num">{fmt(dati.rf.totInvest)}</td></tr>
+            </>}
+            <tr style={{ fontWeight:700, borderTop:"2px solid var(--ink)", background:"var(--ink)", color:"#f0eee7" }}><td>Disponibilità finali</td><td className="num" style={{ color:"#f0eee7" }}>{fmt(dati.rf.dispFin)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize:12, color:"var(--ink-3)", marginTop:8, fontStyle:"italic" }}>
+        Il Rendiconto considera solo i flussi monetari (esclude ammortamenti e altre scritture non monetarie) e non i giroconti interni.
+        {modo === "mese" ? " Disponibilità iniziali = saldo a inizio mese." : " Disponibilità iniziali = saldo a inizio stagione."}
+      </div>
+
+      {/* DETTAGLIO CONTI */}
+      <details style={{ marginTop:24 }}>
+        <summary style={{ cursor:"pointer", fontWeight:600, color:"var(--ink-2)", padding:"6px 0" }}>Dettaglio conti (bilancio di verifica) {quadra ? "· quadratura ✓" : "· ⚠ non quadra"}</summary>
+        <div className="tbl-wrap" style={{ marginTop:10, maxHeight:500, overflowY:"auto" }}>
           <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ width:50 }}>Cod.</th>
-                <th>Conto</th>
-                <th>Categoria</th>
-                <th style={{ width:55 }}>Prosp.</th>
-                <th className="num" style={{ width:110 }}>Dare</th>
-                <th className="num" style={{ width:110 }}>Avere</th>
-                <th className="num" style={{ width:120 }}>{modo === "mese" ? "Variazione" : "Saldo"}</th>
-              </tr>
-            </thead>
+            <thead><tr><th style={{ width:50 }}>Cod.</th><th>Conto</th><th>Categoria</th><th style={{ width:55 }}>Prosp.</th><th className="num">Dare</th><th className="num">Avere</th><th className="num">Saldo</th></tr></thead>
             <tbody>
               {dati.mastrini.map(m => (
                 <tr key={m.codice}>
@@ -8729,9 +8981,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, on
                   <td>{m.prospetto || "—"}</td>
                   <td className="num">{m.dare > 0 ? fmt(m.dare) : ""}</td>
                   <td className="num">{m.avere > 0 ? fmt(m.avere) : ""}</td>
-                  <td className={"num " + (m.saldo < 0 ? "neg" : m.saldo > 0 ? "pos" : "")}>
-                    {fmt(Math.abs(m.saldo))} {m.saldo < 0 ? "A" : m.saldo > 0 ? "D" : ""}
-                  </td>
+                  <td className={"num " + (m.saldo < 0 ? "neg" : m.saldo > 0 ? "pos" : "")}>{fmt(Math.abs(m.saldo))} {m.saldo < 0 ? "A" : m.saldo > 0 ? "D" : ""}</td>
                 </tr>
               ))}
               <tr style={{ borderTop:"2px solid var(--ink)", fontWeight:600, background:"var(--panel-2)" }}>
@@ -8743,13 +8993,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, on
             </tbody>
           </table>
         </div>
-      )}
-      <div style={{ fontSize:12, color:"var(--ink-3)", marginTop:10, fontStyle:"italic" }}>
-        {modo === "mese"
-          ? "In modalità «Solo mese» il saldo di ogni conto è la variazione generata dai movimenti del mese (D = aumento dare, A = aumento avere)."
-          : "In modalità «Progressivo» il saldo è il valore cumulato del conto a fine mese, come in un bilancio di verifica alla data."}
-        {buFilter !== "ALL" && " Filtro BU attivo: sono incluse solo le scritture della business unit selezionata."}
-      </div>
+      </details>
     </div>
   );
 }
@@ -9125,7 +9369,7 @@ function App() {
               {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
-              {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} onToast={showToast} />}
+              {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
               {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
