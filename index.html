@@ -2021,6 +2021,7 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
   const anomalie = useMemo(() => {
     const result = [];
     movimenti.forEach(m => {
+      if (m.apertura) return;          // le scritture di apertura al 01/09 non sono anomalie
       if (m.tipo === "giroconto") return;
       const motivi = [];
       let suggerito = null;
@@ -2085,6 +2086,15 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
       if (motivi.length > 0) result.push({ ...m, motivi, suggerito });
     });
     return result;
+  }, [movimenti]);
+
+  // Riepilogo riapertura: verifica che il conto 60 Bilancio di Apertura si azzeri
+  const riepilogoApertura = useMemo(() => {
+    const ap = movimenti.filter(m => m.apertura);
+    if (!ap.length) return null;
+    const dare = ap.filter(m => m.tipo === "uscita").reduce((s, m) => s + (m.importo || 0), 0);
+    const avere = ap.filter(m => m.tipo === "entrata").reduce((s, m) => s + (m.importo || 0), 0);
+    return { n: ap.length, dare, avere, saldo: dare - avere, data: ap[0].data };
   }, [movimenti]);
 
   const applicaSuggerimento = async (mov, contoNuovo) => {
@@ -2164,6 +2174,24 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
 
       {tab === "lista" && <>
 
+      {riepilogoApertura && (
+        <div className="card" style={{ marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12,
+             borderColor: Math.abs(riepilogoApertura.saldo) < 0.01 ? "#c8d8ce" : "var(--danger)",
+             background: Math.abs(riepilogoApertura.saldo) < 0.01 ? "var(--accent-soft)" : "#fbecec" }}>
+          <div>
+            <div style={{ fontWeight:600 }}>Riapertura al {fmtDate(riepilogoApertura.data)} · conto 60 Bilancio di Apertura</div>
+            <div style={{ fontSize:12.5, color:"var(--ink-2)", marginTop:2 }}>
+              {riepilogoApertura.n} scritture · Dare {fmtEuro(riepilogoApertura.dare)} · Avere {fmtEuro(riepilogoApertura.avere)}
+            </div>
+          </div>
+          <div style={{ textAlign:"right", fontWeight:700 }}>
+            {Math.abs(riepilogoApertura.saldo) < 0.01
+              ? <span style={{ color:"var(--accent-ink)" }}>✓ Saldo 0 — attività e passività si compensano</span>
+              : <span style={{ color:"var(--danger)" }}>⚠ Saldo {fmtEuro(riepilogoApertura.saldo)} — non quadra, controlla le aperture</span>}
+          </div>
+        </div>
+      )}
+
       <div className="filters">
         <span className="label">Filtri:</span>
         <select value={filterTipo} onChange={e => setFilterTipo(e.target.value)}>
@@ -2217,20 +2245,24 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
                 return (
                   <tr key={m._id}>
                     <td>
-                      <span className={"pill " + m.tipo}>{m.tipo}</span>
-                      {m.importato && <span className="pill" style={{marginLeft:4, fontSize:9.5, background:"#f5f0e6", borderColor:"#e6d5a8", color:"#7a5a1d"}}>imp.</span>}
-                      {m.nonMonetario && <span className="pill" style={{marginLeft:4, fontSize:9.5, background:"#f0eaff", borderColor:"#d8c8f0", color:"#5a3da8"}}>n.m.</span>}
+                      {m.apertura
+                        ? <span className="pill" style={{background:"#f4ebd7", borderColor:"#e6d5a8", color:"#7a5a1d"}}>apertura</span>
+                        : <span className={"pill " + m.tipo}>{m.tipo}</span>}
+                      {m.importato && !m.apertura && <span className="pill" style={{marginLeft:4, fontSize:9.5, background:"#f5f0e6", borderColor:"#e6d5a8", color:"#7a5a1d"}}>imp.</span>}
+                      {m.nonMonetario && !m.apertura && <span className="pill" style={{marginLeft:4, fontSize:9.5, background:"#f0eaff", borderColor:"#d8c8f0", color:"#5a3da8"}}>n.m.</span>}
                     </td>
                     <td>{fmtDate(m.data)}</td>
-                    <td>{liq?.nome.trim() || "?"}</td>
+                    <td>{liq?.nome.trim() || <span style={{color:"var(--ink-3)"}}>{(m.nonMonetario || m.apertura) ? "—" : "?"}</span>}</td>
                     <td>
                       <div>{ctrp}</div>
-                      {m.categoria && <div style={{fontSize:11, color:"var(--ink-3)", marginTop:2}}>{m.categoria}</div>}
+                      {m.apertura && m.contoPdC !== 60
+                        ? <div style={{fontSize:11, color:"var(--ink-3)", marginTop:2}}>↳ contropartita 60 · Bilancio di Apertura</div>
+                        : (m.categoria && <div style={{fontSize:11, color:"var(--ink-3)", marginTop:2}}>{m.categoria}</div>)}
                     </td>
                     <td>{m.descrizione || <span style={{color:"var(--ink-3)"}}>—</span>}</td>
                     <td><span className="pill">{m.bu || "—"}</span></td>
-                    <td className={"num " + (m.tipo === "uscita" ? "neg" : m.tipo === "entrata" ? "pos" : "")}>
-                      {m.tipo === "uscita" ? "−" : m.tipo === "entrata" ? "+" : "⇄"} {fmt(m.importo)}
+                    <td className={"num " + (m.apertura ? "" : m.tipo === "uscita" ? "neg" : m.tipo === "entrata" ? "pos" : "")}>
+                      {m.apertura ? "" : m.tipo === "uscita" ? "−" : m.tipo === "entrata" ? "+" : "⇄"} {fmt(m.importo)}
                     </td>
                     <td>
                       <div style={{display:"flex", gap:4}}>
@@ -2565,6 +2597,61 @@ function effettoLiquiditaNascosto(m) {
     return delta !== 0 ? { codice: Number(m.contoPdC), delta } : null;
   }
   return null;
+}
+
+// ============================================================
+// RIAPERTURA DI INIZIO ANNO
+// Dai movimenti della stagione che si chiude calcola i saldi finali,
+// riporta i conti PATRIMONIALI (prospetto SP) come apertura del nuovo anno
+// (contropartita 60 BILANCIO DI APERTURA) e chiude il risultato d'esercizio
+// (utile/perdita dei conti CE) a RISERVA UTILE (14). Il conto 60 si azzera.
+// ============================================================
+function generaRiapertura(movimenti, saldiIniziali, conti, annoY1) {
+  const cM = {}; (conti || []).forEach(c => { cM[c.codice] = c; });
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const mastrini = calcolaMastrini(generaLibroGiornale(movimenti || [], saldiIniziali || {}, cM));
+  const isSP = c => cM[c] && cM[c].prospetto === "SP";
+  const isRes = c => cM[c] && (cM[c].prospetto === "CE" || cM[c].prospetto === "SP/CE");
+  const utile = r2(mastrini.filter(m => isRes(m.codice)).reduce((s, m) => s + (m.avere - m.dare), 0));
+  const LIQ = [1, 3, 4, 5, 9, 10];
+  const data = `${annoY1}-09-01`;
+  const now = new Date().toISOString();
+  const ap = [];
+  let totAttivo = 0, totLiab = 0, nConti = 0;
+  const push = (o) => ap.push(Object.assign({
+    data, mese: "settembre", categoria: "APERTURA", apertura: true, importato: true,
+    nonMonetario: true, contoLiquidita: null, contoLiquiditaDest: null, contoContropartita: null,
+    creatoIl: now, modificatoIl: now,
+  }, o));
+
+  mastrini.forEach(m => {
+    if (m.codice === 60 || !isSP(m.codice)) return;
+    const s = r2(m.saldo);
+    if (Math.abs(s) < 0.005) return;
+    nConti++;
+    if (s > 0) totAttivo += s; else totLiab += -s;
+    const nome = (m.nome || "").trim();
+    const isLiq = LIQ.includes(m.codice);
+    if (isLiq) {
+      if (s > 0) push({ tipo: "entrata", contoLiquidita: m.codice, contoPdC: 60, nonMonetario: false, importo: s, bu: "GENERAL", descrizione: `Riapertura: ${nome}` });
+      else       push({ tipo: "uscita",  contoLiquidita: m.codice, contoPdC: 60, nonMonetario: false, importo: -s, bu: "GENERAL", descrizione: `Riapertura: ${nome}` });
+    } else {
+      if (s > 0) push({ tipo: "entrata", contoPdC: m.codice, importo: s, bu: "GENERAL", descrizione: `Riapertura: ${nome}` });
+      else       push({ tipo: "uscita",  contoPdC: m.codice, importo: -s, bu: "GENERAL", descrizione: `Riapertura: ${nome}` });
+    }
+  });
+
+  // risultato d'esercizio precedente a Riserva Utile (14)
+  if (Math.abs(utile) >= 0.005) {
+    if (utile > 0) push({ tipo: "uscita", contoPdC: 14, importo: utile, bu: "GENERAL", descrizione: "Riapertura: utile es. precedente a Riserva Utile" });
+    else           push({ tipo: "entrata", contoPdC: 14, importo: -utile, bu: "GENERAL", descrizione: "Riapertura: perdita es. precedente a Riserva Utile" });
+  }
+
+  const totPassivo = r2(totLiab + utile);
+  // residuo di controllo del conto transitorio (dovrebbe essere ~0)
+  const c60 = mastrini.find(m => m.codice === 60);
+  const residuo60 = c60 ? r2(c60.saldo) : 0;
+  return { aperture: ap, utile, totAttivo: r2(totAttivo), totPassivo, nConti, residuo60 };
 }
 
 // ============================================================
@@ -9280,14 +9367,41 @@ function App() {
     const next = prompt("Nuova stagione (formato YY-YY, es. 26-27):");
     if (!next || !/^\d{2}-\d{2}$/.test(next)) return alert("Formato non valido");
     const key = `20${next.split("-")[0]}-${next.split("-")[1]}`;
+    const annoY1 = `20${next.split("-")[0]}`;
     try {
-      await db.ref(`stagioni/${key}/meta`).set({ stagione: key, creataIl: new Date().toISOString(), version: APP_VERSION });
-      // copia anche piano dei conti dalla stagione corrente
-      const contiObj = {};
-      conti.forEach(c => { contiObj[`c${c.codice}`] = c; });
-      await db.ref(`stagioni/${key}/conti`).set(contiObj);
+      const esiste = await db.ref(`stagioni/${key}/meta`).once("value");
+      if (esiste.exists()) {
+        if (confirm(`La stagione ${key} esiste già. Vuoi solo aprirla (senza modificarla)?`)) setStagione(key);
+        return;
+      }
+      // Calcola la riapertura dai saldi finali della stagione corrente
+      const { aperture, utile, totAttivo, totPassivo, nConti, residuo60 } = generaRiapertura(movimenti, saldiIniziali, conti, annoY1);
+      let msg = `RIAPERTURA  ${stagione}  →  ${key}\n\n`;
+      msg += `• Risultato d'esercizio ${stagione} portato a Riserva: ${fmtEuro(utile)}\n`;
+      msg += `• Conti patrimoniali riportati: ${nConti}\n`;
+      msg += `• Totale attivo di apertura: ${fmtEuro(totAttivo)}\n`;
+      msg += `• Totale passivo e netto: ${fmtEuro(totPassivo)}\n`;
+      msg += `• Movimenti di apertura creati al ${annoY1}-09-01: ${aperture.length}\n\n`;
+      if (Math.abs(totAttivo - totPassivo) > 0.01) msg += `⚠ Attivo e Passivo non coincidono (diff. ${fmtEuro(totAttivo - totPassivo)}). Controlla i prospetti dei conti.\n`;
+      if (Math.abs(residuo60) > 0.01) msg += `⚠ Il conto Bilancio di Apertura della stagione ${stagione} non è a zero (${fmtEuro(residuo60)}): la chiusura precedente potrebbe non quadrare.\n`;
+      msg += `\nVengono copiati piano dei conti, business unit e categorie del Rendiconto.\n`;
+      msg += `I cespiti NON vengono copiati (i fondi ammortamento sono già riportati come saldi).\n\nProcedere con la riapertura?`;
+      if (!confirm(msg)) return;
+
+      const contiObj = {}; conti.forEach(c => { contiObj[`c${c.codice}`] = c; });
+      const movsObj = {}; aperture.forEach((m, i) => { movsObj[`apertura_${String(i).padStart(4, "0")}`] = m; });
+      const buObj = (bu && bu.length ? bu : BUSINESS_UNITS_DEFAULT).reduce((acc, b, i) => { acc[`bu_${i}`] = { nome: b, ordine: i }; return acc; }, {});
+      const upd = {
+        meta: { stagione: key, creataIl: new Date().toISOString(), version: APP_VERSION, riapertaDa: stagione },
+        conti: contiObj,
+        movimenti: movsObj,
+        saldiIniziali: { 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 },
+        businessUnits: buObj,
+      };
+      if (categorieRF && Object.keys(categorieRF).length) upd.categorieRF = categorieRF;
+      await db.ref(`stagioni/${key}`).update(upd);
       setStagione(key);
-      showToast(`Stagione ${key} creata`);
+      showToast(`Stagione ${key} riaperta da ${stagione} · utile a riserva ${fmtEuro(utile)}`);
     } catch(e) { alert("Errore: " + e.message); }
   };
 
