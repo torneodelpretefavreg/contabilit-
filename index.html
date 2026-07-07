@@ -7787,7 +7787,7 @@ function TorneoResocontoGenerale({ stagione, onToast }) {
 // ============================================================
 // PAGINA: BUSINESS UNITS
 // ============================================================
-function PageBU({ bu, conti, movimenti, stagione, onToast }) {
+function PageBU({ bu, conti, movimenti, saldiIniziali, stagione, onToast }) {
   const [buData, setBuData] = useState([]);
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -7811,48 +7811,81 @@ function PageBU({ bu, conti, movimenti, stagione, onToast }) {
     return () => ref.off("value", cb);
   }, [stagione]);
 
-  // Conta movimenti per BU
-  const usoBU = useMemo(() => {
-    const m = {};
-    movimenti.forEach(mov => {
-      const b = mov.bu || "(senza BU)";
-      if (!m[b]) m[b] = { count: 0, ricavi: 0, costi: 0 };
-      m[b].count++;
-      if (mov.tipo === "entrata") m[b].ricavi += mov.importo;
-      else if (mov.tipo === "uscita") m[b].costi += mov.importo;
-    });
-    return m;
-  }, [movimenti]);
+  // Libro giornale (partita doppia): ogni scrittura porta la sua BU e i suoi righi Dare/Avere.
+  const ledgerBU = useMemo(
+    () => generaLibroGiornale(movimenti, saldiIniziali || {}, contiMap),
+    [movimenti, saldiIniziali, contiMap]
+  );
 
-  // Composizione per conto di ciascuna BU (per il drill-down)
-  // Per ogni BU raggruppo i movimenti per conto P.d.C. e sommo ricavi/costi.
-  const contiPerBU = useMemo(() => {
-    const out = {};
-    movimenti.forEach(mov => {
-      if (mov.tipo !== "entrata" && mov.tipo !== "uscita") return;
-      const cod = mov.contoPdC;
-      if (!cod) return;
-      const b = mov.bu || "(senza BU)";
-      if (!out[b]) out[b] = {};
-      if (!out[b][cod]) out[b][cod] = { codice: cod, ricavi: 0, costi: 0, count: 0 };
-      if (mov.tipo === "entrata") out[b][cod].ricavi += mov.importo;
-      else out[b][cod].costi += mov.importo;
-      out[b][cod].count++;
+  // Aggregazione corretta per BU usando Dare/Avere (così apertura e pagamento si compensano)
+  const buAgg = useMemo(() => {
+    // conteggio movimenti per BU e per (BU, conto)
+    const counts = {};
+    const countCC = {};
+    movimenti.forEach(m => {
+      const b = m.bu || "(senza BU)";
+      counts[b] = (counts[b] || 0) + 1;
+      [m.contoPdC, m.contoLiquidita, m.contoLiquiditaDest, m.contoContropartita].forEach(cod => {
+        if (cod == null) return;
+        countCC[`${b}|${cod}`] = (countCC[`${b}|${cod}`] || 0) + 1;
+      });
     });
-    // Trasformo in array ordinati per impatto (netto assoluto) per ogni BU
-    const res = {};
-    Object.entries(out).forEach(([b, conti]) => {
-      res[b] = Object.values(conti)
-        .map(c => ({
-          ...c,
+
+    // Dare/Avere per (BU, conto) dai righi del libro giornale
+    const acc = {};
+    ledgerBU.forEach(scr => {
+      const b = scr.bu || "(senza BU)";
+      if (!acc[b]) acc[b] = {};
+      (scr.righe || []).forEach(r => {
+        if (!acc[b][r.codice]) acc[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
+        acc[b][r.codice].dare += r.dare || 0;
+        acc[b][r.codice].avere += r.avere || 0;
+      });
+    });
+
+    const usoBU = {};
+    const contiPerBU = {};
+    const tutteBU = new Set([...Object.keys(acc), ...Object.keys(counts)]);
+    tutteBU.forEach(b => {
+      let ricaviTot = 0, costiTot = 0;
+      const list = Object.values(acc[b] || {}).map(c => {
+        const cat = contiMap[c.codice]?.categoria || "";
+        const isRic = cat === "RICAVI";
+        const isCos = cat === "COSTI" || cat === "COSTI/RICAVI";
+        const netto = c.avere - c.dare; // >0 = eccedenza avere (ricavo), <0 = eccedenza dare (costo)
+        if (isRic) ricaviTot += netto;         // ricavi netti (avere-dare)
+        if (isCos) costiTot += (c.dare - c.avere); // costi netti (dare-avere)
+        return {
+          codice: c.codice,
           nome: contiMap[c.codice]?.nome?.trim() || `Conto ${c.codice}`,
-          categoria: contiMap[c.codice]?.categoria || "",
-          netto: c.ricavi - c.costi,
-        }))
+          categoria: cat,
+          count: countCC[`${b}|${c.codice}`] || 0,
+          dare: c.dare, avere: c.avere,
+          ricavi: isRic ? Math.max(0, netto) : 0,
+          costi: isCos ? Math.max(0, c.dare - c.avere) : 0,
+          netto: isRic ? netto : isCos ? -(c.dare - c.avere) : netto,
+          patrimoniale: !isRic && !isCos,
+        };
+      })
+        .filter(c => {
+          const attivo = Math.abs(c.dare) > 0.005 || Math.abs(c.avere) > 0.005;
+          if (!attivo) return false;
+          if (c.patrimoniale) {
+            // nascondo liquidità e conto transitorio 60; gli altri patrimoniali solo se ancora aperti
+            if (c.categoria === "DISP. LIQUIDE" || c.codice === 60) return false;
+            return Math.abs(c.netto) > 0.005;
+          }
+          return true; // ricavi/costi sempre
+        })
         .sort((a, b2) => Math.abs(b2.netto) - Math.abs(a.netto));
+      usoBU[b] = { count: counts[b] || 0, ricavi: ricaviTot, costi: costiTot };
+      contiPerBU[b] = list;
     });
-    return res;
-  }, [movimenti, contiMap]);
+    return { usoBU, contiPerBU };
+  }, [ledgerBU, movimenti, contiMap]);
+
+  const usoBU = buAgg.usoBU;
+  const contiPerBU = buAgg.contiPerBU;
 
   const save = async (data, oldKey) => {
     try {
@@ -9513,7 +9546,7 @@ function App() {
               {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
-              {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} stagione={stagione} onToast={showToast} />}
+              {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
