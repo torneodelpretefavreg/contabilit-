@@ -2090,12 +2090,35 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
 
   // Riepilogo riapertura: verifica che il conto 60 Bilancio di Apertura si azzeri
   const riepilogoApertura = useMemo(() => {
-    const ap = movimenti.filter(m => m.apertura);
+    const isApertura = m => m.apertura === true || m.categoria === "APERTURA" || (m.descrizione || "").trim().toLowerCase().startsWith("apertura:");
+    const ap = movimenti.filter(isApertura);
     if (!ap.length) return null;
+    // una scrittura di apertura "punta al 60" se è marcata apertura, o ha 60 come conto/contropartita
+    const puntaA60 = m => m.apertura === true || Number(m.contoPdC) === 60 || Number(m.contoContropartita) === 60;
+    const daCorreggere = ap.filter(m => !puntaA60(m));
+    // netting teorico (a correzione fatta): uscite -> 60 DARE, entrate -> 60 AVERE
     const dare = ap.filter(m => m.tipo === "uscita").reduce((s, m) => s + (m.importo || 0), 0);
     const avere = ap.filter(m => m.tipo === "entrata").reduce((s, m) => s + (m.importo || 0), 0);
-    return { n: ap.length, dare, avere, saldo: dare - avere, data: ap[0].data };
+    // residuo attuale sul 60 = importi delle aperture mal contropartita (uscite +, entrate -)
+    const residuo = daCorreggere.reduce((s, m) => s + (m.tipo === "uscita" ? (m.importo || 0) : -(m.importo || 0)), 0);
+    return { n: ap.length, dare, avere, saldo: dare - avere, data: ap[0].data, daCorreggere, residuo };
   }, [movimenti]);
+
+  const correggiAperture = async () => {
+    const list = riepilogoApertura ? riepilogoApertura.daCorreggere : [];
+    if (!list.length) return;
+    const righe = list.map(m => `• ${m.tipo === "uscita" ? "AVERE" : "DARE"}  ${(contiMap[m.contoPdC]?.nome || m.contoPdC).toString().trim()}  ${fmtEuro(m.importo || 0)}`).join("\n");
+    if (!confirm(`Correggo ${list.length} scritture di apertura puntandole al conto 60 · Bilancio di Apertura:\n\n${righe}\n\nDopo la correzione il conto 60 chiuderà a zero e "DA ASSEGNARE" si svuoterà. Procedere?`)) return;
+    try {
+      const updates = {};
+      list.forEach(m => {
+        updates[`${m._id}/apertura`] = true;
+        updates[`${m._id}/contoContropartita`] = 60;
+      });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+      onToast(`${list.length} scritture di apertura corrette (contropartita → 60)`);
+    } catch (e) { onToast("Errore nella correzione: " + e.message); }
+  };
 
   const applicaSuggerimento = async (mov, contoNuovo) => {
     if (!confirm(`Cambiare conto P.d.C. di "${mov.descrizione || mov.categoria}" a ${contoNuovo} ${contiMap[contoNuovo]?.nome.trim() || ""}?`)) return;
@@ -2174,23 +2197,33 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
 
       {tab === "lista" && <>
 
-      {riepilogoApertura && (
+      {riepilogoApertura && (() => {
+        const ok = riepilogoApertura.daCorreggere.length === 0;
+        return (
         <div className="card" style={{ marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12,
-             borderColor: Math.abs(riepilogoApertura.saldo) < 0.01 ? "#c8d8ce" : "var(--danger)",
-             background: Math.abs(riepilogoApertura.saldo) < 0.01 ? "var(--accent-soft)" : "#fbecec" }}>
+             borderColor: ok ? "#c8d8ce" : "var(--danger)", background: ok ? "var(--accent-soft)" : "#fbecec" }}>
           <div>
             <div style={{ fontWeight:600 }}>Riapertura al {fmtDate(riepilogoApertura.data)} · conto 60 Bilancio di Apertura</div>
             <div style={{ fontSize:12.5, color:"var(--ink-2)", marginTop:2 }}>
-              {riepilogoApertura.n} scritture · Dare {fmtEuro(riepilogoApertura.dare)} · Avere {fmtEuro(riepilogoApertura.avere)}
+              {riepilogoApertura.n} scritture di apertura · Dare {fmtEuro(riepilogoApertura.dare)} · Avere {fmtEuro(riepilogoApertura.avere)}
             </div>
+            {!ok && (
+              <div style={{ fontSize:12.5, color:"var(--danger)", marginTop:4, fontWeight:600 }}>
+                {riepilogoApertura.daCorreggere.length} scritture puntano a "DA ASSEGNARE" invece che al conto 60 · residuo {fmtEuro(riepilogoApertura.residuo)}
+              </div>
+            )}
           </div>
-          <div style={{ textAlign:"right", fontWeight:700 }}>
-            {Math.abs(riepilogoApertura.saldo) < 0.01
-              ? <span style={{ color:"var(--accent-ink)" }}>✓ Saldo 0 — attività e passività si compensano</span>
-              : <span style={{ color:"var(--danger)" }}>⚠ Saldo {fmtEuro(riepilogoApertura.saldo)} — non quadra, controlla le aperture</span>}
+          <div style={{ textAlign:"right", fontWeight:700, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+            {ok
+              ? <span style={{ color:"var(--accent-ink)" }}>✓ Tutte puntano al 60 — Bilancio di Apertura a zero</span>
+              : <>
+                  <span style={{ color:"var(--danger)" }}>⚠ Il Bilancio di Apertura non chiude a zero</span>
+                  <button className="btn accent" onClick={correggiAperture}>Correggi aperture → conto 60</button>
+                </>}
           </div>
         </div>
-      )}
+        );
+      })()}
 
       <div className="filters">
         <span className="label">Filtri:</span>
