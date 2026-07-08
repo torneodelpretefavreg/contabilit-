@@ -9152,6 +9152,586 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
 }
 
 
+
+// ============================================================
+// PAGINA: CREDITI
+// Registro dei crediti v/clienti con scadenze e stato d'incasso.
+// - Si aggancia ai conti di categoria CREDITI del Piano dei Conti (43, 74, ...)
+// - Permette di inserire crediti a mano e di generare la scrittura quando si vuole:
+//     RILEVAZIONE: DARE credito / AVERE ricavo   (scrittura composta, non monetaria)
+//     INCASSO:     DARE liquidità / AVERE credito (movimento entrata)
+//   Se il credito non è mai stato rilevato, l'incasso va direttamente al conto ricavo.
+// - Riconcilia il registro con il saldo contabile del conto crediti.
+// ============================================================
+const giorniA = (iso) => {
+  if (!iso) return null;
+  const oggi = new Date(todayISO() + "T00:00:00");
+  const d = new Date(iso + "T00:00:00");
+  return Math.round((d - oggi) / 86400000);
+};
+
+function PageCrediti({ conti, movimenti, saldiIniziali, stagione, bu, onToast }) {
+  const [crediti, setCrediti] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [incassando, setIncassando] = useState(null);
+  const [filtro, setFiltro] = useState("aperti"); // aperti | tutti | riscossi | scaduti
+
+  const contiMap = useMemo(() => {
+    const m = {};
+    (conti || []).forEach(c => { m[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome }; });
+    return m;
+  }, [conti]);
+
+  const contiCredito = useMemo(() => (conti || []).filter(c => c.categoria === "CREDITI"), [conti]);
+  const contiRicavo = useMemo(() => (conti || []).filter(c => c.categoria === "RICAVI" || c.categoria === "COSTI/RICAVI"), [conti]);
+  const buList = useMemo(() => (bu && bu.length ? bu : BUSINESS_UNITS_DEFAULT), [bu]);
+
+  // --- Firebase: registro crediti ---
+  useEffect(() => {
+    if (!firebaseReady || !stagione) return;
+    const ref = db.ref(`stagioni/${stagione}/crediti`);
+    const cb = ref.on("value", snap => {
+      const v = snap.val();
+      setCrediti(v ? Object.entries(v).map(([k, c]) => ({ ...c, _key: k })) : []);
+    });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  // --- Contabilità: saldo e movimenti dei conti CREDITI ---
+  const contab = useMemo(() => {
+    const codici = new Set(contiCredito.map(c => c.codice));
+    if (!codici.size) return { saldo: 0, righe: [], perConto: [] };
+    const scritture = generaLibroGiornale(movimenti, saldiIniziali || {}, contiMap);
+    const acc = {};
+    const righe = [];
+    scritture.forEach(s => {
+      (s.righe || []).forEach(r => {
+        if (!codici.has(r.codice)) return;
+        if (!acc[r.codice]) acc[r.codice] = { codice: r.codice, dare: 0, avere: 0 };
+        acc[r.codice].dare += r.dare || 0;
+        acc[r.codice].avere += r.avere || 0;
+        righe.push({
+          data: s.data, descrizione: s.descrizione || s.categoria || "", bu: s.bu || "",
+          codice: r.codice, dare: r.dare || 0, avere: r.avere || 0,
+          movId: s.movId || null, scritturaId: s.scritturaId || null, apertura: !!s.apertura,
+        });
+      });
+    });
+    const perConto = Object.values(acc).map(c => ({
+      ...c, nome: contiMap[c.codice]?.nome?.trim() || `Conto ${c.codice}`, saldo: c.dare - c.avere,
+    })).sort((a, b) => a.codice - b.codice);
+    const saldo = perConto.reduce((s, c) => s + c.saldo, 0);
+    righe.sort((a, b) => (a.data || "").localeCompare(b.data || ""));
+    return { saldo, righe, perConto };
+  }, [movimenti, saldiIniziali, contiMap, contiCredito]);
+
+  // Crediti già presenti in contabilità (righe in DARE) ma non ancora classificati nel registro.
+  // Non tocchiamo la scrittura: la agganciamo soltanto tramite movId / scritturaId.
+  const daClassificare = useMemo(() => {
+    const linkedMov = new Set(crediti.map(c => c.movRilevazioneId).filter(Boolean));
+    const linkedScr = new Set(crediti.map(c => c.scritturaId).filter(Boolean));
+    return contab.righe
+      .filter(r => (r.dare || 0) > 0.005)
+      .filter(r => !(r.movId && linkedMov.has(r.movId)) && !(r.scritturaId && linkedScr.has(r.scritturaId)))
+      .map(r => ({ ...r, _rk: r.movId || `${r.scritturaId}_${r.codice}` }));
+  }, [contab.righe, crediti]);
+
+  // --- Derivati registro ---
+  const arricchiti = useMemo(() => crediti.map(c => {
+    const gg = c.stato === "riscosso" ? null : giorniA(c.scadenza);
+    let stadio = "ok";
+    if (c.stato === "riscosso") stadio = "riscosso";
+    else if (gg == null) stadio = "senza-scadenza";
+    else if (gg < 0) stadio = "scaduto";
+    else if (gg <= 30) stadio = "in-scadenza";
+    return { ...c, gg, stadio };
+  }).sort((a, b) => {
+    if (a.stato !== b.stato) return a.stato === "riscosso" ? 1 : -1;
+    return (a.scadenza || "9999").localeCompare(b.scadenza || "9999");
+  }), [crediti]);
+
+  const kpi = useMemo(() => {
+    const aperti = arricchiti.filter(c => c.stato !== "riscosso");
+    const tot = aperti.reduce((s, c) => s + (c.importo || 0), 0);
+    const scaduti = aperti.filter(c => c.stadio === "scaduto");
+    const inScad = aperti.filter(c => c.stadio === "in-scadenza");
+    const riscossi = arricchiti.filter(c => c.stato === "riscosso").reduce((s, c) => s + (c.importo || 0), 0);
+    // solo i crediti RILEVATI in contabilità impattano il conto 43
+    const apertiRilevati = aperti.filter(c => c.rilevato).reduce((s, c) => s + (c.importo || 0), 0);
+    const apertiNonRilevati = tot - apertiRilevati;
+    return {
+      tot, nAperti: aperti.length,
+      scaduti: scaduti.reduce((s, c) => s + (c.importo || 0), 0), nScaduti: scaduti.length,
+      inScad: inScad.reduce((s, c) => s + (c.importo || 0), 0), nInScad: inScad.length,
+      riscossi, apertiRilevati, apertiNonRilevati,
+      diff: contab.saldo - apertiRilevati,
+    };
+  }, [arricchiti, contab.saldo]);
+
+  const visibili = useMemo(() => {
+    if (filtro === "tutti") return arricchiti;
+    if (filtro === "riscossi") return arricchiti.filter(c => c.stato === "riscosso");
+    if (filtro === "scaduti") return arricchiti.filter(c => c.stadio === "scaduto");
+    return arricchiti.filter(c => c.stato !== "riscosso");
+  }, [arricchiti, filtro]);
+
+  // --- Azioni ---
+  const salva = async (data, key) => {
+    try {
+      const payload = {
+        cliente: (data.cliente || "").trim(),
+        descrizione: (data.descrizione || "").trim(),
+        importo: Math.round((Number(data.importo) || 0) * 100) / 100,
+        dataEmissione: data.dataEmissione || todayISO(),
+        scadenza: data.scadenza || null,
+        bu: data.bu || "GENERAL",
+        contoCredito: Number(data.contoCredito) || 43,
+        contoRicavo: Number(data.contoRicavo) || null,
+        note: (data.note || "").trim() || null,
+        stato: data.stato || "aperto",
+        rilevato: data.rilevato || false,
+        origine: data.origine || "manuale",
+        movRilevazioneId: data.movRilevazioneId || null,
+        scritturaId: data.scritturaId || null,
+        movIncassoId: data.movIncassoId || null,
+        dataIncasso: data.dataIncasso || null,
+        contoLiquiditaIncasso: data.contoLiquiditaIncasso || null,
+        creatoIl: data.creatoIl || new Date().toISOString(),
+        modificatoIl: new Date().toISOString(),
+      };
+      if (key) await db.ref(`stagioni/${stagione}/crediti/${key}`).update(payload);
+      else await db.ref(`stagioni/${stagione}/crediti`).push().set(payload);
+      onToast(key ? "Credito aggiornato" : "Credito aggiunto");
+      setEditing(null);
+    } catch (e) { onToast("Errore: " + e.message); }
+  };
+
+  // Rilevazione: DARE credito / AVERE ricavo (scrittura composta non monetaria)
+  const rileva = async (c) => {
+    if (!c.contoRicavo) { onToast("Imposta prima il conto di ricavo"); setEditing(c); return; }
+    const nomeCred = contiMap[c.contoCredito]?.nome?.trim() || c.contoCredito;
+    const nomeRic = contiMap[c.contoRicavo]?.nome?.trim() || c.contoRicavo;
+    if (!confirm(`Rilevare il credito in contabilità?\n\nDARE  ${nomeCred}  ${fmtEuro(c.importo)}\nAVERE ${nomeRic}  ${fmtEuro(c.importo)}\n\nData: ${fmtDate(c.dataEmissione)}`)) return;
+    try {
+      const scritturaId = "scr_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
+      const now = new Date().toISOString();
+      const comune = {
+        data: c.dataEmissione, contoLiquidita: null, contoLiquiditaDest: null,
+        categoria: "CREDITI", bu: c.bu || "GENERAL",
+        descrizione: `Credito ${c.cliente}${c.descrizione ? " · " + c.descrizione : ""}`,
+        mese: meseDaData(c.dataEmissione), nonMonetario: true,
+        scritturaComposta: true, scritturaId, importo: c.importo,
+        creatoIl: now, modificatoIl: now,
+      };
+      const updates = {};
+      const k1 = db.ref(`stagioni/${stagione}/movimenti`).push().key;
+      updates[k1] = { ...comune, tipo: "uscita", contoPdC: Number(c.contoCredito), dare: c.importo, avere: 0 };
+      const k2 = db.ref(`stagioni/${stagione}/movimenti`).push().key;
+      updates[k2] = { ...comune, tipo: "entrata", contoPdC: Number(c.contoRicavo), dare: 0, avere: c.importo };
+      await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+      await db.ref(`stagioni/${stagione}/crediti/${c._key}`).update({ rilevato: true, scritturaId, modificatoIl: now });
+      onToast("Credito rilevato in contabilità");
+    } catch (e) { onToast("Errore: " + e.message); }
+  };
+
+  // Incasso: DARE liquidità / AVERE credito (o ricavo se mai rilevato)
+  const incassa = async (c, dataIncasso, contoLiq) => {
+    const contropartita = c.rilevato ? Number(c.contoCredito) : Number(c.contoRicavo);
+    if (!contropartita) { onToast("Manca il conto di contropartita"); return; }
+    try {
+      const now = new Date().toISOString();
+      const mov = {
+        tipo: "entrata", data: dataIncasso, contoLiquidita: Number(contoLiq), contoLiquiditaDest: null,
+        contoPdC: contropartita, categoria: c.rilevato ? "INCASSO CREDITI" : "CREDITI",
+        bu: c.bu || "GENERAL", importo: c.importo,
+        descrizione: `Incasso credito ${c.cliente}${c.descrizione ? " · " + c.descrizione : ""}`,
+        mese: meseDaData(dataIncasso), nonMonetario: false, creatoIl: now, modificatoIl: now,
+      };
+      const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
+      await ref.set(mov);
+      await db.ref(`stagioni/${stagione}/crediti/${c._key}`).update({
+        stato: "riscosso", dataIncasso, contoLiquiditaIncasso: Number(contoLiq),
+        movIncassoId: ref.key, modificatoIl: now,
+      });
+      onToast("Incasso registrato");
+      setIncassando(null);
+    } catch (e) { onToast("Errore: " + e.message); }
+  };
+
+  const annullaIncasso = async (c) => {
+    if (!confirm(`Annullare l'incasso di "${c.cliente}"?\n\nIl movimento di incasso verrà eliminato e il credito tornerà aperto.`)) return;
+    try {
+      if (c.movIncassoId) await db.ref(`stagioni/${stagione}/movimenti/${c.movIncassoId}`).remove();
+      await db.ref(`stagioni/${stagione}/crediti/${c._key}`).update({
+        stato: "aperto", dataIncasso: null, contoLiquiditaIncasso: null, movIncassoId: null, modificatoIl: new Date().toISOString(),
+      });
+      onToast("Incasso annullato");
+    } catch (e) { onToast("Errore: " + e.message); }
+  };
+
+  const elimina = async (c) => {
+    const avvisi = [];
+    if (c.rilevato) avvisi.push("• la scrittura di rilevazione resterà in contabilità");
+    if (c.movIncassoId) avvisi.push("• il movimento di incasso resterà in contabilità");
+    if (!confirm(`Eliminare il credito "${c.cliente}" dal registro?${avvisi.length ? "\n\n" + avvisi.join("\n") : ""}`)) return;
+    await db.ref(`stagioni/${stagione}/crediti/${c._key}`).remove();
+    onToast("Credito eliminato dal registro");
+  };
+
+  function exportExcel() {
+    if (typeof XLSX === "undefined") { onToast("Libreria Excel non caricata"); return; }
+    const aoa = [
+      ["FUTSAL FABBRICO ASD — Registro Crediti", "", "", "", "", "", "", ""],
+      [`Stagione ${stagione}`, `Generato il ${new Date().toLocaleString("it-IT")}`],
+      [],
+      ["Cliente", "Descrizione", "Emissione", "Scadenza", "Importo", "Stato", "Rilevato", "BU", "Data incasso"],
+    ];
+    arricchiti.forEach(c => aoa.push([
+      c.cliente, c.descrizione || "", c.dataEmissione || "", c.scadenza || "",
+      c.importo || 0, c.stato === "riscosso" ? "Riscosso" : (c.stadio === "scaduto" ? "Scaduto" : "Aperto"),
+      c.rilevato ? "Sì" : "No", c.bu || "", c.dataIncasso || "",
+    ]));
+    aoa.push([]);
+    aoa.push(["Totale crediti aperti", "", "", "", kpi.tot]);
+    aoa.push(["di cui scaduti", "", "", "", kpi.scaduti]);
+    aoa.push(["Saldo contabile conti CREDITI", "", "", "", contab.saldo]);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 26 }, { wch: 34 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 9 }, { wch: 14 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Crediti");
+    XLSX.writeFile(wb, `Crediti_${stagione}.xlsx`);
+    onToast("Registro crediti esportato");
+  }
+
+  const badge = (c) => {
+    if (c.stato === "riscosso") return <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }}>riscosso</span>;
+    if (c.stadio === "scaduto") return <span className="pill" style={{ background: "#fbecec", borderColor: "#e2b8b8", color: "var(--danger)" }}>scaduto {Math.abs(c.gg)}g</span>;
+    if (c.stadio === "in-scadenza") return <span className="pill" style={{ background: "#fdf5e6", borderColor: "#e6d5a8", color: "#7a5a1d" }}>tra {c.gg}g</span>;
+    if (c.stadio === "senza-scadenza") return <span className="pill">senza scadenza</span>;
+    return <span className="pill">aperto</span>;
+  };
+
+  const quadra = Math.abs(kpi.diff) < 0.01;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Crediti</h2>
+          <div className="sub">Registro crediti v/clienti · scadenze, incassi e collegamento con la contabilità</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn ghost" onClick={exportExcel}>↧ Excel</button>
+          <button className="btn accent" onClick={() => setEditing({ nuovo: true, contoCredito: 43, dataEmissione: todayISO(), bu: "GENERAL" })}>+ Nuovo credito</button>
+        </div>
+      </div>
+
+      {/* KPI */}
+      <div className="kpi-grid">
+        <div className="kpi accent">
+          <div className="label">Crediti aperti</div>
+          <div className="value">{fmtEuro(kpi.tot)}</div>
+          <div className="hint">{kpi.nAperti} posizioni</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Scaduti</div>
+          <div className={"value" + (kpi.scaduti > 0 ? " neg" : "")}>{fmtEuro(kpi.scaduti)}</div>
+          <div className="hint">{kpi.nScaduti} posizioni</div>
+        </div>
+        <div className="kpi">
+          <div className="label">In scadenza (30 gg)</div>
+          <div className="value">{fmtEuro(kpi.inScad)}</div>
+          <div className="hint">{kpi.nInScad} posizioni</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Incassati nella stagione</div>
+          <div className="value">{fmtEuro(kpi.riscossi)}</div>
+          <div className="hint">totale riscosso</div>
+        </div>
+      </div>
+
+      {/* Riconciliazione con la contabilità */}
+      <div className="card" style={{
+        marginTop: 16, marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12,
+        borderColor: quadra ? "#c8d8ce" : "#e6d5a8", background: quadra ? "var(--accent-soft)" : "#fdf5e6"
+      }}>
+        <div>
+          <div style={{ fontWeight: 600 }}>Riconciliazione registro ↔ contabilità</div>
+          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 3 }}>
+            Saldo contabile conti CREDITI <b>{fmtEuro(contab.saldo)}</b> · registro rilevati e non incassati <b>{fmtEuro(kpi.apertiRilevati)}</b>
+            {kpi.apertiNonRilevati > 0.005 && <> · non ancora rilevati <b>{fmtEuro(kpi.apertiNonRilevati)}</b></>}
+          </div>
+          {contab.perConto.length > 0 && (
+            <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 4 }}>
+              {contab.perConto.map(c => `${String(c.codice).padStart(2, "0")} ${c.nome}: ${fmt(c.saldo)}`).join(" · ")}
+            </div>
+          )}
+        </div>
+        <div style={{ textAlign: "right", fontWeight: 700 }}>
+          {quadra
+            ? <span style={{ color: "var(--accent-ink)" }}>✓ Il registro quadra con il conto crediti</span>
+            : <span style={{ color: "#7a5a1d" }}>⚠ Differenza {fmtEuro(kpi.diff)}</span>}
+        </div>
+      </div>
+
+      {/* Crediti in contabilità non ancora classificati */}
+      {daClassificare.length > 0 && (
+        <div className="card" style={{ marginBottom: 16, background: "#fdf5e6", borderColor: "#e6d5a8" }}>
+          <h3 className="card-title" style={{ color: "#7a5a1d" }}>
+            Crediti in contabilità da classificare ({daClassificare.length})
+          </h3>
+          <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: "0 0 12px" }}>
+            Queste righe risultano già a bilancio sui conti crediti. Classificarle aggiunge controparte, scadenza e note nel registro
+            <b> senza modificare la scrittura contabile</b>. La scrittura di incasso la genererai dopo, quando vuoi.
+          </p>
+          <div className="tbl-wrap" style={{ background: "transparent" }}>
+            <table className="tbl" style={{ background: "transparent" }}>
+              <thead>
+                <tr>
+                  <th style={{ background: "transparent" }}>Data</th>
+                  <th style={{ background: "transparent" }}>Conto</th>
+                  <th style={{ background: "transparent" }}>Descrizione</th>
+                  <th style={{ background: "transparent" }}>BU</th>
+                  <th className="num" style={{ background: "transparent" }}>Importo</th>
+                  <th style={{ width: 120, background: "transparent" }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {daClassificare.map(r => (
+                  <tr key={r._rk}>
+                    <td>{fmtDate(r.data)}</td>
+                    <td className="mono" style={{ fontSize: 11.5 }}>{String(r.codice).padStart(2, "0")} {contiMap[r.codice]?.nome?.trim()}</td>
+                    <td style={{ fontSize: 12.5 }}>{r.descrizione}{r.apertura && <span className="pill" style={{ marginLeft: 6, fontSize: 9.5 }}>apertura</span>}</td>
+                    <td style={{ fontSize: 11.5 }}>{r.bu}</td>
+                    <td className="num" style={{ fontWeight: 600 }}>{fmt(r.dare)}</td>
+                    <td>
+                      <button className="btn accent sm" onClick={() => setEditing({
+                        nuovo: true, origine: "contabilita", rilevato: true,
+                        movRilevazioneId: r.movId || null, scritturaId: r.scritturaId || null,
+                        cliente: "", descrizione: r.descrizione || "",
+                        importo: r.dare, dataEmissione: r.data, scadenza: "",
+                        bu: r.bu || "GENERAL", contoCredito: r.codice, contoRicavo: "",
+                      })}>Classifica</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Filtri */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {[["aperti", "Aperti"], ["scaduti", "Scaduti"], ["riscossi", "Riscossi"], ["tutti", "Tutti"]].map(([k, label]) => (
+          <button key={k} className={"btn " + (filtro === k ? "accent" : "ghost")} style={{ padding: "5px 12px", fontSize: 12.5 }} onClick={() => setFiltro(k)}>{label}</button>
+        ))}
+      </div>
+
+      {/* Tabella registro */}
+      {visibili.length === 0 ? (
+        <div className="empty-state">Nessun credito {filtro === "tutti" ? "" : filtro} nel registro. Usa “+ Nuovo credito” per aggiungerne uno.</div>
+      ) : (
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Cliente</th>
+                <th>Descrizione</th>
+                <th>Emissione</th>
+                <th>Scadenza</th>
+                <th className="num">Importo</th>
+                <th>Stato</th>
+                <th>Contabilità</th>
+                <th>BU</th>
+                <th style={{ width: 190 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibili.map(c => (
+                <tr key={c._key} style={c.stadio === "scaduto" ? { background: "#fdf4f4" } : undefined}>
+                  <td style={{ fontWeight: 600 }}>{c.cliente}</td>
+                  <td style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{c.descrizione || "—"}</td>
+                  <td>{fmtDate(c.dataEmissione)}</td>
+                  <td>{c.scadenza ? fmtDate(c.scadenza) : "—"}</td>
+                  <td className="num" style={{ fontWeight: 600 }}>{fmt(c.importo)}</td>
+                  <td>{badge(c)}</td>
+                  <td style={{ fontSize: 11.5 }}>
+                    {c.rilevato
+                      ? <span style={{ color: "var(--accent-ink)" }}>{c.origine === "contabilita" ? "✓ da contabilità" : "✓ rilevato"}</span>
+                      : <span style={{ color: "var(--ink-3)" }}>solo registro</span>}
+                    {c.stato === "riscosso" && c.dataIncasso && <div style={{ color: "var(--ink-3)" }}>incasso {fmtDate(c.dataIncasso)}</div>}
+                  </td>
+                  <td style={{ fontSize: 11.5 }}>{c.bu}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {c.stato !== "riscosso" && !c.rilevato &&
+                        <button className="btn ghost sm" title="Crea la scrittura DARE credito / AVERE ricavo" onClick={() => rileva(c)}>Rileva</button>}
+                      {c.stato !== "riscosso" &&
+                        <button className="btn accent sm" onClick={() => setIncassando(c)}>Incassa</button>}
+                      {c.stato === "riscosso" &&
+                        <button className="btn ghost sm" onClick={() => annullaIncasso(c)}>Annulla incasso</button>}
+                      <button className="btn ghost sm" onClick={() => setEditing(c)}>✎</button>
+                      <button className="btn danger sm" onClick={() => elimina(c)}>🗑</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Movimenti contabili sui conti crediti */}
+      <details style={{ marginTop: 24 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--ink-2)", padding: "6px 0" }}>
+          Movimenti contabili sui conti CREDITI ({contab.righe.length}) · saldo {fmt(contab.saldo)}
+        </summary>
+        <div className="tbl-wrap" style={{ marginTop: 10, maxHeight: 420, overflowY: "auto" }}>
+          <table className="tbl">
+            <thead><tr><th>Data</th><th>Conto</th><th>Descrizione</th><th>BU</th><th className="num">Dare</th><th className="num">Avere</th></tr></thead>
+            <tbody>
+              {contab.righe.map((r, i) => (
+                <tr key={i}>
+                  <td>{fmtDate(r.data)}</td>
+                  <td className="mono" style={{ fontSize: 11.5 }}>{String(r.codice).padStart(2, "0")} {contiMap[r.codice]?.nome?.trim()}</td>
+                  <td style={{ fontSize: 12.5 }}>{r.descrizione}</td>
+                  <td style={{ fontSize: 11.5 }}>{r.bu}</td>
+                  <td className="num pos">{r.dare > 0 ? fmt(r.dare) : ""}</td>
+                  <td className="num neg">{r.avere > 0 ? fmt(r.avere) : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8, fontStyle: "italic" }}>
+          Il saldo in Dare rappresenta i crediti ancora da incassare secondo la contabilità. Se non coincide con il registro, un credito è stato incassato senza aggiornare il registro (o viceversa).
+        </div>
+      </details>
+
+      {editing && (
+        <div className="modal-bg" onClick={() => setEditing(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>{editing.nuovo ? "Nuovo credito" : `Modifica credito`}</h3>
+              <button className="btn ghost sm" onClick={() => setEditing(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <CreditoForm credito={editing} contiCredito={contiCredito} contiRicavo={contiRicavo} buList={buList}
+                onSave={(d) => salva(d, editing.nuovo ? null : editing._key)} onCancel={() => setEditing(null)} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {incassando && (
+        <div className="modal-bg" onClick={() => setIncassando(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Registra incasso</h3>
+              <button className="btn ghost sm" onClick={() => setIncassando(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <IncassoForm credito={incassando} contiMap={contiMap} onSave={(d, l) => incassa(incassando, d, l)} onCancel={() => setIncassando(null)} />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CreditoForm({ credito, contiCredito, contiRicavo, buList, onSave, onCancel }) {
+  const [f, setF] = useState({
+    cliente: credito.cliente || "",
+    descrizione: credito.descrizione || "",
+    importo: credito.importo || "",
+    dataEmissione: credito.dataEmissione || todayISO(),
+    scadenza: credito.scadenza || "",
+    bu: credito.bu || "GENERAL",
+    contoCredito: credito.contoCredito || 43,
+    contoRicavo: credito.contoRicavo || "",
+    note: credito.note || "",
+  });
+  const set = (k, v) => setF(s => ({ ...s, [k]: v }));
+  const submit = (e) => {
+    e.preventDefault();
+    if (!f.cliente.trim()) return alert("Il cliente è obbligatorio");
+    if (!(Number(f.importo) > 0)) return alert("Importo non valido");
+    onSave({ ...credito, ...f });
+  };
+  const bloccato = credito.rilevato;
+  return (
+    <form onSubmit={submit} className="form-grid">
+      <div className="form-row"><label>Cliente *</label>
+        <input type="text" value={f.cliente} onChange={e => set("cliente", e.target.value)} placeholder="es. Casa Olivari" required autoFocus /></div>
+      <div className="form-row"><label>Descrizione</label>
+        <input type="text" value={f.descrizione} onChange={e => set("descrizione", e.target.value)} placeholder="es. Sponsor 3ª tranche" /></div>
+      <div className="form-row"><label>Importo *</label>
+        <input type="number" step="0.01" min="0" value={f.importo} onChange={e => set("importo", e.target.value)} required disabled={bloccato} /></div>
+      <div className="form-row"><label>Data emissione</label>
+        <input type="date" value={f.dataEmissione} onChange={e => set("dataEmissione", e.target.value)} disabled={bloccato} /></div>
+      <div className="form-row"><label>Scadenza</label>
+        <input type="date" value={f.scadenza} onChange={e => set("scadenza", e.target.value)} /></div>
+      <div className="form-row"><label>Conto credito</label>
+        <select value={f.contoCredito} onChange={e => set("contoCredito", e.target.value)} disabled={bloccato}>
+          {contiCredito.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
+        </select></div>
+      <div className="form-row"><label>Conto ricavo (contropartita)</label>
+        <select value={f.contoRicavo} onChange={e => set("contoRicavo", e.target.value)} disabled={bloccato}>
+          <option value="">— scegli —</option>
+          {contiRicavo.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
+        </select></div>
+      <div className="form-row"><label>Business Unit</label>
+        <select value={f.bu} onChange={e => set("bu", e.target.value)}>
+          {buList.map(b => <option key={b} value={b}>{b}</option>)}
+        </select></div>
+      <div className="form-row"><label>Note</label>
+        <input type="text" value={f.note} onChange={e => set("note", e.target.value)} /></div>
+      {bloccato && <div style={{ fontSize: 11.5, color: "#7a5a1d", background: "#fdf5e6", padding: "8px 10px", borderRadius: 6 }}>
+        {credito.origine === "contabilita"
+          ? <>Questo credito esiste già in contabilità: <b>la scrittura non viene toccata</b>. Qui classifichi solo controparte, scadenza, BU e note. L'incasso lo registrerai dopo, dal registro.</>
+          : <>Il credito è già rilevato in contabilità: importo, data e conti non sono modificabili. Elimina la scrittura dai Movimenti se devi correggerli.</>}
+      </div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
+        <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
+        <button type="submit" className="btn accent">Salva</button>
+      </div>
+    </form>
+  );
+}
+
+function IncassoForm({ credito, contiMap, onSave, onCancel }) {
+  const [data, setData] = useState(todayISO());
+  const [liq, setLiq] = useState(1);
+  const submit = (e) => { e.preventDefault(); if (!liq) return alert("Scegli il conto di liquidità"); onSave(data, liq); };
+  const contro = credito.rilevato ? credito.contoCredito : credito.contoRicavo;
+  const nomeContro = contiMap[contro]?.nome?.trim() || "—";
+  return (
+    <form onSubmit={submit} className="form-grid">
+      <div style={{ fontSize: 13, color: "var(--ink-2)" }}>
+        <b>{credito.cliente}</b> · {fmtEuro(credito.importo)}
+        {credito.descrizione && <div style={{ fontSize: 12, color: "var(--ink-3)" }}>{credito.descrizione}</div>}
+      </div>
+      <div className="form-row"><label>Data incasso</label>
+        <input type="date" value={data} onChange={e => setData(e.target.value)} required /></div>
+      <div className="form-row"><label>Conto di accredito</label>
+        <select value={liq} onChange={e => setLiq(Number(e.target.value))}>
+          {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
+        </select></div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-2)", background: "var(--panel-2)", padding: "8px 10px", borderRadius: 6 }}>
+        Scrittura generata: <b>DARE</b> {contiMap[liq]?.nome?.trim()} · <b>AVERE</b> {nomeContro}
+        {!credito.rilevato && <div style={{ marginTop: 4, color: "var(--ink-3)" }}>Il credito non è stato rilevato: l'incasso va direttamente al conto di ricavo.</div>}
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
+        <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
+        <button type="submit" className="btn accent">Registra incasso</button>
+      </div>
+    </form>
+  );
+}
+
 function App() {
   const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
   const [stagione, setStagione] = useState(STAGIONE_DEFAULT);
@@ -9529,6 +10109,7 @@ function App() {
 
           <div className="section-label">Gestione</div>
           <button className={"navlink " + (page==="cespiti"?"active":"")} onClick={() => setPage("cespiti")}><span className="ico">▣</span> Cespiti</button>
+          <button className={"navlink " + (page==="crediti"?"active":"")} onClick={() => setPage("crediti")}><span className="ico">🧾</span> Crediti</button>
           <button className={"navlink " + (page==="ammortamenti"?"active":"")} onClick={() => setPage("ammortamenti")}><span className="ico">⊟</span> Ammortamenti</button>
           <button className={"navlink " + (page==="cassa"?"active":"")} onClick={() => setPage("cassa")}><span className="ico">💵</span> Composizione Cassa</button>
           <button className={"navlink " + (page==="iscrizioni"?"active":"")} onClick={() => setPage("iscrizioni")}><span className="ico">🧾</span> Iscrizioni TdP</button>
@@ -9547,6 +10128,7 @@ function App() {
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
               {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
+              {page === "crediti" && <PageCrediti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
               {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
