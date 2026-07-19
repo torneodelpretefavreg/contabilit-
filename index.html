@@ -10107,6 +10107,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     return {
       budRic, budCos, budRis: budRic - budCos, budFin,
       actRic, actCos, actRis: actRic - actCos, actFin,
+      // "budget effettivo" = importo inserito a mano + saldo già in contabilità (modalità senza confronto)
+      effRic: budRic + actRic, effCos: budCos + actCos, effRis: (budRic + actRic) - (budCos + actCos), effFin: budFin + actFin,
     };
   }, [attivo, consuntivo]);
 
@@ -10114,7 +10116,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   const nuovoBudget = () => {
     const nome = prompt("Nome del nuovo budget:", `Budget ${stagione}`);
     if (!nome) return;
-    setDraft({ nome: nome.trim(), bu: "ALL", note: "", voci: [], _key: null });
+    setDraft({ nome: nome.trim(), bu: "ALL", note: "", voci: [], confrontaConsuntivo: true, _key: null });
     setAttivoKey(null);
     setDirty(true);
   };
@@ -10143,6 +10145,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         nome: draft.nome.trim(),
         bu: draft.bu || "ALL",
         note: draft.note || "",
+        confrontaConsuntivo: draft.confrontaConsuntivo !== false,
         voci: (draft.voci || []).map(v => ({
           id: v.id, descrizione: v.descrizione || "", natura: v.natura || "costo",
           conti: (v.conti || []).map(Number), importo: Number(v.importo) || 0, note: v.note || "",
@@ -10182,29 +10185,38 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   function exportExcel() {
     if (typeof XLSX === "undefined" || !attivo) { onToast("Nessun budget aperto"); return; }
     const bBU = attivo.bu || "ALL";
+    const showA = attivo.confrontaConsuntivo !== false;
     const aoa = [
-      [`Budget: ${attivo.nome}`, "", "", "", ""],
-      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}`],
+      [`Budget: ${attivo.nome}`],
+      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${showA ? "" : " · budget = inserito + già contabilizzato"}`],
       [],
-      ["Voce", "Natura", "Conti", "Budget", "Consuntivo", "Scostamento"],
+      showA ? ["Voce", "Natura", "Conti", "Budget", "Consuntivo", "Scostamento"] : ["Voce", "Natura", "Conti", "Budget"],
     ];
     (attivo.voci || []).forEach(v => {
       const act = actualVoce(v, bBU);
       const bud = Number(v.importo) || 0;
-      const scost = v.natura === "costo" ? (bud - act) : (act - bud);
-      aoa.push([
-        v.descrizione, v.natura, (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", "),
-        bud, act, scost,
-      ]);
+      const contiStr = (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", ");
+      if (showA) {
+        const scost = v.natura === "costo" ? (bud - act) : (act - bud);
+        aoa.push([v.descrizione, v.natura, contiStr, bud, act, scost]);
+      } else {
+        aoa.push([v.descrizione, v.natura, contiStr, bud + act]);
+      }
     });
     if (totali) {
       aoa.push([]);
-      aoa.push(["TOTALE RICAVI", "", "", totali.budRic, totali.actRic, totali.actRic - totali.budRic]);
-      aoa.push(["TOTALE COSTI", "", "", totali.budCos, totali.actCos, totali.budCos - totali.actCos]);
-      aoa.push(["RISULTATO", "", "", totali.budRis, totali.actRis, totali.actRis - totali.budRis]);
+      if (showA) {
+        aoa.push(["TOTALE RICAVI", "", "", totali.budRic, totali.actRic, totali.actRic - totali.budRic]);
+        aoa.push(["TOTALE COSTI", "", "", totali.budCos, totali.actCos, totali.budCos - totali.actCos]);
+        aoa.push(["RISULTATO", "", "", totali.budRis, totali.actRis, totali.actRis - totali.budRis]);
+      } else {
+        aoa.push(["TOTALE RICAVI", "", "", totali.effRic]);
+        aoa.push(["TOTALE COSTI", "", "", totali.effCos]);
+        aoa.push(["RISULTATO", "", "", totali.effRis]);
+      }
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 30 }, { wch: 14 }, { wch: 34 }, { wch: 13 }, { wch: 13 }, { wch: 13 }];
+    ws["!cols"] = showA ? [{ wch: 30 }, { wch: 14 }, { wch: 34 }, { wch: 13 }, { wch: 13 }, { wch: 13 }] : [{ wch: 30 }, { wch: 14 }, { wch: 34 }, { wch: 15 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Budget");
     if (cashflow && cashflow.righe.length) {
@@ -10239,30 +10251,34 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 29, { align: "center" });
     doc.setTextColor(0);
 
+    const showA = attivo.confrontaConsuntivo !== false;
     const body = (attivo.voci || []).map(v => {
       const act = actualVoce(v, bBU);
       const bud = Number(v.importo) || 0;
-      const scost = v.natura === "costo" ? (bud - act) : (act - bud);
-      return [
-        v.descrizione || "—",
-        { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." }[v.natura] || v.natura,
-        v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—",
-        bud.toFixed(2), act.toFixed(2), Math.abs(act) < 0.005 ? "—" : scost.toFixed(2),
-      ];
+      const natura = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." }[v.natura] || v.natura;
+      const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—";
+      if (showA) {
+        const scost = v.natura === "costo" ? (bud - act) : (act - bud);
+        return [v.descrizione || "—", natura, cassa, bud.toFixed(2), act.toFixed(2), Math.abs(act) < 0.005 ? "—" : scost.toFixed(2)];
+      }
+      return [v.descrizione || "—", natura, cassa, (bud + act).toFixed(2)];
     });
-    if (totali) body.push([
+    if (totali) body.push(showA ? [
       { content: "RISULTATO (ricavi - costi)", colSpan: 3, styles: { fontStyle: "bold" } },
       { content: totali.budRis.toFixed(2), styles: { fontStyle: "bold" } },
       { content: totali.actRis.toFixed(2), styles: { fontStyle: "bold" } },
       { content: (totali.actRis - totali.budRis).toFixed(2), styles: { fontStyle: "bold" } },
+    ] : [
+      { content: "RISULTATO (ricavi - costi)", colSpan: 3, styles: { fontStyle: "bold" } },
+      { content: totali.effRis.toFixed(2), styles: { fontStyle: "bold" } },
     ]);
     doc.autoTable({
       startY: 36,
-      head: [["Voce", "Natura", "Cassa", "Budget", "Consuntivo", "Scostam."]],
+      head: [showA ? ["Voce", "Natura", "Cassa", "Budget", "Consuntivo", "Scostam."] : ["Voce", "Natura", "Cassa", "Budget"]],
       body,
       styles: { fontSize: 8.5, cellPadding: 1.6 },
       headStyles: { fillColor: [26, 26, 26], textColor: 240 },
-      columnStyles: { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
+      columnStyles: showA ? { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } } : { 3: { halign: "right" } },
     });
 
     if (cashflow && cashflow.righe.length) {
@@ -10307,6 +10323,11 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const altri = contiEconomici.filter(c => !coerente(c));
     return [...primari, ...(altri.length ? [{ _sep: true }] : []), ...altri];
   };
+
+  // Confronto col consuntivo attivabile per singolo budget/scenario.
+  // Se OFF: niente colonne Consuntivo/Scostamento e il saldo già in contabilità
+  // viene SOMMATO all'importo inserito (budget = inserito + già contabilizzato).
+  const showAct = attivo ? (attivo.confrontaConsuntivo !== false) : true;
 
   return (
     <div>
@@ -10363,6 +10384,15 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                 {buList.map(b => <option key={b} value={b}>{b}</option>)}
               </select>
             </div>
+            <div>
+              <label style={{ display: "block", fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", marginBottom: 5 }} title="Sì: confronta il budget con il consuntivo (scostamento). No: il saldo già in contabilità viene sommato all'importo inserito.">Confronto consuntivo</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button type="button" className={"btn " + (showAct ? "accent" : "ghost")} style={{ padding: "6px 16px" }}
+                  onClick={() => { setDraft(d => ({ ...d, confrontaConsuntivo: true })); setDirty(true); }}>Sì</button>
+                <button type="button" className={"btn " + (!showAct ? "accent" : "ghost")} style={{ padding: "6px 16px" }}
+                  onClick={() => { setDraft(d => ({ ...d, confrontaConsuntivo: false })); setDirty(true); }}>No</button>
+              </div>
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn accent" onClick={salva} disabled={!dirty}>{dirty ? "Salva" : "Salvato"}</button>
               <button className="btn ghost" onClick={() => duplica(attivo)}>Duplica scenario</button>
@@ -10374,24 +10404,32 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
             <div className="kpi-grid" style={{ marginBottom: 16 }}>
               <div className="kpi">
                 <div className="label">Ricavi — Budget</div>
-                <div className="value" style={{ color: "var(--accent)" }}>{fmtEuro(totali.budRic)}</div>
-                <div className="hint">Consuntivo {fmtEuro(totali.actRic)}</div>
+                <div className="value" style={{ color: "var(--accent)" }}>{fmtEuro(showAct ? totali.budRic : totali.effRic)}</div>
+                <div className="hint">{showAct ? `Consuntivo ${fmtEuro(totali.actRic)}` : `di cui ${fmtEuro(totali.actRic)} già in contab.`}</div>
               </div>
               <div className="kpi">
                 <div className="label">Costi — Budget</div>
-                <div className="value" style={{ color: "var(--danger)" }}>{fmtEuro(totali.budCos)}</div>
-                <div className="hint">Consuntivo {fmtEuro(totali.actCos)}</div>
+                <div className="value" style={{ color: "var(--danger)" }}>{fmtEuro(showAct ? totali.budCos : totali.effCos)}</div>
+                <div className="hint">{showAct ? `Consuntivo ${fmtEuro(totali.actCos)}` : `di cui ${fmtEuro(totali.actCos)} già in contab.`}</div>
               </div>
               <div className="kpi accent">
                 <div className="label">Risultato — Budget</div>
-                <div className={"value" + (totali.budRis < 0 ? " neg" : "")}>{fmtEuro(totali.budRis)}</div>
-                <div className="hint">Consuntivo {fmtEuro(totali.actRis)}</div>
+                <div className={"value" + ((showAct ? totali.budRis : totali.effRis) < 0 ? " neg" : "")}>{fmtEuro(showAct ? totali.budRis : totali.effRis)}</div>
+                <div className="hint">{showAct ? `Consuntivo ${fmtEuro(totali.actRis)}` : `di cui ${fmtEuro(totali.actRis)} già in contab.`}</div>
               </div>
-              <div className="kpi">
-                <div className="label">Scostamento risultato</div>
-                <div className={"value" + ((totali.actRis - totali.budRis) < 0 ? " neg" : "")}>{fmtEuro(totali.actRis - totali.budRis)}</div>
-                <div className="hint">consuntivo − budget</div>
-              </div>
+              {showAct ? (
+                <div className="kpi">
+                  <div className="label">Scostamento risultato</div>
+                  <div className={"value" + ((totali.actRis - totali.budRis) < 0 ? " neg" : "")}>{fmtEuro(totali.actRis - totali.budRis)}</div>
+                  <div className="hint">consuntivo − budget</div>
+                </div>
+              ) : (
+                <div className="kpi">
+                  <div className="label">Da aggiungere</div>
+                  <div className={"value" + (totali.budRis < 0 ? " neg" : "")}>{fmtEuro(totali.budRis)}</div>
+                  <div className="hint">inserito a mano</div>
+                </div>
+              )}
             </div>
           )}
 
@@ -10487,9 +10525,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     <th style={{ width: 130 }}>Natura</th>
                     <th style={{ minWidth: 200 }}>Conti collegati</th>
                     <th style={{ width: 130 }} title="Conto di liquidità impattato: serve per il piano di cassa">Cassa</th>
-                    <th className="num" style={{ width: 120 }}>Budget</th>
-                    <th className="num" style={{ width: 120 }}>Consuntivo</th>
-                    <th className="num" style={{ width: 120 }} title="Scostamento favorevole: positivo = va bene (ricavo sopra target o costo sotto budget)">Scostam.</th>
+                    <th className="num" style={{ width: 150 }}>Budget</th>
+                    {showAct && <th className="num" style={{ width: 120 }}>Consuntivo</th>}
+                    {showAct && <th className="num" style={{ width: 120 }} title="Scostamento favorevole: positivo = va bene (ricavo sopra target o costo sotto budget)">Scostam.</th>}
                     <th style={{ width: 40 }}></th>
                   </tr>
                 </thead>
@@ -10544,9 +10582,14 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                         </td>
                         <td className="num">
                           <input type="number" step="0.01" value={v.importo} onChange={e => setVoce(v.id, "importo", e.target.value)} style={{ width: 100, textAlign: "right" }} />
+                          {!showAct && hasAct && (
+                            <div style={{ fontSize: 10.5, color: "var(--ink-3)", marginTop: 3, whiteSpace: "nowrap" }}>
+                              + {fmt(act)} in contab. → <b>{fmt(bud + act)}</b>
+                            </div>
+                          )}
                         </td>
-                        <td className="num" style={{ fontWeight: 600 }}>{fmt(act)}</td>
-                        <td className={"num " + (!hasAct ? "" : scost < -0.005 ? "neg" : scost > 0.005 ? "pos" : "")}>{hasAct ? fmt(scost) : "—"}</td>
+                        {showAct && <td className="num" style={{ fontWeight: 600 }}>{fmt(act)}</td>}
+                        {showAct && <td className={"num " + (!hasAct ? "" : scost < -0.005 ? "neg" : scost > 0.005 ? "pos" : "")}>{hasAct ? fmt(scost) : "—"}</td>}
                         <td><button className="btn ghost sm" onClick={() => delVoce(v.id)}>✕</button></td>
                       </tr>
                     );
@@ -10554,9 +10597,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                   {totali && (
                     <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
                       <td colSpan={4} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
-                      <td className="num">{fmt(totali.budRis)}</td>
-                      <td className="num">{fmt(totali.actRis)}</td>
-                      <td className={"num " + ((totali.actRis - totali.budRis) < 0 ? "neg" : "pos")}>{fmt(totali.actRis - totali.budRis)}</td>
+                      <td className="num">{fmt(showAct ? totali.budRis : totali.effRis)}</td>
+                      {showAct && <td className="num">{fmt(totali.actRis)}</td>}
+                      {showAct && <td className={"num " + ((totali.actRis - totali.budRis) < 0 ? "neg" : "pos")}>{fmt(totali.actRis - totali.budRis)}</td>}
                       <td></td>
                     </tr>
                   )}
@@ -10619,8 +10662,13 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           )}
 
           <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 10, fontStyle: "italic" }}>
-            Il Consuntivo è calcolato dal libro giornale in partita doppia sui conti che agganci a ogni voce
-            {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"}. Lo Scostamento è <b>favorevole</b>: positivo (verde) quando un ricavo supera il target o un costo resta sotto budget; è neutro (—) finché non c'è consuntivo. Le voci "Patrimoniale/Fin." usano i conti dello Stato Patrimoniale. Per creare uno scenario, duplica il budget e cambia i valori.
+            {showAct ? (
+              <>Il Consuntivo è calcolato dal libro giornale in partita doppia sui conti che agganci a ogni voce
+              {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"}. Lo Scostamento è <b>favorevole</b>: positivo (verde) quando un ricavo supera il target o un costo resta sotto budget; è neutro (—) finché non c'è consuntivo. Le voci "Patrimoniale/Fin." usano i conti dello Stato Patrimoniale. Per creare uno scenario, duplica il budget e cambia i valori.</>
+            ) : (
+              <>Confronto col consuntivo <b>disattivato</b>: il Budget di ogni voce è la somma che inserisci a mano <b>più</b> il saldo già presente in contabilità sui conti agganciati
+              {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"} — cioè <b>budget = inserito + già contabilizzato</b>. Attiva “Confronto consuntivo → Sì” per tornare al confronto Budget vs Consuntivo con scostamento.</>
+            )}
           </div>
         </>
       )}
