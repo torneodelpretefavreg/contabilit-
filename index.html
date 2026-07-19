@@ -9899,11 +9899,15 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   // consuntivo di una voce (somma dei conti agganciati, con segno per natura), filtrato per BU del budget
   const actualVoce = (voce, budgetBU) => {
     let val = 0;
+    // I conti patrimoniali (Stato Patrimoniale: banche, cassa, crediti, debiti, fondi…)
+    // NON si dividono per Business Unit: il saldo è totale e include il bilancio di apertura.
+    // Solo i conti economici (ricavo/costo) si filtrano per BU.
+    const isPatr = voce.natura === "patrimoniale";
     (voce.conti || []).forEach(cod => {
       const c = contiMap[cod];
       if (!c) return;
       let dare, avere;
-      if (budgetBU && budgetBU !== "ALL") {
+      if (!isPatr && budgetBU && budgetBU !== "ALL") {
         const k = `${cod}|${budgetBU}`;
         dare = consuntivo.perContoBU[k]?.dare || 0;
         avere = consuntivo.perContoBU[k]?.avere || 0;
@@ -9931,6 +9935,12 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         const cod = Number(codStr);
         if (!perCod[cod]) perCod[cod] = { dare: 0, avere: 0 };
         perCod[cod].dare += v.dare; perCod[cod].avere += v.avere;
+      });
+      // I conti patrimoniali (SP) non si dividono per BU: uso il saldo TOTALE
+      // (che include il bilancio di apertura), altrimenti banche/cassa uscirebbero negativi.
+      Object.entries(consuntivo.perConto).forEach(([codStr, v]) => {
+        const cod = Number(codStr);
+        if (contiMap[cod] && contiMap[cod].prospetto === "SP") perCod[cod] = { dare: v.dare, avere: v.avere };
       });
     } else {
       Object.entries(consuntivo.perConto).forEach(([codStr, v]) => {
