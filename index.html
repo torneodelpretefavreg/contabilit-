@@ -8746,11 +8746,46 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
     return {
       mastrini, totD, totA, ceRicavi, ceCosti, totRicavi, totCosti, utile,
       attivo, passivo, totAttivo, totPassivo, liquidita, rf, liqDash, liqTot,
+      scritture: scr, movsBU, monthsIn,
     };
   }, [mese, modo, buFilter, movimenti, saldiIniziali, contiMap, conti, investSet]);
 
   const contesto = `${meseCap(mese)} ${stagione} · ${modoLabel} · ${buLabel}`;
   const quadra = Math.abs(dati.totD - dati.totA) < 0.01;
+
+  // ---- Dettaglio voce (pop-up con i movimenti che compongono il saldo) ----
+  const [dettaglio, setDettaglio] = useState(null);
+  const investCat = (cat) => (investSet && investSet.size > 0) ? investSet.has(cat) : String(cat || "").toUpperCase() === "INVESTIMENTI";
+
+  const apriConto = (cod, titolo, verso) => {
+    // verso: 'ricavo' -> valore = avere-dare ; altrimenti dare-avere
+    const righe = [];
+    (dati.scritture || []).forEach(s => (s.righe || []).forEach(r => {
+      if (r.codice !== cod) return;
+      if (Math.abs(r.dare) < 0.005 && Math.abs(r.avere) < 0.005) return;
+      const contro = (s.righe || []).filter(x => x.codice !== cod).map(x => contiMap[x.codice]?.nome?.trim() || x.codice).join(", ");
+      righe.push({ data: s.data, descrizione: s.descrizione || s.categoria || "", bu: s.bu || "", dare: r.dare || 0, avere: r.avere || 0, contro });
+    }));
+    righe.sort((a, b) => (a.data || "").localeCompare(b.data || ""));
+    const tot = righe.reduce((s, r) => s + (verso === "ricavo" ? (r.avere - r.dare) : (r.dare - r.avere)), 0);
+    setDettaglio({ kind: "conto", titolo, verso, righe, tot });
+  };
+
+  const apriRF = (cat, bucket, titolo) => {
+    const isEnt = bucket === "entrate";
+    const righe = (dati.movsBU || []).filter(m =>
+      !m.nonMonetario &&
+      (m.categoria || "(senza categoria)") === cat &&
+      (dati.monthsIn || []).includes(m.mese || meseDaData(m.data)) &&
+      (isEnt ? m.tipo === "entrata" : (m.tipo === "uscita" && (bucket === "invest" ? investCat(m.categoria) : !investCat(m.categoria))))
+    ).map(m => ({
+      data: m.data, descrizione: m.descrizione || "", bu: m.bu || "",
+      liq: contiMap[m.contoLiquidita]?.nome?.trim() || "—", importo: m.importo || 0,
+      contro: contiMap[m.contoPdC]?.nome?.trim() || "",
+    })).sort((a, b) => (a.data || "").localeCompare(b.data || ""));
+    const tot = righe.reduce((s, r) => s + r.importo, 0);
+    setDettaglio({ kind: "rf", titolo, righe, tot });
+  };
 
   // ===================== EXPORT: builders di righe (aoa) =====================
   const ceAoa = () => {
@@ -9036,7 +9071,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
           <table className="tbl">
             <thead><tr><th>Ricavi</th><th className="num">Importo</th></tr></thead>
             <tbody>
-              {dati.ceRicavi.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}</td><td className="num">{fmt(m.val)}</td></tr>)}
+              {dati.ceRicavi.map(m => <tr key={m.codice} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriConto(m.codice, `${String(m.codice).padStart(2,"0")} ${m.nome.trim()}`, "ricavo")}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}</td><td className="num">{fmt(m.val)}</td></tr>)}
               <tr style={{ fontWeight:700, background:"var(--accent-soft)" }}><td>Totale Ricavi</td><td className="num">{fmt(dati.totRicavi)}</td></tr>
             </tbody>
           </table>
@@ -9045,7 +9080,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
           <table className="tbl">
             <thead><tr><th>Costi</th><th className="num">Importo</th></tr></thead>
             <tbody>
-              {dati.ceCosti.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}</td><td className="num">{fmt(m.val)}</td></tr>)}
+              {dati.ceCosti.map(m => <tr key={m.codice} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriConto(m.codice, `${String(m.codice).padStart(2,"0")} ${m.nome.trim()}`, "costo")}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}</td><td className="num">{fmt(m.val)}</td></tr>)}
               <tr style={{ fontWeight:700, background:"var(--danger-soft)" }}><td>Totale Costi</td><td className="num">{fmt(dati.totCosti)}</td></tr>
             </tbody>
           </table>
@@ -9069,7 +9104,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
           <table className="tbl">
             <thead><tr><th>Attivo</th><th className="num">Importo</th></tr></thead>
             <tbody>
-              {dati.attivo.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}<div style={{ fontSize:10.5, color:"var(--ink-3)" }}>{m.categoria}</div></td><td className="num">{fmt(m.val)}</td></tr>)}
+              {dati.attivo.map(m => <tr key={m.codice} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriConto(m.codice, `${String(m.codice).padStart(2,"0")} ${m.nome.trim()}`, "attivo")}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}<div style={{ fontSize:10.5, color:"var(--ink-3)" }}>{m.categoria}</div></td><td className="num">{fmt(m.val)}</td></tr>)}
               <tr style={{ fontWeight:700, background:"var(--panel-2)" }}><td>Totale Attivo</td><td className="num">{fmt(dati.totAttivo)}</td></tr>
             </tbody>
           </table>
@@ -9078,7 +9113,7 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
           <table className="tbl">
             <thead><tr><th>Passivo e Netto</th><th className="num">Importo</th></tr></thead>
             <tbody>
-              {dati.passivo.map(m => <tr key={m.codice}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}<div style={{ fontSize:10.5, color:"var(--ink-3)" }}>{m.categoria}</div></td><td className="num">{fmt(m.val)}</td></tr>)}
+              {dati.passivo.map(m => <tr key={m.codice} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriConto(m.codice, `${String(m.codice).padStart(2,"0")} ${m.nome.trim()}`, "passivo")}><td><span style={{ fontSize:11, color:"var(--ink-3)" }}>{String(m.codice).padStart(2,"0")}</span> {m.nome.trim()}<div style={{ fontSize:10.5, color:"var(--ink-3)" }}>{m.categoria}</div></td><td className="num">{fmt(m.val)}</td></tr>)}
               <tr><td style={{ fontStyle:"italic" }}>{dati.utile >= 0 ? "Risultato d'esercizio (utile)" : "Risultato d'esercizio (perdita)"}</td><td className="num">{fmt(dati.utile)}</td></tr>
               <tr style={{ fontWeight:700, background:"var(--panel-2)" }}><td>Totale Passivo e Netto</td><td className="num">{fmt(dati.totPassivo + dati.utile)}</td></tr>
             </tbody>
@@ -9099,15 +9134,15 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
           <tbody>
             <tr style={{ fontWeight:600 }}><td>Disponibilità iniziali</td><td className="num">{fmt(dati.rf.dispIniz)}</td></tr>
             <tr style={{ background:"var(--accent-soft)" }}><td colSpan={2} style={{ fontWeight:600 }}>Entrate operative</td></tr>
-            {Object.keys(dati.rf.entrate).sort().map(c => <tr key={"e"+c}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.entrate[c])}</td></tr>)}
+            {Object.keys(dati.rf.entrate).sort().map(c => <tr key={"e"+c} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriRF(c, "entrate", c)}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.entrate[c])}</td></tr>)}
             <tr style={{ fontWeight:600 }}><td>Totale entrate operative (A)</td><td className="num">{fmt(dati.rf.totEntrate)}</td></tr>
             <tr style={{ background:"var(--danger-soft)" }}><td colSpan={2} style={{ fontWeight:600 }}>Uscite operative</td></tr>
-            {Object.keys(dati.rf.uscite).sort().map(c => <tr key={"u"+c}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.uscite[c])}</td></tr>)}
+            {Object.keys(dati.rf.uscite).sort().map(c => <tr key={"u"+c} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriRF(c, "uscite", c)}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.uscite[c])}</td></tr>)}
             <tr style={{ fontWeight:600 }}><td>Totale uscite operative (B)</td><td className="num">{fmt(dati.rf.totUscite)}</td></tr>
             <tr style={{ fontWeight:600, background:"var(--panel-2)" }}><td>Saldo operativo (A − B)</td><td className={"num " + signCol(dati.rf.saldoOp)}>{fmt(dati.rf.saldoOp)}</td></tr>
             {Object.keys(dati.rf.invest).length > 0 && <>
               <tr style={{ background:"#f4ebd7" }}><td colSpan={2} style={{ fontWeight:600 }}>Investimenti</td></tr>
-              {Object.keys(dati.rf.invest).sort().map(c => <tr key={"i"+c}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.invest[c])}</td></tr>)}
+              {Object.keys(dati.rf.invest).sort().map(c => <tr key={"i"+c} style={{ cursor:"pointer" }} title="Vedi i movimenti" onClick={() => apriRF(c, "invest", c)}><td style={{ paddingLeft:20 }}>{c}</td><td className="num">{fmt(dati.rf.invest[c])}</td></tr>)}
               <tr style={{ fontWeight:600 }}><td>Totale investimenti</td><td className="num">{fmt(dati.rf.totInvest)}</td></tr>
             </>}
             <tr style={{ fontWeight:700, borderTop:"2px solid var(--ink)", background:"var(--ink)", color:"#f0eee7" }}><td>Disponibilità finali</td><td className="num" style={{ color:"#f0eee7" }}>{fmt(dati.rf.dispFin)}</td></tr>
@@ -9147,6 +9182,68 @@ function PageChiusuraMensile({ conti, movimenti, saldiIniziali, stagione, bu, ca
           </table>
         </div>
       </details>
+
+      {dettaglio && (
+        <div className="modal-bg" onClick={() => setDettaglio(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 720, width: "94%" }}>
+            <div className="modal-head">
+              <h3>{dettaglio.titolo} <span style={{ fontSize: 12, fontWeight: 400, color: "var(--ink-3)" }}>· {contesto}</span></h3>
+              <button className="btn ghost sm" onClick={() => setDettaglio(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {dettaglio.righe.length === 0 ? (
+                <div className="empty-state">Nessun movimento per questa voce nel periodo selezionato.</div>
+              ) : (
+                <div className="tbl-wrap" style={{ maxHeight: "60vh", overflowY: "auto" }}>
+                  <table className="tbl">
+                    {dettaglio.kind === "conto" ? (
+                      <>
+                        <thead><tr><th>Data</th><th>Descrizione</th><th>Contropartita</th><th>BU</th><th className="num">Dare</th><th className="num">Avere</th></tr></thead>
+                        <tbody>
+                          {dettaglio.righe.map((r, i) => (
+                            <tr key={i}>
+                              <td>{fmtDate(r.data)}</td>
+                              <td style={{ fontSize: 12.5 }}>{r.descrizione || "—"}</td>
+                              <td style={{ fontSize: 11.5, color: "var(--ink-2)" }}>{r.contro || "—"}</td>
+                              <td style={{ fontSize: 11.5 }}>{r.bu}</td>
+                              <td className="num pos">{r.dare > 0 ? fmt(r.dare) : ""}</td>
+                              <td className="num neg">{r.avere > 0 ? fmt(r.avere) : ""}</td>
+                            </tr>
+                          ))}
+                          <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                            <td colSpan={4}>TOTALE ({dettaglio.righe.length} righe)</td>
+                            <td className="num" colSpan={2} style={{ textAlign: "right" }}>{fmtEuro(dettaglio.tot)}</td>
+                          </tr>
+                        </tbody>
+                      </>
+                    ) : (
+                      <>
+                        <thead><tr><th>Data</th><th>Descrizione</th><th>Conto</th><th>Liquidità</th><th>BU</th><th className="num">Importo</th></tr></thead>
+                        <tbody>
+                          {dettaglio.righe.map((r, i) => (
+                            <tr key={i}>
+                              <td>{fmtDate(r.data)}</td>
+                              <td style={{ fontSize: 12.5 }}>{r.descrizione || "—"}</td>
+                              <td style={{ fontSize: 11.5, color: "var(--ink-2)" }}>{r.contro || "—"}</td>
+                              <td style={{ fontSize: 11.5 }}>{r.liq}</td>
+                              <td style={{ fontSize: 11.5 }}>{r.bu}</td>
+                              <td className="num" style={{ fontWeight: 600 }}>{fmt(r.importo)}</td>
+                            </tr>
+                          ))}
+                          <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                            <td colSpan={5}>TOTALE ({dettaglio.righe.length} movimenti)</td>
+                            <td className="num">{fmtEuro(dettaglio.tot)}</td>
+                          </tr>
+                        </tbody>
+                      </>
+                    )}
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
