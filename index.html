@@ -10066,6 +10066,32 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     });
   };
 
+  // Piano di cassa (cash flow plan): per ogni conto liquidità, entrate/uscite previste (budget)
+  // e reali (consuntivo), in base al conto liquidità associato a ciascuna voce.
+  const cashflow = useMemo(() => {
+    if (!attivo) return null;
+    const bBU = attivo.bu || "ALL";
+    const perLiq = {}; // codice -> {inBud,outBud,inAct,outAct}
+    CONTI_LIQUIDITA.forEach(c => { perLiq[c.codice] = { codice: c.codice, nome: c.nome, inBud: 0, outBud: 0, inAct: 0, outAct: 0 }; });
+    let senzaCassa = 0;
+    (attivo.voci || []).forEach(v => {
+      if (v.natura === "patrimoniale") return;
+      const cod = v.contoLiquidita ? Number(v.contoLiquidita) : null;
+      const bud = Number(v.importo) || 0;
+      const act = actualVoce(v, bBU);
+      if (!cod || !perLiq[cod]) { if (bud) senzaCassa += bud; return; }
+      if (v.natura === "ricavo") { perLiq[cod].inBud += bud; perLiq[cod].inAct += act; }
+      else { perLiq[cod].outBud += bud; perLiq[cod].outAct += act; }
+    });
+    const righe = Object.values(perLiq)
+      .map(r => ({ ...r, nettoBud: r.inBud - r.outBud, nettoAct: r.inAct - r.outAct }))
+      .filter(r => Math.abs(r.inBud) > 0.005 || Math.abs(r.outBud) > 0.005 || Math.abs(r.inAct) > 0.005 || Math.abs(r.outAct) > 0.005);
+    const tot = righe.reduce((a, r) => ({
+      inBud: a.inBud + r.inBud, outBud: a.outBud + r.outBud, inAct: a.inAct + r.inAct, outAct: a.outAct + r.outAct,
+    }), { inBud: 0, outBud: 0, inAct: 0, outAct: 0 });
+    return { righe, tot, senzaCassa, nettoBud: tot.inBud - tot.outBud, nettoAct: tot.inAct - tot.outAct };
+  }, [attivo, consuntivo]);
+
   const totali = useMemo(() => {
     if (!attivo) return null;
     const bBU = attivo.bu || "ALL";
@@ -10119,6 +10145,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         voci: (draft.voci || []).map(v => ({
           id: v.id, descrizione: v.descrizione || "", natura: v.natura || "costo",
           conti: (v.conti || []).map(Number), importo: Number(v.importo) || 0, note: v.note || "",
+          contoLiquidita: v.contoLiquidita ? Number(v.contoLiquidita) : null,
         })),
         modificatoIl: new Date().toISOString(),
         creatoIl: draft.creatoIl || new Date().toISOString(),
@@ -10162,23 +10189,112 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     ];
     (attivo.voci || []).forEach(v => {
       const act = actualVoce(v, bBU);
+      const bud = Number(v.importo) || 0;
+      const scost = v.natura === "costo" ? (bud - act) : (act - bud);
       aoa.push([
         v.descrizione, v.natura, (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", "),
-        Number(v.importo) || 0, act, act - (Number(v.importo) || 0),
+        bud, act, scost,
       ]);
     });
     if (totali) {
       aoa.push([]);
       aoa.push(["TOTALE RICAVI", "", "", totali.budRic, totali.actRic, totali.actRic - totali.budRic]);
-      aoa.push(["TOTALE COSTI", "", "", totali.budCos, totali.actCos, totali.actCos - totali.budCos]);
+      aoa.push(["TOTALE COSTI", "", "", totali.budCos, totali.actCos, totali.budCos - totali.actCos]);
       aoa.push(["RISULTATO", "", "", totali.budRis, totali.actRis, totali.actRis - totali.budRis]);
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws["!cols"] = [{ wch: 30 }, { wch: 14 }, { wch: 34 }, { wch: 13 }, { wch: 13 }, { wch: 13 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Budget");
+    if (cashflow && cashflow.righe.length) {
+      const cf = [
+        ["Piano di cassa (cash flow plan)"],
+        [`BU: ${bBU === "ALL" ? "Tutte" : bBU}`],
+        [],
+        ["Conto liquidità", "Entrate budget", "Uscite budget", "Netto budget", "Entrate reali", "Uscite reali", "Netto reale"],
+      ];
+      cashflow.righe.forEach(r => cf.push([r.nome.trim(), r.inBud, r.outBud, r.nettoBud, r.inAct, r.outAct, r.nettoAct]));
+      cf.push(["TOTALE", cashflow.tot.inBud, cashflow.tot.outBud, cashflow.nettoBud, cashflow.tot.inAct, cashflow.tot.outAct, cashflow.nettoAct]);
+      if (cashflow.senzaCassa > 0.005) cf.push([], [`Budget senza conto di cassa associato: ${cashflow.senzaCassa}`]);
+      const wcf = XLSX.utils.aoa_to_sheet(cf);
+      wcf["!cols"] = [{ wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 13 }];
+      XLSX.utils.book_append_sheet(wb, wcf, "Piano di cassa");
+    }
     XLSX.writeFile(wb, `Budget_${attivo.nome.replace(/[^A-Za-z0-9]+/g, "-")}_${stagione}.xlsx`);
     onToast("Budget esportato");
+  }
+
+  function exportPDF() {
+    if (!window.jspdf || !attivo) { onToast("Nessun budget aperto"); return; }
+    const bBU = attivo.bu || "ALL";
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const W = doc.internal.pageSize.width;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+    doc.text("FUTSAL FABBRICO ASD", W / 2, 16, { align: "center" });
+    doc.setFontSize(11); doc.setFont("helvetica", "normal");
+    doc.text(`Budget · ${attivo.nome}`, W / 2, 23, { align: "center" });
+    doc.setFontSize(9); doc.setTextColor(100);
+    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 29, { align: "center" });
+    doc.setTextColor(0);
+
+    const body = (attivo.voci || []).map(v => {
+      const act = actualVoce(v, bBU);
+      const bud = Number(v.importo) || 0;
+      const scost = v.natura === "costo" ? (bud - act) : (act - bud);
+      return [
+        v.descrizione || "—",
+        { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." }[v.natura] || v.natura,
+        v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—",
+        bud.toFixed(2), act.toFixed(2), Math.abs(act) < 0.005 ? "—" : scost.toFixed(2),
+      ];
+    });
+    if (totali) body.push([
+      { content: "RISULTATO (ricavi - costi)", colSpan: 3, styles: { fontStyle: "bold" } },
+      { content: totali.budRis.toFixed(2), styles: { fontStyle: "bold" } },
+      { content: totali.actRis.toFixed(2), styles: { fontStyle: "bold" } },
+      { content: (totali.actRis - totali.budRis).toFixed(2), styles: { fontStyle: "bold" } },
+    ]);
+    doc.autoTable({
+      startY: 36,
+      head: [["Voce", "Natura", "Cassa", "Budget", "Consuntivo", "Scostam."]],
+      body,
+      styles: { fontSize: 8.5, cellPadding: 1.6 },
+      headStyles: { fillColor: [26, 26, 26], textColor: 240 },
+      columnStyles: { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
+    });
+
+    if (cashflow && cashflow.righe.length) {
+      let y = doc.lastAutoTable.finalY + 10;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Piano di cassa (cash flow plan)", 14, y);
+      const cfBody = cashflow.righe.map(r => [
+        r.nome.trim(), r.inBud.toFixed(2), r.outBud.toFixed(2), r.nettoBud.toFixed(2),
+        r.inAct.toFixed(2), r.outAct.toFixed(2), r.nettoAct.toFixed(2),
+      ]);
+      cfBody.push([
+        { content: "TOTALE", styles: { fontStyle: "bold" } },
+        { content: cashflow.tot.inBud.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: cashflow.tot.outBud.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: cashflow.nettoBud.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: cashflow.tot.inAct.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: cashflow.tot.outAct.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: cashflow.nettoAct.toFixed(2), styles: { fontStyle: "bold" } },
+      ]);
+      doc.autoTable({
+        startY: y + 3,
+        head: [["Conto", "Entrate bud.", "Uscite bud.", "Netto bud.", "Entrate reali", "Uscite reali", "Netto reale"]],
+        body: cfBody,
+        styles: { fontSize: 8, cellPadding: 1.4, halign: "right" },
+        columnStyles: { 0: { halign: "left" } },
+        headStyles: { fillColor: [45, 94, 62], textColor: 240, halign: "right" },
+      });
+      if (cashflow.senzaCassa > 0.005) {
+        doc.setFontSize(8.5); doc.setTextColor(120);
+        doc.text(`Nota: ${fmtEuro(cashflow.senzaCassa)} di budget senza conto di cassa associato (non nel piano).`, 14, doc.lastAutoTable.finalY + 5);
+      }
+    }
+    doc.save(`Budget_${attivo.nome.replace(/[^A-Za-z0-9]+/g, "-")}_${stagione}.pdf`);
+    onToast("Budget esportato in PDF");
   }
 
   const naturaLabel = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrimoniale/Fin." };
@@ -10193,6 +10309,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {attivo && <button className="btn ghost" onClick={exportExcel}>↧ Excel</button>}
+          {attivo && <button className="btn ghost" onClick={exportPDF}>↧ PDF</button>}
           <button className="btn accent" onClick={nuovoBudget}>+ Nuovo budget</button>
         </div>
       </div>
@@ -10361,9 +10478,10 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     <th style={{ minWidth: 160 }}>Voce</th>
                     <th style={{ width: 130 }}>Natura</th>
                     <th style={{ minWidth: 200 }}>Conti collegati</th>
+                    <th style={{ width: 130 }} title="Conto di liquidità impattato: serve per il piano di cassa">Cassa</th>
                     <th className="num" style={{ width: 120 }}>Budget</th>
                     <th className="num" style={{ width: 120 }}>Consuntivo</th>
-                    <th className="num" style={{ width: 120 }}>Scostam.</th>
+                    <th className="num" style={{ width: 120 }} title="Scostamento favorevole: positivo = va bene (ricavo sopra target o costo sotto budget)">Scostam.</th>
                     <th style={{ width: 40 }}></th>
                   </tr>
                 </thead>
@@ -10371,7 +10489,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                   {(attivo.voci || []).map(v => {
                     const act = actualVoce(v, attivo.bu || "ALL");
                     const bud = Number(v.importo) || 0;
-                    const scost = act - bud;
+                    // scostamento FAVOREVOLE: + = va bene (ricavo sopra target / costo sotto budget)
+                    const scost = v.natura === "costo" ? (bud - act) : (act - bud);
+                    const hasAct = Math.abs(act) > 0.005;
                     return (
                       <tr key={v.id}>
                         <td>
@@ -10404,18 +10524,26 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                             </div>
                           </details>
                         </td>
+                        <td>
+                          {v.natura === "patrimoniale"
+                            ? <span style={{ fontSize: 11, color: "var(--ink-3)" }}>—</span>
+                            : <select value={v.contoLiquidita || ""} onChange={e => setVoce(v.id, "contoLiquidita", e.target.value === "" ? "" : Number(e.target.value))} style={{ fontSize: 12 }}>
+                                <option value="">— nessuna —</option>
+                                {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome.trim()}</option>)}
+                              </select>}
+                        </td>
                         <td className="num">
                           <input type="number" step="0.01" value={v.importo} onChange={e => setVoce(v.id, "importo", e.target.value)} style={{ width: 100, textAlign: "right" }} />
                         </td>
                         <td className="num" style={{ fontWeight: 600 }}>{fmt(act)}</td>
-                        <td className={"num " + (scost < -0.005 ? "neg" : scost > 0.005 ? "pos" : "")}>{fmt(scost)}</td>
+                        <td className={"num " + (!hasAct ? "" : scost < -0.005 ? "neg" : scost > 0.005 ? "pos" : "")}>{hasAct ? fmt(scost) : "—"}</td>
                         <td><button className="btn ghost sm" onClick={() => delVoce(v.id)}>✕</button></td>
                       </tr>
                     );
                   })}
                   {totali && (
                     <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
-                      <td colSpan={3} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
+                      <td colSpan={4} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
                       <td className="num">{fmt(totali.budRis)}</td>
                       <td className="num">{fmt(totali.actRis)}</td>
                       <td className={"num " + ((totali.actRis - totali.budRis) < 0 ? "neg" : "pos")}>{fmt(totali.actRis - totali.budRis)}</td>
@@ -10427,9 +10555,65 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
             </div>
           )}
 
+          {/* PIANO DI CASSA (cash flow plan) */}
+          {cashflow && (
+            <div style={{ marginTop: 26 }}>
+              <h3 className="serif" style={{ fontWeight: 500, fontSize: 18, margin: "0 0 4px" }}>Piano di cassa</h3>
+              <div style={{ fontSize: 12, color: "var(--ink-3)", margin: "0 0 12px" }}>
+                Entrate e uscite previste (budget) e reali per conto di liquidità, in base alla cassa associata a ogni voce.
+              </div>
+              {cashflow.righe.length === 0 ? (
+                <div className="empty-state">Associa un conto di liquidità (colonna “Cassa”) alle voci per costruire il piano.</div>
+              ) : (
+                <div className="tbl-wrap">
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th>Conto liquidità</th>
+                        <th className="num">Entrate budget</th>
+                        <th className="num">Uscite budget</th>
+                        <th className="num">Netto budget</th>
+                        <th className="num">Entrate reali</th>
+                        <th className="num">Uscite reali</th>
+                        <th className="num">Netto reale</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cashflow.righe.map(r => (
+                        <tr key={r.codice}>
+                          <td style={{ fontWeight: 600 }}>{r.nome.trim()}</td>
+                          <td className="num pos">{r.inBud ? fmt(r.inBud) : ""}</td>
+                          <td className="num neg">{r.outBud ? fmt(r.outBud) : ""}</td>
+                          <td className={"num " + (r.nettoBud < 0 ? "neg" : "pos")} style={{ fontWeight: 600 }}>{fmt(r.nettoBud)}</td>
+                          <td className="num pos">{r.inAct ? fmt(r.inAct) : ""}</td>
+                          <td className="num neg">{r.outAct ? fmt(r.outAct) : ""}</td>
+                          <td className={"num " + (r.nettoAct < 0 ? "neg" : "pos")} style={{ fontWeight: 600 }}>{fmt(r.nettoAct)}</td>
+                        </tr>
+                      ))}
+                      <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                        <td style={{ fontFamily: "'Fraunces',serif" }}>TOTALE</td>
+                        <td className="num">{fmt(cashflow.tot.inBud)}</td>
+                        <td className="num">{fmt(cashflow.tot.outBud)}</td>
+                        <td className={"num " + (cashflow.nettoBud < 0 ? "neg" : "pos")}>{fmt(cashflow.nettoBud)}</td>
+                        <td className="num">{fmt(cashflow.tot.inAct)}</td>
+                        <td className="num">{fmt(cashflow.tot.outAct)}</td>
+                        <td className={"num " + (cashflow.nettoAct < 0 ? "neg" : "pos")}>{fmt(cashflow.nettoAct)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {cashflow.senzaCassa > 0.005 && (
+                <div style={{ fontSize: 12, color: "#7a5a1d", marginTop: 8 }}>
+                  ⚠ {fmtEuro(cashflow.senzaCassa)} di budget senza conto di cassa associato: non rientrano nel piano finché non assegni la colonna “Cassa”.
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 10, fontStyle: "italic" }}>
             Il Consuntivo è calcolato dal libro giornale in partita doppia sui conti che agganci a ogni voce
-            {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"}. Le voci "Patrimoniale/Fin." usano i conti dello Stato Patrimoniale (crediti, debiti, liquidità, immobilizzazioni…). Per creare uno scenario, duplica il budget e cambia i valori: gli altri restano invariati.
+            {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"}. Lo Scostamento è <b>favorevole</b>: positivo (verde) quando un ricavo supera il target o un costo resta sotto budget; è neutro (—) finché non c'è consuntivo. Le voci "Patrimoniale/Fin." usano i conti dello Stato Patrimoniale. Per creare uno scenario, duplica il budget e cambia i valori.
           </div>
         </>
       )}
