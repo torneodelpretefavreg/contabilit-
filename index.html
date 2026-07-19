@@ -9992,8 +9992,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   }, [attivo]);
 
   const aggiungiVoceDaConto = (r) => {
-    const ip = ipotesi[r.codice];
-    const val = (ip !== undefined && ip !== "") ? Number(ip) : r.valore;
+    const val = valDiRiga(r);
     patch(d => {
       d.voci = d.voci || [];
       d.voci.push({
@@ -10004,10 +10003,13 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     });
   };
 
-  // valore di riga: ipotesi se presente, altrimenti consuntivo
+  // valore di riga: ipotesi se presente, altrimenti consuntivo.
+  // In modalità "Confronto consuntivo = No" il consuntivo viene già sommato all'importo,
+  // quindi l'importo di partenza è 0 (l'utente ci scrive solo l'EXTRA da aggiungere).
   const valDiRiga = (r) => {
     const ip = ipotesi[r.codice];
-    return (ip !== undefined && ip !== "") ? Number(ip) : r.valore;
+    if (ip !== undefined && ip !== "") return Number(ip);
+    return (attivo && attivo.confrontaConsuntivo === false) ? 0 : r.valore;
   };
   const toggleSel = (cod) => setSelConti(s => s.includes(cod) ? s.filter(x => x !== cod) : [...s, cod]);
   const selezionaMostrati = () => {
@@ -10065,8 +10067,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     patch(d => {
       d.voci = d.voci || [];
       daAgg.forEach(r => {
-        const ip = ipotesi[r.codice];
-        const val = (ip !== undefined && ip !== "") ? Number(ip) : r.valore;
+        const val = valDiRiga(r);
         d.voci.push({
           id: "v_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
           descrizione: r.nome, natura: r.naturaVoce, conti: [r.codice],
@@ -10074,6 +10075,24 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         });
       });
     });
+  };
+
+  // Modalità "Confronto consuntivo = No": il consuntivo viene già sommato all'importo.
+  // Se una voce ha l'importo inserito UGUALE al proprio consuntivo, verrebbe contata due volte.
+  // Questo azzera l'importo di quelle voci (restano solo consuntivo + eventuale extra),
+  // lasciando invariate le voci con un extra reale diverso dal consuntivo.
+  const scorporaConsuntivoDaImporti = () => {
+    if (!attivo) return;
+    const bBU = attivo.bu || "ALL";
+    const daAzzerare = new Set();
+    (attivo.voci || []).forEach(v => {
+      const act = actualVoce(v, bBU);
+      const bud = Number(v.importo) || 0;
+      if (Math.abs(act) > 0.005 && Math.abs(bud - act) < 0.005) daAzzerare.add(v.id);
+    });
+    if (!daAzzerare.size) { onToast("Nessun importo coincide col consuntivo"); return; }
+    patch(d => { (d.voci || []).forEach(v => { if (daAzzerare.has(v.id)) v.importo = 0; }); });
+    onToast(`${daAzzerare.size} importi azzerati: ora contano consuntivo + eventuale extra`);
   };
 
   // Piano di cassa (cash flow plan): parte dal SALDO REALE attuale di ogni conto liquidità
@@ -10521,7 +10540,10 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           {/* Tabella voci */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0 10px" }}>
             <h3 className="serif" style={{ fontWeight: 500, fontSize: 18, margin: 0 }}>Voci di budget</h3>
-            <button className="btn accent sm" onClick={addVoce}>+ Aggiungi voce</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              {!showAct && <button className="btn ghost sm" title="Azzera gli importi che coincidono col consuntivo (venivano contati due volte). Le voci con un extra reale restano invariate." onClick={scorporaConsuntivoDaImporti}>⇊ scorpora consuntivo</button>}
+              <button className="btn accent sm" onClick={addVoce}>+ Aggiungi voce</button>
+            </div>
           </div>
 
           {(attivo.voci || []).length === 0 ? (
@@ -10676,8 +10698,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
               <>Il Consuntivo è calcolato dal libro giornale in partita doppia sui conti che agganci a ogni voce
               {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"}. Lo Scostamento è <b>favorevole</b>: positivo (verde) quando un ricavo supera il target o un costo resta sotto budget; è neutro (—) finché non c'è consuntivo. Le voci "Patrimoniale/Fin." usano i conti dello Stato Patrimoniale. Per creare uno scenario, duplica il budget e cambia i valori.</>
             ) : (
-              <>Confronto col consuntivo <b>disattivato</b>: il Budget di ogni voce è la somma che inserisci a mano <b>più</b> il saldo già presente in contabilità sui conti agganciati
-              {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"} — cioè <b>budget = inserito + già contabilizzato</b>. Attiva “Confronto consuntivo → Sì” per tornare al confronto Budget vs Consuntivo con scostamento.</>
+              <>Confronto col consuntivo <b>disattivato</b>: il Budget di ogni voce è <b>consuntivo già in contabilità + l'importo che scrivi tu</b>
+              {attivo.bu && attivo.bu !== "ALL" ? ` (solo BU ${attivo.bu})` : " (tutte le BU)"}. L'importo che inserisci è quindi l'<b>extra</b> da aggiungere al già contabilizzato, e parte da 0. Se una voce ha l'importo uguale al proprio consuntivo verrebbe contata due volte: usa “⇊ scorpora consuntivo” per azzerare quegli importi. Attiva “Confronto consuntivo → Sì” per tornare al confronto Budget vs Consuntivo con scostamento.</>
             )}
           </div>
         </>
