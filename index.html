@@ -9945,7 +9945,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       // Costi/Ricavi + liquidità: conti economici + SOLO i conti di liquidità (niente altri patrimoniali).
       // Se è selezionata una BU, mostro SOLO i movimentati: economici mossi in quella BU e liquidità con saldo.
       const bUsel = bBU && bBU !== "ALL";
-      const mosso = (v) => v && (Math.abs(v.dare) > 0.005 || Math.abs(v.avere) > 0.005);
+      const mosso = (v) => v && Math.abs((v.dare || 0) - (v.avere || 0)) > 0.005;
       let eco = (conti || []).filter(c => c.prospetto === "CE" || c.prospetto === "SP/CE");
       if (bUsel) eco = eco.filter(c => mosso(consuntivo.perContoBU[`${c.codice}|${bBU}`]));
       universo = eco.map(c => c.codice);
