@@ -9927,42 +9927,45 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   const statoConti = useMemo(() => {
     if (!attivo) return null;
     const bBU = attivo.bu || "ALL";
-    const perCod = {};
-    if (bBU && bBU !== "ALL") {
-      Object.entries(consuntivo.perContoBU).forEach(([k, v]) => {
-        const [codStr, b] = k.split("|");
-        if (b !== bBU) return;
-        const cod = Number(codStr);
-        if (!perCod[cod]) perCod[cod] = { dare: 0, avere: 0 };
-        perCod[cod].dare += v.dare; perCod[cod].avere += v.avere;
-      });
-      // I conti patrimoniali (SP) non si dividono per BU: uso il saldo TOTALE
-      // (che include il bilancio di apertura), altrimenti banche/cassa uscirebbero negativi.
-      Object.entries(consuntivo.perConto).forEach(([codStr, v]) => {
-        const cod = Number(codStr);
-        if (contiMap[cod] && contiMap[cod].prospetto === "SP") perCod[cod] = { dare: v.dare, avere: v.avere };
-      });
-    } else {
-      Object.entries(consuntivo.perConto).forEach(([codStr, v]) => {
-        perCod[Number(codStr)] = { dare: v.dare, avere: v.avere };
-      });
-    }
-    // universo conti in base al filtro scelto
-    const passaFiltro = (c) => {
-      if (filtroConti === "ce") return c.prospetto === "CE" || c.prospetto === "SP/CE";
-      if (filtroConti === "sp") return c.prospetto === "SP" && c.prospetto !== "SP/CE";
-      return true; // movimentati | tutti
+    const isSP = (cod) => contiMap[cod] && contiMap[cod].prospetto === "SP";
+
+    // Valore {dare,avere} di un conto:
+    //  - patrimoniale (SP, es. banche/cassa): saldo TOTALE (non si divide per BU, include l'apertura)
+    //  - economico (costo/ricavo): fetta della BU selezionata (o totale se BU = tutte)
+    const valDareAvere = (cod) => {
+      if ((bBU && bBU !== "ALL") && !isSP(cod)) {
+        return consuntivo.perContoBU[`${cod}|${bBU}`] || { dare: 0, avere: 0 };
+      }
+      return consuntivo.perConto[cod] || { dare: 0, avere: 0 };
     };
-    let universo;
-    if (filtroConti === "tutti" || filtroConti === "ce" || filtroConti === "sp") {
-      universo = (conti || []).filter(passaFiltro).map(c => c.codice);
-      // includo comunque eventuali conti movimentati non nel piano
-      Object.keys(perCod).forEach(k => { if (!universo.includes(Number(k))) universo.push(Number(k)); });
+
+    // Universo dei conti da mostrare, in base al filtro scelto.
+    let universo = [];
+    if (filtroConti === "ce") {
+      // Costi/Ricavi + liquidità: conti economici + SOLO i conti di liquidità (niente altri patrimoniali)
+      universo = (conti || []).filter(c => c.prospetto === "CE" || c.prospetto === "SP/CE").map(c => c.codice);
+      CONTI_LIQUIDITA.forEach(c => { if (!universo.includes(c.codice)) universo.push(c.codice); });
+    } else if (filtroConti === "sp") {
+      universo = (conti || []).filter(c => c.prospetto === "SP").map(c => c.codice);
+    } else if (filtroConti === "tutti") {
+      universo = (conti || []).map(c => c.codice);
+      Object.keys(consuntivo.perConto).forEach(k => { const n = Number(k); if (!universo.includes(n)) universo.push(n); });
     } else {
-      universo = Object.keys(perCod).map(Number); // solo movimentati
+      // Solo movimentati: conti con movimenti nello scope corrente (economici della BU + patrimoniali in totale)
+      const set = new Set();
+      if (bBU && bBU !== "ALL") {
+        Object.keys(consuntivo.perContoBU).forEach(k => {
+          const [codStr, b] = k.split("|");
+          if (b === bBU && !isSP(Number(codStr))) set.add(Number(codStr));
+        });
+        Object.keys(consuntivo.perConto).forEach(k => { const n = Number(k); if (isSP(n)) set.add(n); });
+      } else {
+        Object.keys(consuntivo.perConto).forEach(k => set.add(Number(k)));
+      }
+      universo = [...set];
     }
     const righe = universo.map(cod => {
-      const v = perCod[cod] || { dare: 0, avere: 0 };
+      const v = valDareAvere(cod);
       const c = contiMap[cod] || {};
       const cat = c.categoria || "";
       const isRic = cat === "RICAVI";
@@ -10495,7 +10498,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
               </summary>
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", margin: "2px 0 10px" }}>
                 <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                  {[["movimentati", "Solo movimentati"], ["ce", "Costi/Ricavi"], ["sp", "Patrimoniali"], ["tutti", "Tutti i conti"]].map(([k, label]) => (
+                  {[["movimentati", "Solo movimentati"], ["ce", "Costi/Ricavi + liquidità"], ["sp", "Patrimoniali"], ["tutti", "Tutti i conti"]].map(([k, label]) => (
                     <button key={k} className={"btn " + (filtroConti === k ? "accent" : "ghost")} style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => setFiltroConti(k)}>{label}</button>
                   ))}
                 </div>
