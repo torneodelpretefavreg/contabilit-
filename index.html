@@ -9896,31 +9896,45 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     return { perContoBU, perConto };
   }, [movimenti, saldiIniziali, contiMap]);
 
-  // consuntivo di una voce (somma dei conti agganciati, con segno per natura), filtrato per BU del budget
-  const actualVoce = (voce, budgetBU) => {
-    let val = 0;
-    // I conti patrimoniali (Stato Patrimoniale: banche, cassa, crediti, debiti, fondi…)
-    // NON si dividono per Business Unit: il saldo è totale e include il bilancio di apertura.
-    // Solo i conti economici (ricavo/costo) si filtrano per BU.
-    const isPatr = voce.natura === "patrimoniale";
-    (voce.conti || []).forEach(cod => {
-      const c = contiMap[cod];
-      if (!c) return;
-      let dare, avere;
-      if (!isPatr && budgetBU && budgetBU !== "ALL") {
-        const k = `${cod}|${budgetBU}`;
-        dare = consuntivo.perContoBU[k]?.dare || 0;
-        avere = consuntivo.perContoBU[k]?.avere || 0;
-      } else {
-        dare = consuntivo.perConto[cod]?.dare || 0;
-        avere = consuntivo.perConto[cod]?.avere || 0;
-      }
-      // natura ricavo → avere-dare; costo/patrimoniale (attività, dare) → dare-avere
-      if (voce.natura === "ricavo") val += (avere - dare);
-      else val += (dare - avere);
-    });
-    return val;
+  // Consuntivo di un singolo conto (con segno per natura). I conti patrimoniali (banche, cassa,
+  // crediti, debiti, fondi…) NON si dividono per BU: saldo totale, apertura inclusa. Gli economici sì.
+  const contoActual = (cod, natura, budgetBU) => {
+    if (!contiMap[cod]) return 0;
+    const isPatr = natura === "patrimoniale";
+    let dare, avere;
+    if (!isPatr && budgetBU && budgetBU !== "ALL") {
+      const k = `${cod}|${budgetBU}`;
+      dare = consuntivo.perContoBU[k]?.dare || 0;
+      avere = consuntivo.perContoBU[k]?.avere || 0;
+    } else {
+      dare = consuntivo.perConto[cod]?.dare || 0;
+      avere = consuntivo.perConto[cod]?.avere || 0;
+    }
+    return natura === "ricavo" ? (avere - dare) : (dare - avere);
   };
+
+  // Consuntivo per voce con ATTRIBUZIONE UNICA del conto: se più voci agganciano lo stesso conto
+  // (es. due fornitori sullo stesso "MATERIALE C/ACQUISTI"), il consuntivo di quel conto viene
+  // assegnato solo alla PRIMA voce che lo aggancia, così non viene contato più volte.
+  const actualPerVoce = useMemo(() => {
+    const map = {};
+    if (!attivo) return map;
+    const bBU = attivo.bu || "ALL";
+    const claimed = new Set();
+    (attivo.voci || []).forEach(v => {
+      let val = 0;
+      (v.conti || []).forEach(cod => {
+        if (claimed.has(cod)) return;
+        claimed.add(cod);
+        val += contoActual(cod, v.natura, bBU);
+      });
+      map[v.id] = val;
+    });
+    return map;
+  }, [attivo, consuntivo, contiMap]);
+
+  // consuntivo di una voce (attribuzione unica per conto — vedi actualPerVoce)
+  const actualVoce = (voce) => actualPerVoce[voce.id] || 0;
 
   // Stato conti reale (dal libro giornale) filtrato per la BU del budget attivo.
   // Serve come riferimento mentre imposti i target.
