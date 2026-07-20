@@ -13,7 +13,7 @@
 <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -10240,43 +10240,72 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   function exportExcel() {
     if (typeof XLSX === "undefined" || !attivo) { onToast("Nessun budget aperto"); return; }
     const bBU = attivo.bu || "ALL";
-    const showA = attivo.confrontaConsuntivo !== false;
     const addA = attivo.sommaConsuntivo === true;
+    const pctFrac = (dAbs, cons) => Math.abs(cons) > 0.005 ? dAbs / Math.abs(cons) : null;
+
+    const headers = ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Consuntivo", "Forecast", "Δ (forecast − cons.)", "Δ %"];
     const aoa = [
       [`Budget: ${attivo.nome}`],
-      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${addA ? " · budget = consuntivo + extra a mano" : ""}`],
+      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${addA ? " · Forecast = consuntivo + extra a mano" : " · Forecast = budget inserito"}`],
       [],
-      showA ? ["Voce", "Natura", "Conti", "Budget", "Consuntivo", "Scostamento"] : ["Voce", "Natura", "Conti", "Budget"],
+      headers,
     ];
+    const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
     (attivo.voci || []).forEach(v => {
-      const act = actualVoce(v, bBU);
+      const cons = actualVoce(v);
       const bud = Number(v.importo) || 0;
-      const budEff = bud + (addA ? act : 0);
-      const contiStr = (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", ");
-      if (showA) {
-        const scost = v.natura === "costo" ? (bud - act) : (act - bud);
-        aoa.push([v.descrizione, v.natura, contiStr, budEff, act, scost]);
-      } else {
-        aoa.push([v.descrizione, v.natura, contiStr, budEff]);
-      }
+      const forecast = addA ? (bud + cons) : bud;
+      const dAbs = forecast - cons;
+      const pf = pctFrac(dAbs, cons);
+      const conti = (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", ");
+      const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "";
+      aoa.push([v.descrizione || "", naturaLbl[v.natura] || v.natura, conti, cassa, v.note || "", cons, forecast, dAbs, pf === null ? "n/d" : pf]);
     });
+    let totRowsIdx = [];
     if (totali) {
       aoa.push([]);
-      const tRic = addA ? totali.effRic : totali.budRic;
-      const tCos = addA ? totali.effCos : totali.budCos;
-      const tRis = addA ? totali.effRis : totali.budRis;
-      if (showA) {
-        aoa.push(["TOTALE RICAVI", "", "", tRic, totali.actRic, totali.actRic - totali.budRic]);
-        aoa.push(["TOTALE COSTI", "", "", tCos, totali.actCos, totali.budCos - totali.actCos]);
-        aoa.push(["RISULTATO", "", "", tRis, totali.actRis, totali.actRis - totali.budRis]);
-      } else {
-        aoa.push(["TOTALE RICAVI", "", "", tRic]);
-        aoa.push(["TOTALE COSTI", "", "", tCos]);
-        aoa.push(["RISULTATO", "", "", tRis]);
-      }
+      const mk = (label, cons, forecast) => { const dAbs = forecast - cons; const pf = pctFrac(dAbs, cons); return [label, "", "", "", "", cons, forecast, dAbs, pf === null ? "n/d" : pf]; };
+      const base = aoa.length;
+      aoa.push(mk("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic));
+      aoa.push(mk("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos));
+      aoa.push(mk("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
+      totRowsIdx = [base, base + 1, base + 2];
     }
+
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = showA ? [{ wch: 30 }, { wch: 14 }, { wch: 34 }, { wch: 13 }, { wch: 13 }, { wch: 13 }] : [{ wch: 30 }, { wch: 14 }, { wch: 34 }, { wch: 15 }];
+    ws["!cols"] = [{ wch: 26 }, { wch: 10 }, { wch: 30 }, { wch: 13 }, { wch: 26 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }];
+    const nData = (attivo.voci || []).length;
+    const money = "#,##0.00", pct = "+0.0%;-0.0%;0.0%";
+    const border = { style: "thin", color: { rgb: "D9D6CE" } };
+    const cell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: "s", v: "" }; return ws[ref]; };
+    // Titolo e sottotitolo
+    Object.assign(cell(0, 0), { s: { font: { bold: true, sz: 14 } } });
+    Object.assign(cell(1, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
+    // Intestazione (riga 3): scura, con Consuntivo/Forecast evidenziati
+    for (let c = 0; c < headers.length; c++) {
+      const fill = c === 5 ? "3B4A5A" : c === 6 ? "2D5E3E" : "1A1A1A";
+      Object.assign(cell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 10 }, fill: { fgColor: { rgb: fill } }, alignment: { horizontal: c >= 5 ? "right" : "left", vertical: "center", wrapText: true } } });
+    }
+    // Righe dati
+    for (let i = 0; i < nData; i++) {
+      const r = 4 + i;
+      for (let c = 5; c <= 8; c++) { const cc = cell(r, c); cc.z = c === 8 ? pct : money; cc.s = { alignment: { horizontal: "right" } }; }
+      // evidenzia colonne consuntivo (azzurro) e forecast (verde)
+      cell(r, 5).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } } };
+      cell(r, 6).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "E8F2EC" } }, font: { bold: true } };
+      const dv = cell(r, 7).v;
+      cell(r, 7).s = { alignment: { horizontal: "right" }, font: { color: { rgb: typeof dv === "number" && dv < -0.005 ? "B03A2E" : typeof dv === "number" && dv > 0.005 ? "1E7A46" : "555555" } } };
+      cell(r, 4).s = { alignment: { horizontal: "left", wrapText: true }, font: { italic: true, color: { rgb: "6B6B6B" } } };
+    }
+    // Righe totali
+    totRowsIdx.forEach(r => {
+      for (let c = 0; c < headers.length; c++) {
+        const cc = cell(r, c);
+        const isRis = String(cell(r, 0).v).startsWith("RISULTATO");
+        cc.s = { font: { bold: true, color: { rgb: isRis ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: isRis ? "1A1A1A" : "F0EFEA" } }, border: { top: border, bottom: border }, alignment: { horizontal: c >= 5 ? "right" : "left" } };
+        if (c >= 5) cc.z = c === 8 ? pct : money;
+      }
+    });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Budget");
     if (cashflow && cashflow.righe.length) {
@@ -10291,6 +10320,10 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       if (cashflow.senzaCassa > 0.005) cf.push([], [`Budget senza conto di cassa associato: ${cashflow.senzaCassa}`]);
       const wcf = XLSX.utils.aoa_to_sheet(cf);
       wcf["!cols"] = [{ wch: 22 }, { wch: 14 }, { wch: 15 }, { wch: 15 }, { wch: 13 }, { wch: 14 }];
+      const cfCell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!wcf[ref]) wcf[ref] = { t: "s", v: "" }; return wcf[ref]; };
+      Object.assign(cfCell(0, 0), { s: { font: { bold: true, sz: 13 } } });
+      for (let c = 0; c < 6; c++) Object.assign(cfCell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "2D5E3E" } }, alignment: { horizontal: c ? "right" : "left" } } });
+      for (let r = 4; r < 4 + cashflow.righe.length + 1; r++) for (let c = 1; c < 6; c++) { cfCell(r, c).z = money; cfCell(r, c).s = { alignment: { horizontal: "right" } }; }
       XLSX.utils.book_append_sheet(wb, wcf, "Piano di cassa");
     }
     XLSX.writeFile(wb, `Budget_${attivo.nome.replace(/[^A-Za-z0-9]+/g, "-")}_${stagione}.xlsx`);
@@ -10300,48 +10333,69 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   function exportPDF() {
     if (!window.jspdf || !attivo) { onToast("Nessun budget aperto"); return; }
     const bBU = attivo.bu || "ALL";
+    const addA = attivo.sommaConsuntivo === true;
     const { jsPDF } = window.jspdf;
-    const doc = new jsPDF();
+    const doc = new jsPDF({ orientation: "landscape" });
     const W = doc.internal.pageSize.width;
     doc.setFont("helvetica", "bold"); doc.setFontSize(15);
-    doc.text("FUTSAL FABBRICO ASD", W / 2, 16, { align: "center" });
+    doc.text("FUTSAL FABBRICO ASD", W / 2, 14, { align: "center" });
     doc.setFontSize(11); doc.setFont("helvetica", "normal");
-    doc.text(`Budget · ${attivo.nome}`, W / 2, 23, { align: "center" });
+    doc.text(`Budget · ${attivo.nome}`, W / 2, 20, { align: "center" });
     doc.setFontSize(9); doc.setTextColor(100);
-    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 29, { align: "center" });
+    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
     doc.setTextColor(0);
 
-    const showA = attivo.confrontaConsuntivo !== false;
-    const addA = attivo.sommaConsuntivo === true;
+    const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
+    const sign = (n) => (n > 0.005 ? "+" : "") + n.toFixed(2);
+    const pctTxt = (dAbs, cons) => Math.abs(cons) > 0.005 ? ((dAbs / Math.abs(cons)) * 100 > 0 ? "+" : "") + ((dAbs / Math.abs(cons)) * 100).toFixed(1) + "%" : "n/d";
     const body = (attivo.voci || []).map(v => {
-      const act = actualVoce(v, bBU);
+      const cons = actualVoce(v);
       const bud = Number(v.importo) || 0;
-      const budEff = bud + (addA ? act : 0);
-      const natura = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." }[v.natura] || v.natura;
+      const forecast = addA ? (bud + cons) : bud;
+      const dAbs = forecast - cons;
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—";
-      if (showA) {
-        const scost = v.natura === "costo" ? (bud - act) : (act - bud);
-        return [v.descrizione || "—", natura, cassa, budEff.toFixed(2), act.toFixed(2), Math.abs(act) < 0.005 ? "—" : scost.toFixed(2)];
-      }
-      return [v.descrizione || "—", natura, cassa, budEff.toFixed(2)];
+      return [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", cons.toFixed(2), forecast.toFixed(2), sign(dAbs), pctTxt(dAbs, cons)];
     });
-    const tRis = addA ? totali.effRis : totali.budRis;
-    if (totali) body.push(showA ? [
-      { content: "RISULTATO (ricavi - costi)", colSpan: 3, styles: { fontStyle: "bold" } },
-      { content: tRis.toFixed(2), styles: { fontStyle: "bold" } },
-      { content: totali.actRis.toFixed(2), styles: { fontStyle: "bold" } },
-      { content: (totali.actRis - totali.budRis).toFixed(2), styles: { fontStyle: "bold" } },
-    ] : [
-      { content: "RISULTATO (ricavi - costi)", colSpan: 3, styles: { fontStyle: "bold" } },
-      { content: tRis.toFixed(2), styles: { fontStyle: "bold" } },
-    ]);
+    if (totali) {
+      const mkTot = (label, cons, forecast) => {
+        const dAbs = forecast - cons;
+        return [
+          { content: label, colSpan: 4, styles: { fontStyle: "bold" } },
+          { content: cons.toFixed(2), styles: { fontStyle: "bold", halign: "right" } },
+          { content: forecast.toFixed(2), styles: { fontStyle: "bold", halign: "right" } },
+          { content: sign(dAbs), styles: { fontStyle: "bold", halign: "right" } },
+          { content: pctTxt(dAbs, cons), styles: { fontStyle: "bold", halign: "right" } },
+        ];
+      };
+      body.push(mkTot("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic));
+      body.push(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos));
+      body.push(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
+    }
     doc.autoTable({
-      startY: 36,
-      head: [showA ? ["Voce", "Natura", "Cassa", "Budget", "Consuntivo", "Scostam."] : ["Voce", "Natura", "Cassa", "Budget"]],
+      startY: 31,
+      head: [["Voce", "Natura", "Cassa", "Note", "Consuntivo", "Forecast", "Δ", "Δ %"]],
       body,
-      styles: { fontSize: 8.5, cellPadding: 1.6 },
-      headStyles: { fillColor: [26, 26, 26], textColor: 240 },
-      columnStyles: showA ? { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } } : { 3: { halign: "right" } },
+      styles: { fontSize: 8, cellPadding: 1.5 },
+      headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
+      columnStyles: {
+        0: { cellWidth: 44 }, 1: { cellWidth: 18 }, 2: { cellWidth: 24 }, 3: { cellWidth: 48, textColor: [110, 110, 110], fontStyle: "italic" },
+        4: { cellWidth: 26, halign: "right" }, 5: { cellWidth: 26, halign: "right", fontStyle: "bold" }, 6: { cellWidth: 22, halign: "right" }, 7: { cellWidth: 18, halign: "right" },
+      },
+      didParseCell: (data) => {
+        const ci = data.column.index;
+        if (data.section === "head") {
+          if (ci === 4) data.cell.styles.fillColor = [59, 74, 90];
+          if (ci === 5) data.cell.styles.fillColor = [45, 94, 62];
+        } else if (data.section === "body") {
+          if (ci === 4) data.cell.styles.fillColor = [234, 240, 245];
+          if (ci === 5) data.cell.styles.fillColor = [232, 242, 236];
+          if (ci === 6 || ci === 7) {
+            const t = (data.cell.text && data.cell.text[0]) || "";
+            if (t.startsWith("-")) data.cell.styles.textColor = [176, 58, 46];
+            else if (t.startsWith("+")) data.cell.styles.textColor = [30, 122, 70];
+          }
+        }
+      },
     });
 
     if (cashflow && cashflow.righe.length) {
