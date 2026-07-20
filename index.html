@@ -10271,6 +10271,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       aoa.push(mk("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
       totRowsIdx = [base, base + 1, base + 2];
     }
+    aoa.push([], ["Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Natura: Ricavo (verde), Costo (rosso), Patrim. (grigio)."]);
+    const legendRow = aoa.length - 1;
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws["!cols"] = [{ wch: 26 }, { wch: 10 }, { wch: 30 }, { wch: 13 }, { wch: 26 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }];
@@ -10278,34 +10280,56 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const money = "#,##0.00", pct = "+0.0%;-0.0%;0.0%";
     const border = { style: "thin", color: { rgb: "D9D6CE" } };
     const cell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: "s", v: "" }; return ws[ref]; };
+    // colore "favorevole/sfavorevole" della Δ in base alla natura (verde = favorevole, rosso = sfavorevole)
+    const GREEN = "1E7A46", RED = "B03A2E", GREY = "777777";
+    const favRgb = (natura, dAbs) => {
+      if (Math.abs(dAbs) < 0.005) return GREY;
+      if (natura === "ricavo" || natura === "ris") return dAbs > 0 ? GREEN : RED;
+      if (natura === "costo") return dAbs < 0 ? GREEN : RED;
+      return GREY; // patrimoniale: neutro
+    };
+    const natRgb = (natura) => natura === "ricavo" ? GREEN : natura === "costo" ? RED : GREY;
+    const natFrom = (lbl) => lbl === "Ricavo" ? "ricavo" : lbl === "Costo" ? "costo" : "patrimoniale";
     // Titolo e sottotitolo
     Object.assign(cell(0, 0), { s: { font: { bold: true, sz: 14 } } });
     Object.assign(cell(1, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
-    // Intestazione (riga 3): scura, con Consuntivo/Forecast evidenziati
+    // Intestazione (riga 3): scura; Consuntivo (grigio) e Forecast (blu) con tinte NEUTRE, non verdi
     for (let c = 0; c < headers.length; c++) {
-      const fill = c === 5 ? "3B4A5A" : c === 6 ? "2D5E3E" : "1A1A1A";
+      const fill = c === 5 ? "6B6B6B" : c === 6 ? "3B4A5A" : "1A1A1A";
       Object.assign(cell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 10 }, fill: { fgColor: { rgb: fill } }, alignment: { horizontal: c >= 5 ? "right" : "left", vertical: "center", wrapText: true } } });
     }
     // Righe dati
     for (let i = 0; i < nData; i++) {
       const r = 4 + i;
-      for (let c = 5; c <= 8; c++) { const cc = cell(r, c); cc.z = c === 8 ? pct : money; cc.s = { alignment: { horizontal: "right" } }; }
-      // evidenzia colonne consuntivo (azzurro) e forecast (verde)
-      cell(r, 5).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } } };
-      cell(r, 6).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "E8F2EC" } }, font: { bold: true } };
-      const dv = cell(r, 7).v;
-      cell(r, 7).s = { alignment: { horizontal: "right" }, font: { color: { rgb: typeof dv === "number" && dv < -0.005 ? "B03A2E" : typeof dv === "number" && dv > 0.005 ? "1E7A46" : "555555" } } };
+      const nat = natFrom(cell(r, 1).v);
+      for (let c = 5; c <= 8; c++) { const cc = cell(r, c); cc.z = c === 8 ? pct : money; }
+      // Natura colorata: Ricavo verde, Costo rosso, Patrim. grigio → si riconosce a colpo d'occhio
+      cell(r, 1).s = { font: { bold: true, color: { rgb: natRgb(nat) } } };
+      // Note in corsivo grigio
       cell(r, 4).s = { alignment: { horizontal: "left", wrapText: true }, font: { italic: true, color: { rgb: "6B6B6B" } } };
+      // Consuntivo (grigio neutro) e Forecast (azzurro neutro) — NON verdi
+      cell(r, 5).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "F1F1EC" } } };
+      cell(r, 6).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } }, font: { bold: true } };
+      // Δ e Δ% colorate per FAVOREVOLE/SFAVOREVOLE secondo la natura
+      const dv = cell(r, 7).v;
+      const col = typeof dv === "number" ? favRgb(nat, dv) : GREY;
+      cell(r, 7).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+      cell(r, 8).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
     }
     // Righe totali
     totRowsIdx.forEach(r => {
+      const lbl = String(cell(r, 0).v);
+      const natTot = lbl.startsWith("TOTALE RICAVI") ? "ricavo" : lbl.startsWith("TOTALE COSTI") ? "costo" : "ris";
+      const isRis = lbl.startsWith("RISULTATO");
+      const dv = cell(r, 7).v;
       for (let c = 0; c < headers.length; c++) {
         const cc = cell(r, c);
-        const isRis = String(cell(r, 0).v).startsWith("RISULTATO");
         cc.s = { font: { bold: true, color: { rgb: isRis ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: isRis ? "1A1A1A" : "F0EFEA" } }, border: { top: border, bottom: border }, alignment: { horizontal: c >= 5 ? "right" : "left" } };
         if (c >= 5) cc.z = c === 8 ? pct : money;
+        if ((c === 7 || c === 8) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: favRgb(natTot, dv) } };
       }
     });
+    Object.assign(cell(legendRow, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Budget");
     if (cashflow && cashflow.righe.length) {
@@ -10343,6 +10367,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.text(`Budget · ${attivo.nome}`, W / 2, 20, { align: "center" });
     doc.setFontSize(9); doc.setTextColor(100);
     doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
+    doc.setFontSize(7.5); doc.setTextColor(130);
+    doc.text("Colori — Natura: Ricavo verde / Costo rosso.  Δ: verde = favorevole (ricavo in aumento o costo in calo), rosso = sfavorevole.", W / 2, 29.5, { align: "center" });
     doc.setTextColor(0);
 
     const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
@@ -10371,8 +10397,18 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       body.push(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos));
       body.push(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
     }
+    const rowMeta = (attivo.voci || []).map(v => v.natura);
+    if (totali) rowMeta.push("ricavo", "costo", "ris");
+    const favRgb = (natura, txt) => {
+      const pos = txt.startsWith("+"), neg = txt.startsWith("-");
+      if (!pos && !neg) return [120, 120, 120];
+      if (natura === "ricavo" || natura === "ris") return pos ? [30, 122, 70] : [176, 58, 46];
+      if (natura === "costo") return neg ? [30, 122, 70] : [176, 58, 46];
+      return [120, 120, 120];
+    };
+    const natRgb = (natura) => natura === "ricavo" ? [30, 122, 70] : natura === "costo" ? [176, 58, 46] : [120, 120, 120];
     doc.autoTable({
-      startY: 31,
+      startY: 34,
       head: [["Voce", "Natura", "Cassa", "Note", "Consuntivo", "Forecast", "Δ", "Δ %"]],
       body,
       styles: { fontSize: 8, cellPadding: 1.5 },
@@ -10384,15 +10420,16 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       didParseCell: (data) => {
         const ci = data.column.index;
         if (data.section === "head") {
-          if (ci === 4) data.cell.styles.fillColor = [59, 74, 90];
-          if (ci === 5) data.cell.styles.fillColor = [45, 94, 62];
+          if (ci === 4) data.cell.styles.fillColor = [107, 107, 107]; // Consuntivo: grigio neutro
+          if (ci === 5) data.cell.styles.fillColor = [59, 74, 90];    // Forecast: blu neutro
         } else if (data.section === "body") {
-          if (ci === 4) data.cell.styles.fillColor = [234, 240, 245];
-          if (ci === 5) data.cell.styles.fillColor = [232, 242, 236];
-          if (ci === 6 || ci === 7) {
+          const nat = rowMeta[data.row.index] || "patrimoniale";
+          if (ci === 4) data.cell.styles.fillColor = [241, 241, 236]; // Consuntivo neutro
+          if (ci === 5) data.cell.styles.fillColor = [234, 240, 245]; // Forecast neutro
+          if (ci === 1) data.cell.styles.textColor = natRgb(nat);     // Natura colorata (Ricavo verde / Costo rosso)
+          if (ci === 6 || ci === 7) {                                 // Δ e Δ%: favorevole verde / sfavorevole rosso
             const t = (data.cell.text && data.cell.text[0]) || "";
-            if (t.startsWith("-")) data.cell.styles.textColor = [176, 58, 46];
-            else if (t.startsWith("+")) data.cell.styles.textColor = [30, 122, 70];
+            data.cell.styles.textColor = favRgb(nat, t);
           }
         }
       },
