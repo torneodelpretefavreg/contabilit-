@@ -9939,37 +9939,35 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       return consuntivo.perConto[cod] || { dare: 0, avere: 0 };
     };
 
-    // Universo dei conti da mostrare, in base al filtro scelto.
+    // Universo dei conti da mostrare.
+    // Con una BU selezionata mostro SOLO i conti che riguardano quella BU (che hanno movimenti in quella BU),
+    // poi filtro per categoria. Con BU = Tutte lavoro sul piano dei conti completo.
+    const bUsel = bBU && bBU !== "ALL";
+    const isLiq = (cod) => CONTI_LIQUIDITA.some(l => l.codice === cod);
     let universo = [];
-    if (filtroConti === "ce") {
-      // Costi/Ricavi + liquidità: conti economici + SOLO i conti di liquidità (niente altri patrimoniali).
-      // Se è selezionata una BU, mostro SOLO i movimentati: economici mossi in quella BU e liquidità con saldo.
-      const bUsel = bBU && bBU !== "ALL";
-      const mosso = (v) => v && Math.abs((v.dare || 0) - (v.avere || 0)) > 0.005;
-      let eco = (conti || []).filter(c => c.prospetto === "CE" || c.prospetto === "SP/CE");
-      if (bUsel) eco = eco.filter(c => mosso(consuntivo.perContoBU[`${c.codice}|${bBU}`]));
-      universo = eco.map(c => c.codice);
-      CONTI_LIQUIDITA.forEach(c => {
-        if ((!bUsel || mosso(consuntivo.perConto[c.codice])) && !universo.includes(c.codice)) universo.push(c.codice);
-      });
-    } else if (filtroConti === "sp") {
-      universo = (conti || []).filter(c => c.prospetto === "SP").map(c => c.codice);
-    } else if (filtroConti === "tutti") {
-      universo = (conti || []).map(c => c.codice);
-      Object.keys(consuntivo.perConto).forEach(k => { const n = Number(k); if (!universo.includes(n)) universo.push(n); });
-    } else {
-      // Solo movimentati: conti con movimenti nello scope corrente (economici della BU + patrimoniali in totale)
+    if (bUsel) {
+      // conti con movimenti nella BU selezionata
       const set = new Set();
-      if (bBU && bBU !== "ALL") {
-        Object.keys(consuntivo.perContoBU).forEach(k => {
-          const [codStr, b] = k.split("|");
-          if (b === bBU && !isSP(Number(codStr))) set.add(Number(codStr));
-        });
-        Object.keys(consuntivo.perConto).forEach(k => { const n = Number(k); if (isSP(n)) set.add(n); });
+      Object.keys(consuntivo.perContoBU).forEach(k => {
+        const [codStr, b] = k.split("|");
+        if (b === bBU) set.add(Number(codStr));
+      });
+      let arr = [...set];
+      if (filtroConti === "ce") arr = arr.filter(cod => { const p = (contiMap[cod] || {}).prospetto; return p === "CE" || p === "SP/CE" || isLiq(cod); });
+      else if (filtroConti === "sp") arr = arr.filter(cod => (contiMap[cod] || {}).prospetto === "SP");
+      universo = arr; // "movimentati" e "tutti": tutti i conti della BU
+    } else {
+      if (filtroConti === "ce") {
+        universo = (conti || []).filter(c => c.prospetto === "CE" || c.prospetto === "SP/CE").map(c => c.codice);
+        CONTI_LIQUIDITA.forEach(c => { if (!universo.includes(c.codice)) universo.push(c.codice); });
+      } else if (filtroConti === "sp") {
+        universo = (conti || []).filter(c => c.prospetto === "SP").map(c => c.codice);
+      } else if (filtroConti === "tutti") {
+        universo = (conti || []).map(c => c.codice);
+        Object.keys(consuntivo.perConto).forEach(k => { const n = Number(k); if (!universo.includes(n)) universo.push(n); });
       } else {
-        Object.keys(consuntivo.perConto).forEach(k => set.add(Number(k)));
+        universo = Object.keys(consuntivo.perConto).map(Number);
       }
-      universo = [...set];
     }
     const righe = universo.map(cod => {
       const v = valDareAvere(cod);
@@ -9983,10 +9981,13 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         codice: cod, nome: (c.nome || `Conto ${cod}`).trim(), categoria: cat,
         prospetto: c.prospetto || "", dare: v.dare, avere: v.avere,
         saldo: v.dare - v.avere, valore, naturaVoce,
-        movimentato: Math.abs(v.dare) > 0.005 || Math.abs(v.avere) > 0.005,
+        movimentato: Math.abs(valore) > 0.005,
       };
-    }).filter(r => filtroConti === "movimentati" ? r.movimentato : true)
-      .sort((a, b) => a.codice - b.codice);
+    }).filter(r => {
+      if (filtroConti === "movimentati") return r.movimentato;
+      if (bUsel) return r.movimentato; // con BU: niente conti a zero
+      return true;
+    }).sort((a, b) => a.codice - b.codice);
     const tot = {
       ricavi: righe.filter(r => r.naturaVoce === "ricavo").reduce((s, r) => s + r.valore, 0),
       costi: righe.filter(r => r.naturaVoce === "costo").reduce((s, r) => s + r.valore, 0),
