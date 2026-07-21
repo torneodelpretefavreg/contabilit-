@@ -10372,23 +10372,24 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.setTextColor(0);
 
     const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
-    const sign = (n) => (n > 0.005 ? "+" : "") + n.toFixed(2);
-    const pctTxt = (dAbs, cons) => Math.abs(cons) > 0.005 ? ((dAbs / Math.abs(cons)) * 100 > 0 ? "+" : "") + ((dAbs / Math.abs(cons)) * 100).toFixed(1) + "%" : "n/d";
+    const n0 = (n) => Math.round(n).toLocaleString("it-IT");
+    const sign = (n) => { const r = Math.round(n); return (r > 0 ? "+" : "") + r.toLocaleString("it-IT"); };
+    const pctTxt = (dAbs, cons) => { if (Math.abs(cons) <= 0.005) return "n/d"; const p = Math.round((dAbs / Math.abs(cons)) * 100); return (p > 0 ? "+" : "") + p + "%"; };
     const body = (attivo.voci || []).map(v => {
       const cons = actualVoce(v);
       const bud = Number(v.importo) || 0;
       const forecast = addA ? (bud + cons) : bud;
       const dAbs = forecast - cons;
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—";
-      return [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", cons.toFixed(2), forecast.toFixed(2), sign(dAbs), pctTxt(dAbs, cons)];
+      return [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", n0(cons), n0(forecast), sign(dAbs), pctTxt(dAbs, cons)];
     });
     if (totali) {
       const mkTot = (label, cons, forecast) => {
         const dAbs = forecast - cons;
         return [
           { content: label, colSpan: 4, styles: { fontStyle: "bold" } },
-          { content: cons.toFixed(2), styles: { fontStyle: "bold", halign: "right" } },
-          { content: forecast.toFixed(2), styles: { fontStyle: "bold", halign: "right" } },
+          { content: n0(cons), styles: { fontStyle: "bold", halign: "right" } },
+          { content: n0(forecast), styles: { fontStyle: "bold", halign: "right" } },
           { content: sign(dAbs), styles: { fontStyle: "bold", halign: "right" } },
           { content: pctTxt(dAbs, cons), styles: { fontStyle: "bold", halign: "right" } },
         ];
@@ -10397,6 +10398,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       body.push(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos));
       body.push(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
     }
+    const nVoci = (attivo.voci || []).length;
     const rowMeta = (attivo.voci || []).map(v => v.natura);
     if (totali) rowMeta.push("ricavo", "costo", "ris");
     const favRgb = (natura, txt) => {
@@ -10420,18 +10422,36 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       didParseCell: (data) => {
         const ci = data.column.index;
         if (data.section === "head") {
-          if (ci === 4) data.cell.styles.fillColor = [107, 107, 107]; // Consuntivo: grigio neutro
-          if (ci === 5) data.cell.styles.fillColor = [59, 74, 90];    // Forecast: blu neutro
-        } else if (data.section === "body") {
-          const nat = rowMeta[data.row.index] || "patrimoniale";
-          if (ci === 4) data.cell.styles.fillColor = [241, 241, 236]; // Consuntivo neutro
-          if (ci === 5) data.cell.styles.fillColor = [234, 240, 245]; // Forecast neutro
-          if (ci === 1) data.cell.styles.textColor = natRgb(nat);     // Natura colorata (Ricavo verde / Costo rosso)
-          if (ci === 6 || ci === 7) {                                 // Δ e Δ%: favorevole verde / sfavorevole rosso
-            const t = (data.cell.text && data.cell.text[0]) || "";
-            data.cell.styles.textColor = favRgb(nat, t);
-          }
+          if (ci === 4) data.cell.styles.fillColor = [107, 107, 107];
+          if (ci === 5) data.cell.styles.fillColor = [59, 74, 90];
+          return;
         }
+        if (data.section !== "body") return;
+        const nat = rowMeta[data.row.index] || "patrimoniale";
+        const isTot = data.row.index >= nVoci;
+        const txt = (data.cell.text && data.cell.text[0]) || "";
+        if (isTot) {
+          data.cell.styles.fontStyle = "bold";
+          if (nat === "ris") {
+            // RISULTATO finale: barra scura, testo bianco, più grande
+            data.cell.styles.fillColor = [26, 26, 26];
+            data.cell.styles.textColor = [255, 255, 255];
+            data.cell.styles.fontSize = 10;
+            data.cell.styles.minCellHeight = 9;
+            if (ci === 6 || ci === 7) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
+          } else {
+            // TOTALE RICAVI / COSTI: fascia chiara
+            data.cell.styles.fillColor = [235, 234, 228];
+            data.cell.styles.fontSize = 9;
+            if (ci === 6 || ci === 7) data.cell.styles.textColor = favRgb(nat, txt);
+          }
+          return;
+        }
+        // Righe normali
+        if (ci === 4) data.cell.styles.fillColor = [241, 241, 236];
+        if (ci === 5) data.cell.styles.fillColor = [234, 240, 245];
+        if (ci === 1) data.cell.styles.textColor = natRgb(nat);
+        if (ci === 6 || ci === 7) data.cell.styles.textColor = favRgb(nat, txt);
       },
     });
 
@@ -10439,15 +10459,15 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       let y = doc.lastAutoTable.finalY + 10;
       doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Piano di cassa (cash flow plan)", 14, y);
       const cfBody = cashflow.righe.map(r => [
-        r.nome.trim(), r.saldo.toFixed(2), r.inBud.toFixed(2), r.outBud.toFixed(2), r.netto.toFixed(2), r.saldoPrev.toFixed(2),
+        r.nome.trim(), n0(r.saldo), n0(r.inBud), n0(r.outBud), n0(r.netto), n0(r.saldoPrev),
       ]);
       cfBody.push([
         { content: "TOTALE", styles: { fontStyle: "bold" } },
-        { content: cashflow.tot.saldo.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: cashflow.tot.inBud.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: cashflow.tot.outBud.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: cashflow.netto.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: cashflow.tot.saldoPrev.toFixed(2), styles: { fontStyle: "bold" } },
+        { content: n0(cashflow.tot.saldo), styles: { fontStyle: "bold" } },
+        { content: n0(cashflow.tot.inBud), styles: { fontStyle: "bold" } },
+        { content: n0(cashflow.tot.outBud), styles: { fontStyle: "bold" } },
+        { content: n0(cashflow.netto), styles: { fontStyle: "bold" } },
+        { content: n0(cashflow.tot.saldoPrev), styles: { fontStyle: "bold" } },
       ]);
       doc.autoTable({
         startY: y + 3,
