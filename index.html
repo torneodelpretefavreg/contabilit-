@@ -3629,6 +3629,7 @@ function buildRendiconto(movimenti, conti, saldiIniziali, investSet) {
     mappa[cat][mese] = (mappa[cat][mese] || 0) + v;
   };
   (movimenti || []).forEach(m => {
+    if (m.apertura) return;              // le aperture NON sono flussi del periodo: non pesano sul rendiconto
     if (m.nonMonetario) return;          // i movimenti non monetari (ammortamenti) non incidono sulla liquidità
     const cat = m.categoria || "(senza categoria)";
     const mese = m.mese || "?";
@@ -3647,7 +3648,15 @@ function buildRendiconto(movimenti, conti, saldiIniziali, investSet) {
   const totInvest = sumMese(investimenti);
   const saldoOp = {}; MESI.forEach(m => saldoOp[m] = totEntrate[m] - totUsciteOp[m]);
 
-  const openingTot = CONTI_LIQUIDITA.reduce((s, c) => s + (Number(saldiIniziali && saldiIniziali[c.codice]) || 0), 0);
+  // Base di partenza (DISP. INIZIALI) = SOLO i conti di liquidità:
+  // saldi iniziali liquidità (di norma 0) + aperture MONETARIE registrate sui conti di liquidità.
+  // Le aperture degli altri conti (crediti, debiti, capitale, cespiti, fondi…) NON entrano nel rendiconto.
+  const liqSet = new Set(CONTI_LIQUIDITA.map(c => c.codice));
+  let openingTot = CONTI_LIQUIDITA.reduce((s, c) => s + (Number(saldiIniziali && saldiIniziali[c.codice]) || 0), 0);
+  (movimenti || []).forEach(m => {
+    if (!m.apertura || m.contoLiquidita == null || !liqSet.has(Number(m.contoLiquidita))) return;
+    openingTot += (m.tipo === "entrata" ? 1 : m.tipo === "uscita" ? -1 : 0) * (Number(m.importo) || 0);
+  });
   const dispIniz = {}, dispFin = {}, variaz = {};
   let running = openingTot;
   MESI.forEach(m => {
@@ -3723,7 +3732,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
 
   const apriDrill = (sezione, categoria, mese) => {
     const movs = filtered.filter(m => {
-      if ((m.categoria || "(senza categoria)") !== categoria || m.nonMonetario) return false;
+      if ((m.categoria || "(senza categoria)") !== categoria || m.nonMonetario || m.apertura) return false;
       if (mese !== "__tot__" && m.mese !== mese) return false;
       if (sezione === "entrate") return m.tipo === "entrata";
       if (sezione === "uscite") return m.tipo === "uscita" && !rf.isInvest(m);
