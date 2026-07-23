@@ -3607,6 +3607,15 @@ function mergeCategorie(categorieRF, movimenti) {
 }
 
 // ============================================================
+// Riconosce una scrittura di APERTURA in modo robusto: flag esplicito, oppure categoria
+// "APERTURA", oppure descrizione che inizia con "apertura:". Serve perché nei dati reali
+// alcune aperture possono avere solo la categoria e non il flag.
+function isAperturaMov(m) {
+  return m.apertura === true
+    || (m.categoria || "").trim().toUpperCase() === "APERTURA"
+    || (m.descrizione || "").trim().toLowerCase().startsWith("apertura:");
+}
+
 // HELPER: costruzione Rendiconto Finanziario (schema unico)
 // ============================================================
 // Schema ispirato al foglio "RF NEW": un solo prospetto verticale con
@@ -3629,7 +3638,7 @@ function buildRendiconto(movimenti, conti, saldiIniziali, investSet) {
     mappa[cat][mese] = (mappa[cat][mese] || 0) + v;
   };
   (movimenti || []).forEach(m => {
-    if (m.apertura) return;              // le aperture NON sono flussi del periodo: non pesano sul rendiconto
+    if (isAperturaMov(m)) return;        // le aperture NON sono flussi del periodo: non pesano sul rendiconto
     if (m.nonMonetario) return;          // i movimenti non monetari (ammortamenti) non incidono sulla liquidità
     const cat = m.categoria || "(senza categoria)";
     const mese = m.mese || "?";
@@ -3654,7 +3663,7 @@ function buildRendiconto(movimenti, conti, saldiIniziali, investSet) {
   const liqSet = new Set(CONTI_LIQUIDITA.map(c => c.codice));
   let openingTot = CONTI_LIQUIDITA.reduce((s, c) => s + (Number(saldiIniziali && saldiIniziali[c.codice]) || 0), 0);
   (movimenti || []).forEach(m => {
-    if (!m.apertura || m.contoLiquidita == null || !liqSet.has(Number(m.contoLiquidita))) return;
+    if (!isAperturaMov(m) || m.contoLiquidita == null || !liqSet.has(Number(m.contoLiquidita))) return;
     openingTot += (m.tipo === "entrata" ? 1 : m.tipo === "uscita" ? -1 : 0) * (Number(m.importo) || 0);
   });
   const dispIniz = {}, dispFin = {}, variaz = {};
@@ -3732,7 +3741,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
 
   const apriDrill = (sezione, categoria, mese) => {
     const movs = filtered.filter(m => {
-      if ((m.categoria || "(senza categoria)") !== categoria || m.nonMonetario || m.apertura) return false;
+      if ((m.categoria || "(senza categoria)") !== categoria || m.nonMonetario || isAperturaMov(m)) return false;
       if (mese !== "__tot__" && m.mese !== mese) return false;
       if (sezione === "entrate") return m.tipo === "entrata";
       if (sezione === "uscite") return m.tipo === "uscita" && !rf.isInvest(m);
