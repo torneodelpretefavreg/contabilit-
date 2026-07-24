@@ -10468,19 +10468,31 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         if (ecc.includes("AVERE")) return "passivo";
         return val < -0.005 ? "passivo" : "attivo";
       };
+      // FORECAST PATRIMONIALE: i conti di liquidità devono assorbire i FLUSSI PREVISTI dal budget,
+      // altrimenti lo Stato Patrimoniale resta fermo al consuntivo mentre il Conto Economico si muove
+      // e il prospetto non quadra (Attivo − Passivo ≠ Risultato).
+      const flussoLiq = {};
+      if (cashflow) cashflow.righe.forEach(r => { flussoLiq[r.codice] = r.netto; });
+      const claimedLiq = new Set();
       // Il passivo si mostra in valore positivo (convenzione dello Stato Patrimoniale):
       // i saldi patrimoniali sono calcolati come DARE−AVERE, quindi si inverte il segno.
       const prep = patr.map(v => {
         const cons = actualVoce(v);
         const bud = Number(v.importo) || 0;
-        const forecast = addA ? (bud + cons) : bud;
+        let flusso = 0;
+        (v.conti || []).forEach(c => {
+          const cod = Number(c);
+          if (flussoLiq[cod] !== undefined && !claimedLiq.has(cod)) { claimedLiq.add(cod); flusso += flussoLiq[cod]; }
+        });
+        const forecast = (addA ? (bud + cons) : bud) + flusso;
         const sez = sezioneSP(v, Math.abs(cons) > 0.005 ? cons : forecast);
         const seg = sez === "passivo" ? -1 : 1;
-        return { v, sez, cons: cons * seg, forecast: forecast * seg };
+        return { v, sez, flusso, cons: cons * seg, forecast: forecast * seg };
       });
       const rigaSP = (p) => {
         const dAbs = p.forecast - p.cons;
-        return [p.v.descrizione || "—", naturaLbl[p.v.natura] || p.v.natura, "—", p.v.note || "", n0(p.cons), n0(p.forecast), sign(dAbs), pctTxt(dAbs, p.cons)];
+        const note = [p.v.note || "", Math.abs(p.flusso) > 0.005 ? `flussi previsti ${sign(p.flusso)}` : ""].filter(Boolean).join(" · ");
+        return [p.v.descrizione || "—", naturaLbl[p.v.natura] || p.v.natura, "—", note, n0(p.cons), n0(p.forecast), sign(dAbs), pctTxt(dAbs, p.cons)];
       };
       const att = prep.filter(p => p.sez === "attivo");
       const pas = prep.filter(p => p.sez === "passivo");
@@ -10496,7 +10508,24 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         pas.forEach(p => addRow(rigaSP(p), { kind: "data", nat: "patrimoniale" }));
         addRow(mkTot("TOTALE PASSIVO", somma(pas, "cons"), somma(pas, "forecast")), { kind: "subtot", nat: "patrimoniale" });
       }
-      addRow(mkTot("PATRIMONIALE NETTO (attivo − passivo)", somma(att, "cons") - somma(pas, "cons"), somma(att, "forecast") - somma(pas, "forecast")), { kind: "subtot", nat: "patrimoniale" });
+      const nettoCons = somma(att, "cons") - somma(pas, "cons");
+      const nettoFore = somma(att, "forecast") - somma(pas, "forecast");
+      addRow(mkTot("PATRIMONIALE NETTO (attivo − passivo)", nettoCons, nettoFore), { kind: "subtot", nat: "patrimoniale" });
+      // QUADRATURA: netto patrimoniale − risultato economico. Deve essere 0 su entrambe le colonne.
+      const risCons = totali.actRis;
+      const risFore = addA ? totali.effRis : totali.budRis;
+      const gapC = nettoCons - risCons, gapF = nettoFore - risFore;
+      const quadra = Math.abs(gapC) < 0.51 && Math.abs(gapF) < 0.51;
+      addRow([
+        { content: quadra ? "QUADRATURA ✓  netto patrimoniale = risultato economico" : "QUADRATURA ✗  scarto netto patrimoniale − risultato", colSpan: 4 },
+        { content: n0(gapC), styles: { halign: "right" } },
+        { content: n0(gapF), styles: { halign: "right" } },
+        { content: "", styles: { halign: "right" } },
+        { content: "", styles: { halign: "right" } },
+      ], { kind: "check", ok: quadra });
+      if (!quadra && cashflow && cashflow.senzaCassa > 0.005) {
+        addRow([{ content: `Scarto dovuto a ${n0(cashflow.senzaCassa)} € di budget senza conto di cassa associato: assegna una cassa a quelle voci per far quadrare.`, colSpan: 8 }], { kind: "warn" });
+      }
     }
     const favRgb = (natura, txt) => {
       const pos = txt.startsWith("+"), neg = txt.startsWith("-");
@@ -10549,6 +10578,20 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           data.cell.styles.fontSize = 10;
           data.cell.styles.minCellHeight = 9;
           if (ci === 6 || ci === 7) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
+          return;
+        }
+        if (m.kind === "check") {
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.fillColor = m.ok ? [225, 240, 230] : [250, 228, 225];
+          data.cell.styles.textColor = m.ok ? [30, 122, 70] : [176, 58, 46];
+          data.cell.styles.fontSize = 9;
+          return;
+        }
+        if (m.kind === "warn") {
+          data.cell.styles.fillColor = [253, 243, 224];
+          data.cell.styles.textColor = [150, 90, 20];
+          data.cell.styles.fontStyle = "italic";
+          data.cell.styles.fontSize = 7.5;
           return;
         }
         if (m.kind === "subtot") {
