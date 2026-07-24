@@ -1500,11 +1500,14 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
     return map;
   }, [movimenti, saldiIniziali]);
 
-  // KPI: nuove = solo movimenti registrati dall'utente, totale = inclusi gli importati
-  const totEntrateNuove = movimenti.filter(m => m.tipo === "entrata" && !m.importato).reduce((s,m) => s + m.importo, 0);
-  const totUsciteNuove = movimenti.filter(m => m.tipo === "uscita" && !m.importato).reduce((s,m) => s + m.importo, 0);
-  const totEntrate = movimenti.filter(m => m.tipo === "entrata").reduce((s,m) => s + m.importo, 0);
-  const totUscite = movimenti.filter(m => m.tipo === "uscita").reduce((s,m) => s + m.importo, 0);
+  // KPI: nuove = solo movimenti registrati dall'utente, totale = inclusi gli importati.
+  // Le APERTURE sono escluse: non sono entrate/uscite della stagione ma la dotazione iniziale.
+  // (restano invece nei "saldi" qui sopra, perché lì costituiscono la base della liquidità reale)
+  const movStagione = movimenti.filter(m => !isAperturaMov(m));
+  const totEntrateNuove = movStagione.filter(m => m.tipo === "entrata" && !m.importato).reduce((s,m) => s + m.importo, 0);
+  const totUsciteNuove = movStagione.filter(m => m.tipo === "uscita" && !m.importato).reduce((s,m) => s + m.importo, 0);
+  const totEntrate = movStagione.filter(m => m.tipo === "entrata").reduce((s,m) => s + m.importo, 0);
+  const totUscite = movStagione.filter(m => m.tipo === "uscita").reduce((s,m) => s + m.importo, 0);
   const liquiditaTotale = Object.values(saldi).reduce((s,v) => s + v.iniziale + v.entrate - v.uscite, 0);
 
   return (
@@ -1525,12 +1528,12 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
         <div className="kpi">
           <div className="label">Entrate stagione</div>
           <div className="value" style={{color:"var(--accent)"}}>{fmtEuro(totEntrate)}</div>
-          <div className="hint">{totEntrateNuove > 0 ? `di cui ${fmtEuro(totEntrateNuove)} nuove` : `${movimenti.filter(m=>m.tipo==="entrata").length} movimenti`}</div>
+          <div className="hint">{totEntrateNuove > 0 ? `di cui ${fmtEuro(totEntrateNuove)} nuove` : `${movStagione.filter(m=>m.tipo==="entrata").length} movimenti`}</div>
         </div>
         <div className="kpi">
           <div className="label">Uscite stagione</div>
           <div className="value" style={{color:"var(--danger)"}}>{fmtEuro(totUscite)}</div>
-          <div className="hint">{totUsciteNuove > 0 ? `di cui ${fmtEuro(totUsciteNuove)} nuove` : `${movimenti.filter(m=>m.tipo==="uscita").length} movimenti`}</div>
+          <div className="hint">{totUsciteNuove > 0 ? `di cui ${fmtEuro(totUsciteNuove)} nuove` : `${movStagione.filter(m=>m.tipo==="uscita").length} movimenti`}</div>
         </div>
         <div className="kpi">
           <div className="label">Saldo stagione</div>
@@ -10405,7 +10408,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.setFontSize(9); doc.setTextColor(100);
     doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
     doc.setFontSize(7.5); doc.setTextColor(130);
-    doc.text("Voci raggruppate per prospetto (Conto Economico / Stato Patrimoniale).  Δ: verde = favorevole (ricavo in aumento o costo in calo), rosso = sfavorevole; voci patrimoniali neutre.", W / 2, 29.5, { align: "center" });
+    doc.text("Voci per prospetto: Conto Economico (Ricavi/Costi) e Stato Patrimoniale (Attivo/Passivo, passivo in valore positivo).  Δ: verde = favorevole, rosso = sfavorevole; voci patrimoniali neutre.", W / 2, 29.5, { align: "center" });
     doc.setTextColor(0);
 
     const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
@@ -10452,9 +10455,48 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       addRow(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis), { kind: "risultato", nat: "ris" });
     }
     if (patr.length) {
+      // Classificazione ATTIVO / PASSIVO come nel resto dell'app:
+      // categoria del conto, poi eccedenza (DARE/AVERE), infine segno del saldo.
+      const CAT_ATT = ["DISP. LIQUIDE", "IMM. MATERIALI", "IMM. IMMATERIALI", "CREDITI"];
+      const CAT_PAS = ["DEBITI", "PN", "RETTIFICA ATTIVO"];
+      const sezioneSP = (v, val) => {
+        const cats = (v.conti || []).map(c => (contiMap[c] || {}).categoria).filter(Boolean);
+        if (cats.some(c => CAT_ATT.includes(c))) return "attivo";
+        if (cats.some(c => CAT_PAS.includes(c))) return "passivo";
+        const ecc = (v.conti || []).map(c => (contiMap[c] || {}).eccedenza).filter(Boolean);
+        if (ecc.includes("DARE")) return "attivo";
+        if (ecc.includes("AVERE")) return "passivo";
+        return val < -0.005 ? "passivo" : "attivo";
+      };
+      // Il passivo si mostra in valore positivo (convenzione dello Stato Patrimoniale):
+      // i saldi patrimoniali sono calcolati come DARE−AVERE, quindi si inverte il segno.
+      const prep = patr.map(v => {
+        const cons = actualVoce(v);
+        const bud = Number(v.importo) || 0;
+        const forecast = addA ? (bud + cons) : bud;
+        const sez = sezioneSP(v, Math.abs(cons) > 0.005 ? cons : forecast);
+        const seg = sez === "passivo" ? -1 : 1;
+        return { v, sez, cons: cons * seg, forecast: forecast * seg };
+      });
+      const rigaSP = (p) => {
+        const dAbs = p.forecast - p.cons;
+        return [p.v.descrizione || "—", naturaLbl[p.v.natura] || p.v.natura, "—", p.v.note || "", n0(p.cons), n0(p.forecast), sign(dAbs), pctTxt(dAbs, p.cons)];
+      };
+      const att = prep.filter(p => p.sez === "attivo");
+      const pas = prep.filter(p => p.sez === "passivo");
+      const somma = (arr, k) => arr.reduce((s, p) => s + p[k], 0);
       addRow([{ content: "STATO PATRIMONIALE", colSpan: 8 }], { kind: "section" });
-      patr.forEach(v => addRow(rigaVoce(v), { kind: "data", nat: "patrimoniale" }));
-      addRow(mkTot("TOTALE PATRIMONIALE", totali.actFin, addA ? totali.effFin : totali.budFin), { kind: "subtot", nat: "patrimoniale" });
+      if (att.length) {
+        addRow([{ content: "Attivo", colSpan: 8 }], { kind: "sub" });
+        att.forEach(p => addRow(rigaSP(p), { kind: "data", nat: "patrimoniale" }));
+        addRow(mkTot("TOTALE ATTIVO", somma(att, "cons"), somma(att, "forecast")), { kind: "subtot", nat: "patrimoniale" });
+      }
+      if (pas.length) {
+        addRow([{ content: "Passivo", colSpan: 8 }], { kind: "sub" });
+        pas.forEach(p => addRow(rigaSP(p), { kind: "data", nat: "patrimoniale" }));
+        addRow(mkTot("TOTALE PASSIVO", somma(pas, "cons"), somma(pas, "forecast")), { kind: "subtot", nat: "patrimoniale" });
+      }
+      addRow(mkTot("PATRIMONIALE NETTO (attivo − passivo)", somma(att, "cons") - somma(pas, "cons"), somma(att, "forecast") - somma(pas, "forecast")), { kind: "subtot", nat: "patrimoniale" });
     }
     const favRgb = (natura, txt) => {
       const pos = txt.startsWith("+"), neg = txt.startsWith("-");
