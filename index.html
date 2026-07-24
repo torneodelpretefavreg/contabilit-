@@ -10256,10 +10256,11 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   });
 
   function exportExcel() {
-    if (typeof XLSX === "undefined" || !attivo) { onToast("Nessun budget aperto"); return; }
+    if (typeof XLSX === "undefined" || !attivo || !totali) { onToast("Nessun budget aperto"); return; }
     const bBU = attivo.bu || "ALL";
     const addA = attivo.sommaConsuntivo === true;
     const pctFrac = (dAbs, cons) => Math.abs(cons) > 0.005 ? dAbs / Math.abs(cons) : null;
+    const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
 
     const headers = ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Consuntivo", "Forecast", "Δ (forecast − cons.)", "Δ %"];
     const aoa = [
@@ -10268,8 +10269,10 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       [],
       headers,
     ];
-    const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
-    (attivo.voci || []).forEach(v => {
+    const meta = [{}, {}, {}, { kind: "head" }]; // meta parallelo alle righe di aoa
+
+    const voci = attivo.voci || [];
+    const rigaVoce = (v) => {
       const cons = actualVoce(v);
       const bud = Number(v.importo) || 0;
       const forecast = addA ? (bud + cons) : bud;
@@ -10277,28 +10280,47 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       const pf = pctFrac(dAbs, cons);
       const conti = (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", ");
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "";
-      aoa.push([v.descrizione || "", naturaLbl[v.natura] || v.natura, conti, cassa, v.note || "", cons, forecast, dAbs, pf === null ? "n/d" : pf]);
-    });
-    let totRowsIdx = [];
-    if (totali) {
-      aoa.push([]);
-      const mk = (label, cons, forecast) => { const dAbs = forecast - cons; const pf = pctFrac(dAbs, cons); return [label, "", "", "", "", cons, forecast, dAbs, pf === null ? "n/d" : pf]; };
-      const base = aoa.length;
-      aoa.push(mk("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic));
-      aoa.push(mk("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos));
-      aoa.push(mk("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
-      totRowsIdx = [base, base + 1, base + 2];
+      return [v.descrizione || "", naturaLbl[v.natura] || v.natura, conti, cassa, v.note || "", cons, forecast, dAbs, pf === null ? "n/d" : pf];
+    };
+    const mkTot = (label, cons, forecast) => {
+      const dAbs = forecast - cons, pf = pctFrac(dAbs, cons);
+      return [label, "", "", "", "", cons, forecast, dAbs, pf === null ? "n/d" : pf];
+    };
+    const push = (row, m) => { aoa.push(row); meta.push(m); };
+
+    // ===== CONTO ECONOMICO =====
+    const ricavi = voci.filter(v => v.natura === "ricavo");
+    const costi = voci.filter(v => v.natura === "costo");
+    const patr = voci.filter(v => v.natura === "patrimoniale");
+    if (ricavi.length || costi.length) {
+      push(["CONTO ECONOMICO"], { kind: "section" });
+      if (ricavi.length) {
+        push(["Ricavi"], { kind: "sub" });
+        ricavi.forEach(v => push(rigaVoce(v), { kind: "data", nat: "ricavo" }));
+        push(mkTot("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic), { kind: "subtot", nat: "ricavo" });
+      }
+      if (costi.length) {
+        push(["Costi"], { kind: "sub" });
+        costi.forEach(v => push(rigaVoce(v), { kind: "data", nat: "costo" }));
+        push(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos), { kind: "subtot", nat: "costo" });
+      }
+      push(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis), { kind: "risultato", nat: "ris" });
     }
-    aoa.push([], ["Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Natura: Ricavo (verde), Costo (rosso), Patrim. (grigio)."]);
-    const legendRow = aoa.length - 1;
+    // ===== STATO PATRIMONIALE =====
+    if (patr.length) {
+      push([], {});
+      push(["STATO PATRIMONIALE"], { kind: "section" });
+      patr.forEach(v => push(rigaVoce(v), { kind: "data", nat: "patrimoniale" }));
+      push(mkTot("TOTALE PATRIMONIALE", totali.actFin, addA ? totali.effFin : totali.budFin), { kind: "subtot", nat: "patrimoniale" });
+    }
+    push([], {});
+    push(["Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Le voci patrimoniali sono neutre (saldi, non flussi di risultato)."], { kind: "legend" });
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 26 }, { wch: 10 }, { wch: 30 }, { wch: 13 }, { wch: 26 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }];
-    const nData = (attivo.voci || []).length;
+    ws["!cols"] = [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }];
     const money = "#,##0.00", pct = "+0.0%;-0.0%;0.0%";
     const border = { style: "thin", color: { rgb: "D9D6CE" } };
     const cell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: "s", v: "" }; return ws[ref]; };
-    // colore "favorevole/sfavorevole" della Δ in base alla natura (verde = favorevole, rosso = sfavorevole)
     const GREEN = "1E7A46", RED = "B03A2E", GREY = "777777";
     const favRgb = (natura, dAbs) => {
       if (Math.abs(dAbs) < 0.005) return GREY;
@@ -10307,47 +10329,44 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       return GREY; // patrimoniale: neutro
     };
     const natRgb = (natura) => natura === "ricavo" ? GREEN : natura === "costo" ? RED : GREY;
-    const natFrom = (lbl) => lbl === "Ricavo" ? "ricavo" : lbl === "Costo" ? "costo" : "patrimoniale";
-    // Titolo e sottotitolo
     Object.assign(cell(0, 0), { s: { font: { bold: true, sz: 14 } } });
     Object.assign(cell(1, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
-    // Intestazione (riga 3): scura; Consuntivo (grigio) e Forecast (blu) con tinte NEUTRE, non verdi
     for (let c = 0; c < headers.length; c++) {
       const fill = c === 5 ? "6B6B6B" : c === 6 ? "3B4A5A" : "1A1A1A";
       Object.assign(cell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 10 }, fill: { fgColor: { rgb: fill } }, alignment: { horizontal: c >= 5 ? "right" : "left", vertical: "center", wrapText: true } } });
     }
-    // Righe dati
-    for (let i = 0; i < nData; i++) {
-      const r = 4 + i;
-      const nat = natFrom(cell(r, 1).v);
-      for (let c = 5; c <= 8; c++) { const cc = cell(r, c); cc.z = c === 8 ? pct : money; }
-      // Natura colorata: Ricavo verde, Costo rosso, Patrim. grigio → si riconosce a colpo d'occhio
-      cell(r, 1).s = { font: { bold: true, color: { rgb: natRgb(nat) } } };
-      // Note in corsivo grigio
-      cell(r, 4).s = { alignment: { horizontal: "left", wrapText: true }, font: { italic: true, color: { rgb: "6B6B6B" } } };
-      // Consuntivo (grigio neutro) e Forecast (azzurro neutro) — NON verdi
-      cell(r, 5).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "F1F1EC" } } };
-      cell(r, 6).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } }, font: { bold: true } };
-      // Δ e Δ% colorate per FAVOREVOLE/SFAVOREVOLE secondo la natura
+    meta.forEach((m, r) => {
+      if (!m.kind || m.kind === "head") return;
+      if (m.kind === "section") {
+        for (let c = 0; c < headers.length; c++) cell(r, c).s = { font: { bold: true, sz: 11, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "3B4A5A" } }, alignment: { horizontal: "left" } };
+        return;
+      }
+      if (m.kind === "sub") {
+        for (let c = 0; c < headers.length; c++) cell(r, c).s = { font: { bold: true, sz: 10, color: { rgb: "3B4A5A" } }, fill: { fgColor: { rgb: "EAF0F5" } } };
+        return;
+      }
+      if (m.kind === "legend") { cell(r, 0).s = { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } }; return; }
       const dv = cell(r, 7).v;
-      const col = typeof dv === "number" ? favRgb(nat, dv) : GREY;
-      cell(r, 7).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
-      cell(r, 8).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
-    }
-    // Righe totali
-    totRowsIdx.forEach(r => {
-      const lbl = String(cell(r, 0).v);
-      const natTot = lbl.startsWith("TOTALE RICAVI") ? "ricavo" : lbl.startsWith("TOTALE COSTI") ? "costo" : "ris";
-      const isRis = lbl.startsWith("RISULTATO");
-      const dv = cell(r, 7).v;
+      if (m.kind === "data") {
+        for (let c = 5; c <= 8; c++) cell(r, c).z = c === 8 ? pct : money;
+        cell(r, 1).s = { font: { bold: true, color: { rgb: natRgb(m.nat) } } };
+        cell(r, 4).s = { alignment: { horizontal: "left", wrapText: true }, font: { italic: true, color: { rgb: "6B6B6B" } } };
+        cell(r, 5).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "F1F1EC" } } };
+        cell(r, 6).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } }, font: { bold: true } };
+        const col = typeof dv === "number" ? favRgb(m.nat, dv) : GREY;
+        cell(r, 7).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+        cell(r, 8).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+        return;
+      }
+      // subtot | risultato
+      const isRis = m.kind === "risultato";
       for (let c = 0; c < headers.length; c++) {
         const cc = cell(r, c);
         cc.s = { font: { bold: true, color: { rgb: isRis ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: isRis ? "1A1A1A" : "F0EFEA" } }, border: { top: border, bottom: border }, alignment: { horizontal: c >= 5 ? "right" : "left" } };
         if (c >= 5) cc.z = c === 8 ? pct : money;
-        if ((c === 7 || c === 8) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: favRgb(natTot, dv) } };
+        if ((c === 7 || c === 8) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: isRis ? (dv > 0.005 ? "78DC96" : dv < -0.005 ? "F08C82" : "DCDCDC") : favRgb(m.nat, dv) } };
       }
     });
-    Object.assign(cell(legendRow, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Budget");
     if (cashflow && cashflow.righe.length) {
@@ -10373,7 +10392,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   }
 
   function exportPDF() {
-    if (!window.jspdf || !attivo) { onToast("Nessun budget aperto"); return; }
+    if (!window.jspdf || !attivo || !totali) { onToast("Nessun budget aperto"); return; }
     const bBU = attivo.bu || "ALL";
     const addA = attivo.sommaConsuntivo === true;
     const { jsPDF } = window.jspdf;
@@ -10386,39 +10405,57 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.setFontSize(9); doc.setTextColor(100);
     doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
     doc.setFontSize(7.5); doc.setTextColor(130);
-    doc.text("Colori — Natura: Ricavo verde / Costo rosso.  Δ: verde = favorevole (ricavo in aumento o costo in calo), rosso = sfavorevole.", W / 2, 29.5, { align: "center" });
+    doc.text("Voci raggruppate per prospetto (Conto Economico / Stato Patrimoniale).  Δ: verde = favorevole (ricavo in aumento o costo in calo), rosso = sfavorevole; voci patrimoniali neutre.", W / 2, 29.5, { align: "center" });
     doc.setTextColor(0);
 
     const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
     const n0 = (n) => Math.round(n).toLocaleString("it-IT");
     const sign = (n) => { const r = Math.round(n); return (r > 0 ? "+" : "") + r.toLocaleString("it-IT"); };
     const pctTxt = (dAbs, cons) => { if (Math.abs(cons) <= 0.005) return "n/d"; const p = Math.round((dAbs / Math.abs(cons)) * 100); return (p > 0 ? "+" : "") + p + "%"; };
-    const body = (attivo.voci || []).map(v => {
+    const body = [], rowMeta = [];
+    const rigaVoce = (v) => {
       const cons = actualVoce(v);
       const bud = Number(v.importo) || 0;
       const forecast = addA ? (bud + cons) : bud;
       const dAbs = forecast - cons;
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—";
       return [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", n0(cons), n0(forecast), sign(dAbs), pctTxt(dAbs, cons)];
-    });
-    if (totali) {
-      const mkTot = (label, cons, forecast) => {
-        const dAbs = forecast - cons;
-        return [
-          { content: label, colSpan: 4, styles: { fontStyle: "bold" } },
-          { content: n0(cons), styles: { fontStyle: "bold", halign: "right" } },
-          { content: n0(forecast), styles: { fontStyle: "bold", halign: "right" } },
-          { content: sign(dAbs), styles: { fontStyle: "bold", halign: "right" } },
-          { content: pctTxt(dAbs, cons), styles: { fontStyle: "bold", halign: "right" } },
-        ];
-      };
-      body.push(mkTot("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic));
-      body.push(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos));
-      body.push(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis));
+    };
+    const mkTot = (label, cons, forecast) => {
+      const dAbs = forecast - cons;
+      return [
+        { content: label, colSpan: 4 },
+        { content: n0(cons), styles: { halign: "right" } },
+        { content: n0(forecast), styles: { halign: "right" } },
+        { content: sign(dAbs), styles: { halign: "right" } },
+        { content: pctTxt(dAbs, cons), styles: { halign: "right" } },
+      ];
+    };
+    const addRow = (row, m) => { body.push(row); rowMeta.push(m); };
+    const voci = attivo.voci || [];
+    const ricavi = voci.filter(v => v.natura === "ricavo");
+    const costi = voci.filter(v => v.natura === "costo");
+    const patr = voci.filter(v => v.natura === "patrimoniale");
+
+    if (ricavi.length || costi.length) {
+      addRow([{ content: "CONTO ECONOMICO", colSpan: 8 }], { kind: "section" });
+      if (ricavi.length) {
+        addRow([{ content: "Ricavi", colSpan: 8 }], { kind: "sub" });
+        ricavi.forEach(v => addRow(rigaVoce(v), { kind: "data", nat: "ricavo" }));
+        addRow(mkTot("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic), { kind: "subtot", nat: "ricavo" });
+      }
+      if (costi.length) {
+        addRow([{ content: "Costi", colSpan: 8 }], { kind: "sub" });
+        costi.forEach(v => addRow(rigaVoce(v), { kind: "data", nat: "costo" }));
+        addRow(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos), { kind: "subtot", nat: "costo" });
+      }
+      addRow(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis), { kind: "risultato", nat: "ris" });
     }
-    const nVoci = (attivo.voci || []).length;
-    const rowMeta = (attivo.voci || []).map(v => v.natura);
-    if (totali) rowMeta.push("ricavo", "costo", "ris");
+    if (patr.length) {
+      addRow([{ content: "STATO PATRIMONIALE", colSpan: 8 }], { kind: "section" });
+      patr.forEach(v => addRow(rigaVoce(v), { kind: "data", nat: "patrimoniale" }));
+      addRow(mkTot("TOTALE PATRIMONIALE", totali.actFin, addA ? totali.effFin : totali.budFin), { kind: "subtot", nat: "patrimoniale" });
+    }
     const favRgb = (natura, txt) => {
       const pos = txt.startsWith("+"), neg = txt.startsWith("-");
       if (!pos && !neg) return [120, 120, 120];
@@ -10445,27 +10482,42 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           return;
         }
         if (data.section !== "body") return;
-        const nat = rowMeta[data.row.index] || "patrimoniale";
-        const isTot = data.row.index >= nVoci;
+        const m = rowMeta[data.row.index] || { kind: "data", nat: "patrimoniale" };
         const txt = (data.cell.text && data.cell.text[0]) || "";
-        if (isTot) {
+        if (m.kind === "section") {
+          // Intestazione di prospetto: CONTO ECONOMICO / STATO PATRIMONIALE
+          data.cell.styles.fillColor = [59, 74, 90];
+          data.cell.styles.textColor = [255, 255, 255];
           data.cell.styles.fontStyle = "bold";
-          if (nat === "ris") {
-            // RISULTATO finale: barra scura, testo bianco, più grande
-            data.cell.styles.fillColor = [26, 26, 26];
-            data.cell.styles.textColor = [255, 255, 255];
-            data.cell.styles.fontSize = 10;
-            data.cell.styles.minCellHeight = 9;
-            if (ci === 6 || ci === 7) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
-          } else {
-            // TOTALE RICAVI / COSTI: fascia chiara
-            data.cell.styles.fillColor = [235, 234, 228];
-            data.cell.styles.fontSize = 9;
-            if (ci === 6 || ci === 7) data.cell.styles.textColor = favRgb(nat, txt);
-          }
+          data.cell.styles.fontSize = 9.5;
+          data.cell.styles.minCellHeight = 7;
+          return;
+        }
+        if (m.kind === "sub") {
+          // Sottosezione: Ricavi / Costi
+          data.cell.styles.fillColor = [234, 240, 245];
+          data.cell.styles.textColor = [59, 74, 90];
+          data.cell.styles.fontStyle = "bold";
+          return;
+        }
+        if (m.kind === "risultato") {
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.fillColor = [26, 26, 26];
+          data.cell.styles.textColor = [255, 255, 255];
+          data.cell.styles.fontSize = 10;
+          data.cell.styles.minCellHeight = 9;
+          if (ci === 6 || ci === 7) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
+          return;
+        }
+        if (m.kind === "subtot") {
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.fillColor = [235, 234, 228];
+          data.cell.styles.fontSize = 9;
+          if (ci === 6 || ci === 7) data.cell.styles.textColor = favRgb(m.nat, txt);
           return;
         }
         // Righe normali
+        const nat = m.nat;
         if (ci === 4) data.cell.styles.fillColor = [241, 241, 236];
         if (ci === 5) data.cell.styles.fillColor = [234, 240, 245];
         if (ci === 1) data.cell.styles.textColor = natRgb(nat);
