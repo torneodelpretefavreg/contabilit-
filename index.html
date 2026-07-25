@@ -840,6 +840,17 @@ const CONTI_LIQUIDITA = [
   { codice: 10, nome: "SATISPAY C/C" },
 ];
 
+// Macroaree dello Stato Patrimoniale, per assegnare come contropartita le voci di budget
+// che non si abbinano a un conto di cassa (così non restano scoperte e il prospetto quadra).
+const MACRO_SP = [
+  { key: "CREDITI", label: "Crediti", side: "attivo" },
+  { key: "IMM. MATERIALI", label: "Immobilizzazioni materiali", side: "attivo" },
+  { key: "IMM. IMMATERIALI", label: "Immobilizzazioni immateriali", side: "attivo" },
+  { key: "DEBITI", label: "Debiti", side: "passivo" },
+  { key: "PN", label: "Patrimonio netto", side: "passivo" },
+  { key: "RETTIFICA ATTIVO", label: "Fondi ammortamento", side: "passivo" },
+];
+
 const BUSINESS_UNITS_DEFAULT = ["FUTSAL", "TDP", "GENERAL", "FESTIVAL FABBRICO"];
 // Variabile globale aggiornata dinamicamente dal hook
 let BUSINESS_UNITS = [...BUSINESS_UNITS_DEFAULT];
@@ -10156,7 +10167,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       if (v.natura === "patrimoniale") return;
       const cod = v.contoLiquidita ? Number(v.contoLiquidita) : null;
       const bud = Number(v.importo) || 0;
-      if (!cod || !perLiq[cod]) { if (bud) senzaCassa += bud; return; }
+      if (!cod || !perLiq[cod]) { if (bud && !v.contropartitaSP) senzaCassa += bud; return; }
       if (v.natura === "ricavo") perLiq[cod].inBud += bud; else perLiq[cod].outBud += bud;
     });
     const righe = Object.values(perLiq)
@@ -10226,6 +10237,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           id: v.id, descrizione: v.descrizione || "", natura: v.natura || "costo",
           conti: (v.conti || []).map(Number), importo: Number(v.importo) || 0, note: v.note || "",
           contoLiquidita: v.contoLiquidita ? Number(v.contoLiquidita) : null,
+          contropartitaSP: v.contropartitaSP || null,
         })),
         modificatoIl: new Date().toISOString(),
         creatoIl: draft.creatoIl || new Date().toISOString(),
@@ -10496,6 +10508,23 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       };
       const att = prep.filter(p => p.sez === "attivo");
       const pas = prep.filter(p => p.sez === "passivo");
+      // Contropartite su MACROAREE patrimoniali: voci economiche senza cassa ma con macroarea scelta.
+      // Il flusso previsto (importo, segno per natura) confluisce nella classe scelta, così quadra.
+      const macroAgg = {};
+      ricavi.concat(costi).forEach(v => {
+        if (!v.contropartitaSP) return;
+        const bud = Number(v.importo) || 0;
+        if (!bud) return;
+        const flowNet = bud * (v.natura === "ricavo" ? 1 : -1);
+        macroAgg[v.contropartitaSP] = (macroAgg[v.contropartitaSP] || 0) + flowNet;
+      });
+      Object.entries(macroAgg).forEach(([key, flowNet]) => {
+        const def = MACRO_SP.find(m => m.key === key) || { side: "passivo", label: key };
+        // display positivo per convenzione SP: attivo += flowNet, passivo += (−flowNet)
+        const disp = def.side === "attivo" ? flowNet : -flowNet;
+        const entry = { v: { descrizione: `Contropartita · ${def.label}`, natura: "patrimoniale", note: "da voci di budget senza cassa" }, sez: def.side, flusso: 0, cons: 0, forecast: disp, synthetic: true };
+        (def.side === "attivo" ? att : pas).push(entry);
+      });
       const somma = (arr, k) => arr.reduce((s, p) => s + p[k], 0);
       addRow([{ content: "STATO PATRIMONIALE", colSpan: 8 }], { kind: "section" });
       if (att.length) {
@@ -10524,7 +10553,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         { content: "", styles: { halign: "right" } },
       ], { kind: "check", ok: quadra });
       if (!quadra && cashflow && cashflow.senzaCassa > 0.005) {
-        addRow([{ content: `Scarto dovuto a ${n0(cashflow.senzaCassa)} € di budget senza conto di cassa associato: assegna una cassa a quelle voci per far quadrare.`, colSpan: 8 }], { kind: "warn" });
+        addRow([{ content: `Scarto dovuto a ${n0(cashflow.senzaCassa)} € di budget senza contropartita: assegna a quelle voci un conto di cassa oppure una macroarea patrimoniale per far quadrare.`, colSpan: 8 }], { kind: "warn" });
       }
     }
     const favRgb = (natura, txt) => {
@@ -10923,9 +10952,19 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                         <td>
                           {v.natura === "patrimoniale"
                             ? <span style={{ fontSize: 11, color: "var(--ink-3)" }}>—</span>
-                            : <select value={v.contoLiquidita || ""} onChange={e => setVoce(v.id, "contoLiquidita", e.target.value === "" ? "" : Number(e.target.value))} style={{ fontSize: 12 }}>
+                            : <select value={v.contropartitaSP ? "SP:" + v.contropartitaSP : (v.contoLiquidita || "")}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  if (val.startsWith("SP:")) { setVoce(v.id, "contropartitaSP", val.slice(3)); setVoce(v.id, "contoLiquidita", ""); }
+                                  else { setVoce(v.id, "contoLiquidita", val === "" ? "" : Number(val)); setVoce(v.id, "contropartitaSP", ""); }
+                                }} style={{ fontSize: 12 }}>
                                 <option value="">— nessuna —</option>
-                                {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome.trim()}</option>)}
+                                <optgroup label="Conto di cassa">
+                                  {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome.trim()}</option>)}
+                                </optgroup>
+                                <optgroup label="Macroarea patrimoniale">
+                                  {MACRO_SP.map(m => <option key={m.key} value={"SP:" + m.key}>{m.label}</option>)}
+                                </optgroup>
                               </select>}
                         </td>
                         <td className="num">
