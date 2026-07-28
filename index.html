@@ -851,6 +851,27 @@ const MACRO_SP = [
   { key: "RETTIFICA ATTIVO", label: "Fondi ammortamento", side: "passivo" },
 ];
 
+// Conti di liquidità associati a una voce di budget. Supporta più conti (split) con
+// retrocompatibilità sul vecchio campo singolo contoLiquidita.
+function casseVoce(v) {
+  if (Array.isArray(v.casse) && v.casse.length) return v.casse.filter(e => e && e.conto != null && e.conto !== "");
+  if (v.contoLiquidita) return [{ conto: Number(v.contoLiquidita), importo: null }];
+  return [];
+}
+// Ripartizione dell'importo della voce sui conti: quote indicate a mano, il resto in parti uguali
+// sui conti lasciati vuoti ("a saldo"). Ritorna le parti per conto e quanto è stato assegnato.
+function ripartizioneCasse(v) {
+  const tot = Number(v.importo) || 0;
+  const list = casseVoce(v);
+  if (!list.length) return { parti: [], assegnato: 0 };
+  const isNum = (x) => x !== null && x !== undefined && x !== "" && !isNaN(Number(x));
+  const unspec = list.filter(e => !isNum(e.importo));
+  const sumSpec = list.filter(e => isNum(e.importo)).reduce((s, e) => s + Number(e.importo), 0);
+  const each = unspec.length ? (tot - sumSpec) / unspec.length : 0;
+  const parti = list.map(e => ({ conto: Number(e.conto), amount: isNum(e.importo) ? Number(e.importo) : each }));
+  return { parti, assegnato: unspec.length ? tot : sumSpec };
+}
+
 const BUSINESS_UNITS_DEFAULT = ["FUTSAL", "TDP", "GENERAL", "FESTIVAL FABBRICO"];
 // Variabile globale aggiornata dinamicamente dal hook
 let BUSINESS_UNITS = [...BUSINESS_UNITS_DEFAULT];
@@ -10165,10 +10186,14 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     let senzaCassa = 0;
     (attivo.voci || []).forEach(v => {
       if (v.natura === "patrimoniale") return;
-      const cod = v.contoLiquidita ? Number(v.contoLiquidita) : null;
-      const bud = Number(v.importo) || 0;
-      if (!cod || !perLiq[cod]) { if (bud && !v.contropartitaSP) senzaCassa += bud; return; }
-      if (v.natura === "ricavo") perLiq[cod].inBud += bud; else perLiq[cod].outBud += bud;
+      const tot = Number(v.importo) || 0;
+      const { parti, assegnato } = ripartizioneCasse(v);
+      parti.forEach(({ conto, amount }) => {
+        if (!perLiq[conto]) return;
+        if (v.natura === "ricavo") perLiq[conto].inBud += amount; else perLiq[conto].outBud += amount;
+      });
+      const leftover = tot - assegnato;
+      if (Math.abs(leftover) > 0.005 && !v.contropartitaSP) senzaCassa += leftover;
     });
     const righe = Object.values(perLiq)
       .map(r => ({ ...r, netto: r.inBud - r.outBud, saldoPrev: r.saldo + r.inBud - r.outBud }))
@@ -10237,6 +10262,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           id: v.id, descrizione: v.descrizione || "", natura: v.natura || "costo",
           conti: (v.conti || []).map(Number), importo: Number(v.importo) || 0, note: v.note || "",
           contoLiquidita: v.contoLiquidita ? Number(v.contoLiquidita) : null,
+          casse: Array.isArray(v.casse) ? v.casse.filter(e => e && e.conto != null && e.conto !== "").map(e => ({ conto: Number(e.conto), importo: (e.importo === null || e.importo === "" || isNaN(Number(e.importo))) ? null : Number(e.importo) })) : [],
           contropartitaSP: v.contropartitaSP || null,
         })),
         modificatoIl: new Date().toISOString(),
@@ -10263,6 +10289,13 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   const addVoce = () => patch(d => { d.voci = d.voci || []; d.voci.push({ id: "v_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), descrizione: "", natura: "costo", conti: [], importo: 0, note: "" }); });
   const setVoce = (id, k, val) => patch(d => { const v = (d.voci || []).find(x => x.id === id); if (v) v[k] = val; });
   const delVoce = (id) => patch(d => { d.voci = (d.voci || []).filter(x => x.id !== id); });
+  // Gestione multi-conto di liquidità con split
+  const setCasseVoce = (id, arr) => patch(d => { const x = (d.voci || []).find(z => z.id === id); if (x) { x.casse = arr; x.contoLiquidita = ""; x.contropartitaSP = ""; } });
+  const updCassa = (v, i, k, val) => { const arr = casseVoce(v).map(e => ({ ...e })); if (!arr[i]) return; arr[i][k] = k === "importo" ? (val === "" ? null : Number(val)) : Number(val); setCasseVoce(v.id, arr); };
+  const addCassa = (v) => { const used = new Set(casseVoce(v).map(e => Number(e.conto))); const next = CONTI_LIQUIDITA.find(c => !used.has(c.codice)) || CONTI_LIQUIDITA[0]; setCasseVoce(v.id, [...casseVoce(v).map(e => ({ ...e })), { conto: next.codice, importo: null }]); };
+  const rmCassa = (v, i) => setCasseVoce(v.id, casseVoce(v).filter((_, j) => j !== i));
+  const splitEqual = (v) => setCasseVoce(v.id, casseVoce(v).map(e => ({ ...e, importo: null })));
+  const setMacroVoce = (v, val) => patch(d => { const x = (d.voci || []).find(z => z.id === v.id); if (!x) return; if (val && val.startsWith("SP:")) { x.contropartitaSP = val.slice(3); x.casse = []; x.contoLiquidita = ""; } else { x.contropartitaSP = ""; } });
   const toggleConto = (id, cod) => patch(d => {
     const v = (d.voci || []).find(x => x.id === id); if (!v) return;
     v.conti = v.conti || [];
@@ -10909,13 +10942,27 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                   </tr>
                 </thead>
                 <tbody>
-                  {(attivo.voci || []).map(v => {
-                    const act = actualVoce(v, attivo.bu || "ALL");
-                    const bud = Number(v.importo) || 0;
-                    // scostamento FAVOREVOLE: + = va bene (ricavo sopra target / costo sotto budget)
-                    const scost = v.natura === "costo" ? (bud - act) : (act - bud);
-                    const hasAct = Math.abs(act) > 0.005;
-                    return (
+                  {(() => {
+                    const voci = attivo.voci || [];
+                    const eco = voci.filter(v => v.natura === "ricavo" || v.natura === "costo");
+                    const pat = voci.filter(v => v.natura === "patrimoniale");
+                    const nCols = showAct ? 8 : 6;
+                    const groupHead = (label) => (
+                      <tr key={"gh_" + label}><td colSpan={nCols} style={{ background: "var(--panel-2)", fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 13, padding: "7px 8px", borderTop: "1px solid var(--rule)" }}>{label}</td></tr>
+                    );
+                    const nomeConto = (cod) => CONTI_LIQUIDITA.find(c => c.codice === Number(cod))?.nome?.trim() || cod;
+                    const renderVoce = (v) => {
+                      const act = actualVoce(v);
+                      const bud = Number(v.importo) || 0;
+                      const scost = v.natura === "costo" ? (bud - act) : (act - bud);
+                      const hasAct = Math.abs(act) > 0.005;
+                      const casse = casseVoce(v);
+                      const rip = ripartizioneCasse(v);
+                      const cassaSummary = v.contropartitaSP
+                        ? (MACRO_SP.find(m => m.key === v.contropartitaSP)?.label || v.contropartitaSP) + " (macro)"
+                        : casse.length === 0 ? <span style={{ color: "var(--ink-3)" }}>— nessuna —</span>
+                          : casse.map(e => nomeConto(e.conto)).join(" + ");
+                      return (
                       <tr key={v.id}>
                         <td>
                           <input type="text" value={v.descrizione} placeholder="es. Ricavi iscrizioni"
@@ -10952,20 +10999,34 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                         <td>
                           {v.natura === "patrimoniale"
                             ? <span style={{ fontSize: 11, color: "var(--ink-3)" }}>—</span>
-                            : <select value={v.contropartitaSP ? "SP:" + v.contropartitaSP : (v.contoLiquidita || "")}
-                                onChange={e => {
-                                  const val = e.target.value;
-                                  if (val.startsWith("SP:")) { setVoce(v.id, "contropartitaSP", val.slice(3)); setVoce(v.id, "contoLiquidita", ""); }
-                                  else { setVoce(v.id, "contoLiquidita", val === "" ? "" : Number(val)); setVoce(v.id, "contropartitaSP", ""); }
-                                }} style={{ fontSize: 12 }}>
-                                <option value="">— nessuna —</option>
-                                <optgroup label="Conto di cassa">
-                                  {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome.trim()}</option>)}
-                                </optgroup>
-                                <optgroup label="Macroarea patrimoniale">
-                                  {MACRO_SP.map(m => <option key={m.key} value={"SP:" + m.key}>{m.label}</option>)}
-                                </optgroup>
-                              </select>}
+                            : <details>
+                                <summary style={{ cursor: "pointer", fontSize: 12 }}>{cassaSummary}</summary>
+                                <div style={{ marginTop: 6, border: "1px solid var(--line)", borderRadius: 6, padding: 6, minWidth: 236 }}>
+                                  {casse.map((e, i) => (
+                                    <div key={i} style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 4 }}>
+                                      <select value={Number(e.conto)} onChange={ev => updCassa(v, i, "conto", ev.target.value)} style={{ fontSize: 12, flex: 1 }}>
+                                        {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome.trim()}</option>)}
+                                      </select>
+                                      <input type="number" step="0.01" value={e.importo == null ? "" : e.importo} placeholder="=" title="Vuoto = quota uguale sul resto"
+                                        onChange={ev => updCassa(v, i, "importo", ev.target.value)} style={{ width: 66, textAlign: "right", fontSize: 12 }} />
+                                      <button className="btn ghost sm" onClick={() => rmCassa(v, i)}>✕</button>
+                                    </div>
+                                  ))}
+                                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
+                                    <button className="btn ghost sm" onClick={() => addCassa(v)}>+ conto</button>
+                                    {casse.length > 1 && <button className="btn ghost sm" onClick={() => splitEqual(v)}>parti uguali</button>}
+                                    <select value={v.contropartitaSP ? "SP:" + v.contropartitaSP : ""} onChange={ev => setMacroVoce(v, ev.target.value)} style={{ fontSize: 11 }}>
+                                      <option value="">o macroarea…</option>
+                                      {MACRO_SP.map(m => <option key={m.key} value={"SP:" + m.key}>{m.label}</option>)}
+                                    </select>
+                                  </div>
+                                  {casse.length > 1 && (
+                                    <div style={{ fontSize: 10.5, color: "var(--ink-3)", marginTop: 5 }}>
+                                      {rip.parti.map((p) => nomeConto(p.conto) + " " + fmt(p.amount)).join(" · ")}
+                                    </div>
+                                  )}
+                                </div>
+                              </details>}
                         </td>
                         <td className="num">
                           {addAct ? (
@@ -10985,8 +11046,15 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                         {showAct && <td className={"num " + (!hasAct ? "" : scost < -0.005 ? "neg" : scost > 0.005 ? "pos" : "")}>{hasAct ? fmt(scost) : "—"}</td>}
                         <td><button className="btn ghost sm" onClick={() => delVoce(v.id)}>✕</button></td>
                       </tr>
-                    );
-                  })}
+                      );
+                    };
+                    return <>
+                      {eco.length > 0 && groupHead("Conto economico")}
+                      {eco.map(renderVoce)}
+                      {pat.length > 0 && groupHead("Stato patrimoniale")}
+                      {pat.map(renderVoce)}
+                    </>;
+                  })()}
                   {totali && (
                     <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
                       <td colSpan={4} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
