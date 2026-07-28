@@ -872,6 +872,19 @@ function ripartizioneCasse(v) {
   return { parti, assegnato: unspec.length ? tot : sumSpec };
 }
 
+// Classificazione Attivo / Passivo di una voce patrimoniale (categoria conto, poi eccedenza, poi segno saldo).
+const CAT_ATT_SP = ["DISP. LIQUIDE", "IMM. MATERIALI", "IMM. IMMATERIALI", "CREDITI"];
+const CAT_PAS_SP = ["DEBITI", "PN", "RETTIFICA ATTIVO"];
+function sezioneSP(v, contiMap, val) {
+  const cats = (v.conti || []).map(c => (contiMap[c] || {}).categoria).filter(Boolean);
+  if (cats.some(c => CAT_ATT_SP.includes(c))) return "attivo";
+  if (cats.some(c => CAT_PAS_SP.includes(c))) return "passivo";
+  const ecc = (v.conti || []).map(c => (contiMap[c] || {}).eccedenza).filter(Boolean);
+  if (ecc.includes("DARE")) return "attivo";
+  if (ecc.includes("AVERE")) return "passivo";
+  return (val || 0) < -0.005 ? "passivo" : "attivo";
+}
+
 const BUSINESS_UNITS_DEFAULT = ["FUTSAL", "TDP", "GENERAL", "FESTIVAL FABBRICO"];
 // Variabile globale aggiornata dinamicamente dal hook
 let BUSINESS_UNITS = [...BUSINESS_UNITS_DEFAULT];
@@ -10287,6 +10300,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   // Editing voci nel draft
   const patch = (fn) => { setDraft(d => { const n = JSON.parse(JSON.stringify(d)); fn(n); return n; }); setDirty(true); };
   const addVoce = () => patch(d => { d.voci = d.voci || []; d.voci.push({ id: "v_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), descrizione: "", natura: "costo", conti: [], importo: 0, note: "" }); });
+  const addVoceTipo = (natura) => patch(d => { d.voci = d.voci || []; d.voci.push({ id: "v_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), descrizione: "", natura, conti: [], importo: 0, note: "" }); });
   const setVoce = (id, k, val) => patch(d => { const v = (d.voci || []).find(x => x.id === id); if (v) v[k] = val; });
   const delVoce = (id) => patch(d => { d.voci = (d.voci || []).filter(x => x.id !== id); });
   // Gestione multi-conto di liquidità con split
@@ -10500,19 +10514,6 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       addRow(mkTot("RISULTATO (ricavi − costi)", totali.actRis, addA ? totali.effRis : totali.budRis), { kind: "risultato", nat: "ris" });
     }
     if (patr.length) {
-      // Classificazione ATTIVO / PASSIVO come nel resto dell'app:
-      // categoria del conto, poi eccedenza (DARE/AVERE), infine segno del saldo.
-      const CAT_ATT = ["DISP. LIQUIDE", "IMM. MATERIALI", "IMM. IMMATERIALI", "CREDITI"];
-      const CAT_PAS = ["DEBITI", "PN", "RETTIFICA ATTIVO"];
-      const sezioneSP = (v, val) => {
-        const cats = (v.conti || []).map(c => (contiMap[c] || {}).categoria).filter(Boolean);
-        if (cats.some(c => CAT_ATT.includes(c))) return "attivo";
-        if (cats.some(c => CAT_PAS.includes(c))) return "passivo";
-        const ecc = (v.conti || []).map(c => (contiMap[c] || {}).eccedenza).filter(Boolean);
-        if (ecc.includes("DARE")) return "attivo";
-        if (ecc.includes("AVERE")) return "passivo";
-        return val < -0.005 ? "passivo" : "attivo";
-      };
       // FORECAST PATRIMONIALE: i conti di liquidità devono assorbire i FLUSSI PREVISTI dal budget,
       // altrimenti lo Stato Patrimoniale resta fermo al consuntivo mentre il Conto Economico si muove
       // e il prospetto non quadra (Attivo − Passivo ≠ Risultato).
@@ -10530,7 +10531,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           if (flussoLiq[cod] !== undefined && !claimedLiq.has(cod)) { claimedLiq.add(cod); flusso += flussoLiq[cod]; }
         });
         const forecast = (addA ? (bud + cons) : bud) + flusso;
-        const sez = sezioneSP(v, Math.abs(cons) > 0.005 ? cons : forecast);
+        const sez = sezioneSP(v, contiMap, Math.abs(cons) > 0.005 ? cons : forecast);
         const seg = sez === "passivo" ? -1 : 1;
         return { v, sez, flusso, cons: cons * seg, forecast: forecast * seg };
       });
@@ -10947,11 +10948,31 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     const eco = voci.filter(v => v.natura === "ricavo" || v.natura === "costo");
                     const pat = voci.filter(v => v.natura === "patrimoniale");
                     const nCols = showAct ? 8 : 6;
+                    // Una voce è "consuntivo" se aggancia conti o ha un saldo reale; altrimenti è aggiunta a mano.
+                    const isCons = (v) => (v.conti || []).length > 0 || Math.abs(actualVoce(v)) > 0.005;
+                    const ricCons = eco.filter(v => v.natura === "ricavo" && isCons(v));
+                    const ricAgg = eco.filter(v => v.natura === "ricavo" && !isCons(v));
+                    const cosCons = eco.filter(v => v.natura === "costo" && isCons(v));
+                    const cosAgg = eco.filter(v => v.natura === "costo" && !isCons(v));
+                    const patCons = pat.filter(isCons);
+                    const patAgg = pat.filter(v => !isCons(v));
+                    const attSP = patCons.filter(v => sezioneSP(v, contiMap, actualVoce(v)) === "attivo");
+                    const pasSP = patCons.filter(v => sezioneSP(v, contiMap, actualVoce(v)) === "passivo");
                     const groupHead = (label) => (
                       <tr key={"gh_" + label}><td colSpan={nCols} style={{ background: "var(--panel-2)", fontFamily: "'Fraunces',serif", fontWeight: 600, fontSize: 13, padding: "7px 8px", borderTop: "1px solid var(--rule)" }}>{label}</td></tr>
                     );
                     const nomeConto = (cod) => CONTI_LIQUIDITA.find(c => c.codice === Number(cod))?.nome?.trim() || cod;
-                    const renderVoce = (v) => {
+                    const subHead = (label) => (
+                      <tr key={"sh_" + label}><td colSpan={nCols} style={{ background: "var(--panel)", fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--ink-2)", padding: "5px 8px 5px 16px" }}>{label}</td></tr>
+                    );
+                    const aggHead = (label, btns) => (
+                      <tr key={"ah_" + label}><td colSpan={nCols} style={{ background: "#f4efe6", padding: "5px 8px 5px 16px", borderTop: "1px dashed #d8c9a8" }}>
+                        <span style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "#8a6d3b" }}>{label}</span>
+                        <span style={{ fontSize: 11, fontStyle: "italic", color: "#8a6d3b", marginLeft: 6 }}>— voci fuori consuntivo</span>
+                        {(btns || []).map(([nat, lbl]) => <button key={nat} className="btn ghost sm" style={{ marginLeft: 8 }} onClick={() => addVoceTipo(nat)}>+ {lbl}</button>)}
+                      </td></tr>
+                    );
+                    const renderVoce = (v, isAgg) => {
                       const act = actualVoce(v);
                       const bud = Number(v.importo) || 0;
                       const scost = v.natura === "costo" ? (bud - act) : (act - bud);
@@ -10963,7 +10984,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                         : casse.length === 0 ? <span style={{ color: "var(--ink-3)" }}>— nessuna —</span>
                           : casse.map(e => nomeConto(e.conto)).join(" + ");
                       return (
-                      <tr key={v.id}>
+                      <tr key={v.id} style={isAgg ? { background: "rgba(138,109,59,0.06)" } : undefined}>
                         <td>
                           <input type="text" value={v.descrizione} placeholder="es. Ricavi iscrizioni"
                             onChange={e => setVoce(v.id, "descrizione", e.target.value)} style={{ width: "100%" }} />
@@ -11050,9 +11071,20 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     };
                     return <>
                       {eco.length > 0 && groupHead("Conto economico")}
-                      {eco.map(renderVoce)}
+                      {eco.length > 0 && subHead("Ricavi")}
+                      {ricCons.map(v => renderVoce(v, false))}
+                      {eco.length > 0 && subHead("Costi")}
+                      {cosCons.map(v => renderVoce(v, false))}
+                      {eco.length > 0 && aggHead("Aggiunte al conto economico", [["ricavo", "ricavo"], ["costo", "costo"]])}
+                      {ricAgg.map(v => renderVoce(v, true))}
+                      {cosAgg.map(v => renderVoce(v, true))}
                       {pat.length > 0 && groupHead("Stato patrimoniale")}
-                      {pat.map(renderVoce)}
+                      {attSP.length > 0 && subHead("Attività")}
+                      {attSP.map(v => renderVoce(v, false))}
+                      {pasSP.length > 0 && subHead("Passività")}
+                      {pasSP.map(v => renderVoce(v, false))}
+                      {pat.length > 0 && aggHead("Aggiunte patrimoniali", [["patrimoniale", "voce patrimoniale"]])}
+                      {patAgg.map(v => renderVoce(v, true))}
                     </>;
                   })()}
                   {totali && (
