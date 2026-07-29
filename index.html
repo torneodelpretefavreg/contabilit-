@@ -3981,11 +3981,11 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
           <summary className="btn ghost sm" style={{listStyle:"none", cursor:"pointer"}}>Conti{filterConti.length ? ` (${filterConti.length})` : ""} ▾</summary>
           <div style={{position:"absolute", zIndex:20, background:"var(--panel)", border:"1px solid var(--line)", borderRadius:8, padding:8, marginTop:4, maxHeight:260, overflowY:"auto", minWidth:240, boxShadow:"0 8px 24px rgba(0,0,0,.12)"}}>
             {filterConti.length > 0 && <button className="btn ghost sm" style={{marginBottom:6}} onClick={() => setFilterConti([])}>× azzera</button>}
-            {contiOpts.length === 0 ? <div style={{color:"var(--ink-3)", fontSize:12}}>nessun conto</div> :
+            {contiOpts.length === 0 ? <div style={{color:"var(--ink-3)", fontSize:12}}>nessun conto movimentato</div> :
               contiOpts.map(cod => (
-                <label key={cod} style={{display:"flex", alignItems:"center", gap:6, fontSize:12, padding:"2px 0"}}>
-                  <input type="checkbox" checked={filterConti.includes(cod)} onChange={() => setFilterConti(s => s.includes(cod) ? s.filter(x => x !== cod) : [...s, cod])} />
-                  <span className="mono" style={{fontSize:11}}>{String(cod).padStart(2,"0")}</span> {(cMap[cod]?.nome || ("Conto " + cod)).trim()}
+                <label key={cod} style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"3px 0", color:"var(--ink)", cursor:"pointer"}}>
+                  <input type="checkbox" checked={filterConti.includes(cod)} onChange={() => setFilterConti(s => s.includes(cod) ? s.filter(x => x !== cod) : [...s, cod])} style={{width:16, height:16, minWidth:16, padding:0, margin:0, maxWidth:"none", flex:"0 0 auto"}} />
+                  <span style={{color:"var(--ink)"}}><span className="mono" style={{fontSize:11, color:"var(--ink-3)"}}>{String(cod).padStart(2,"0")}</span> {(cMap[cod] && cMap[cod].nome ? cMap[cod].nome : ("Conto " + cod)).trim()}</span>
                 </label>
               ))}
           </div>
@@ -3996,9 +3996,9 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
             {filterCat.length > 0 && <button className="btn ghost sm" style={{marginBottom:6}} onClick={() => setFilterCat([])}>× azzera</button>}
             {catOpts.length === 0 ? <div style={{color:"var(--ink-3)", fontSize:12}}>nessuna categoria</div> :
               catOpts.map(cat => (
-                <label key={cat} style={{display:"flex", alignItems:"center", gap:6, fontSize:12, padding:"2px 0"}}>
-                  <input type="checkbox" checked={filterCat.includes(cat)} onChange={() => setFilterCat(s => s.includes(cat) ? s.filter(x => x !== cat) : [...s, cat])} />
-                  {cat}
+                <label key={cat} style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"3px 0", color:"var(--ink)", cursor:"pointer"}}>
+                  <input type="checkbox" checked={filterCat.includes(cat)} onChange={() => setFilterCat(s => s.includes(cat) ? s.filter(x => x !== cat) : [...s, cat])} style={{width:16, height:16, minWidth:16, padding:0, margin:0, maxWidth:"none", flex:"0 0 auto"}} />
+                  <span style={{color:"var(--ink)"}}>{cat}</span>
                 </label>
               ))}
           </div>
