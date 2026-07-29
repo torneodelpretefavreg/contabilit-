@@ -3768,17 +3768,39 @@ function rendicontoMatrix(rf) {
 // ============================================================
 function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF, onToast }) {
   const [filterBu, setFilterBu] = useState("");
+  const [filterConti, setFilterConti] = useState([]);   // codici contoPdC
+  const [filterCat, setFilterCat] = useState([]);       // categorie
   const [drillDown, setDrillDown] = useState(null); // { sezione, tipo, categoria, mese, movs }
   const [vista, setVista] = useState("mensile"); // mensile | totali
   const [collapsed, setCollapsed] = useState({ entrate: false, uscite: false, investimenti: false });
   const [gestApri, setGestApri] = useState(false);
+  const [expOpen, setExpOpen] = useState(false);
+  const [expOpts, setExpOpts] = useState({ mensile: true, dettaglio: true, entrate: true, uscite: true, investimenti: true });
 
   const toggleSez = (k) => setCollapsed(c => ({ ...c, [k]: !c[k] }));
   const mostraMesi = vista === "mensile";
+  const cMap = useMemo(() => { const o = {}; (conti || []).forEach(c => o[c.codice] = c); return o; }, [conti]);
 
   const investSet = useMemo(() => new Set((categorieRF && categorieRF.investimenti) || []), [categorieRF]);
-  const filtered = useMemo(() => movimenti.filter(m => !filterBu || m.bu === filterBu), [movimenti, filterBu]);
+  const movBU = useMemo(() => movimenti.filter(m => !filterBu || m.bu === filterBu), [movimenti, filterBu]);
+  // Opzioni filtro: conti e categorie effettivamente presenti (esclusi apertura e non monetari)
+  const contiOpts = useMemo(() => {
+    const s = new Set();
+    movBU.forEach(m => { if (!m.nonMonetario && !isAperturaMov(m) && m.contoPdC != null) s.add(Number(m.contoPdC)); });
+    return [...s].sort((a, b) => a - b);
+  }, [movBU]);
+  const catOpts = useMemo(() => {
+    const s = new Set();
+    movBU.forEach(m => { if (!m.nonMonetario && !isAperturaMov(m)) s.add(m.categoria || "(senza categoria)"); });
+    return [...s].sort((a, b) => a.localeCompare(b));
+  }, [movBU]);
+  const filtered = useMemo(() => movBU.filter(m => {
+    if (filterConti.length && !filterConti.includes(Number(m.contoPdC))) return false;
+    if (filterCat.length && !filterCat.includes(m.categoria || "(senza categoria)")) return false;
+    return true;
+  }), [movBU, filterConti, filterCat]);
   const rf = useMemo(() => buildRendiconto(filtered, conti, saldiIniziali, investSet), [filtered, conti, saldiIniziali, investSet]);
+  const nFiltri = (filterConti.length ? 1 : 0) + (filterCat.length ? 1 : 0);
 
   // Mostro solo i mesi che hanno almeno un movimento (così la tabella sta in pagina)
   const mesiAttivi = MESI.filter(m => (rf.totEntrate[m] || 0) !== 0 || (rf.totUsciteOp[m] || 0) !== 0 || (rf.totInvest[m] || 0) !== 0);
@@ -3851,6 +3873,92 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
   const catInvest = Object.keys(rf.investimenti).sort((a,b)=>a.localeCompare(b));
   const flussoNetto = rf.closing - rf.openingTot;
 
+  // ===== Export personalizzato del Rendiconto (rispetta filtri correnti + opzioni scelte) =====
+  const catTot = (data, cat) => MESI.reduce((s, m) => s + ((data[cat] || {})[m] || 0), 0);
+  const money2 = (v) => Number(v || 0).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const buildExpModel = () => {
+    const mesi = expOpts.mensile ? mesiVis : [];
+    const headers = ["Voce", ...mesi.map(m => m.charAt(0).toUpperCase() + m.slice(1, 3)), "Totale"];
+    const rows = [];
+    const R = (label, perMese, tot, kind) => rows.push({ label, cells: mesi.map(m => perMese ? (perMese[m] || 0) : 0), tot, kind });
+    R("DISP. INIZIALI", rf.dispIniz, rf.openingTot, "strong");
+    const sez = (on, catList, catData, totLabel, totData, grand, sezLabel) => {
+      if (!on) return;
+      rows.push({ label: sezLabel, header: true });
+      if (expOpts.dettaglio) catList.forEach(c => R(c, catData[c], catTot(catData, c), "cat"));
+      R(totLabel, totData, grand, "tot");
+    };
+    sez(expOpts.entrate, catEntrate, rf.entrate, "TOTALE ENTRATE OPERATIVE (A)", rf.totEntrate, rf.grandEntrate, "RIEPILOGO ENTRATE");
+    sez(expOpts.uscite, catUscite, rf.usciteOp, "TOTALE USCITE OPERATIVE (B)", rf.totUsciteOp, rf.grandUsciteOp, "RIEPILOGO USCITE");
+    R("SALDO OPERATIVO (A − B)", rf.saldoOp, rf.grandSaldoOp, "strong");
+    sez(expOpts.investimenti, catInvest, rf.investimenti, "TOTALE INVESTIMENTI", rf.totInvest, rf.grandInvest, "RIEPILOGO INVESTIMENTI");
+    R("DISP. FINALI", rf.dispFin, rf.closing, "final");
+    const sub = `Stagione ${stagione} · BU: ${filterBu || "Tutte"}`
+      + (filterConti.length ? ` · ${filterConti.length} conti` : "")
+      + (filterCat.length ? ` · ${filterCat.length} categorie` : "")
+      + (expOpts.dettaglio ? "" : " · solo macroaree") + (expOpts.mensile ? "" : " · solo totali");
+    return { mesi, headers, rows, sub };
+  };
+  const esportaRFExcel = () => {
+    if (typeof XLSX === "undefined") { onToast("Excel non disponibile"); return; }
+    const { mesi, headers, rows, sub } = buildExpModel();
+    const aoa = [["Rendiconto Finanziario"], [sub], [], headers];
+    const meta = [{}, {}, {}, { h: true }];
+    rows.forEach(r => {
+      if (r.header) { aoa.push([r.label, ...mesi.map(() => ""), ""]); meta.push({ header: true }); }
+      else { aoa.push([r.label, ...r.cells, r.tot]); meta.push({ kind: r.kind }); }
+    });
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 34 }, ...mesi.map(() => ({ wch: 9 })), { wch: 12 }];
+    const nc = headers.length, money = "#,##0.00";
+    const cell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: "s", v: "" }; return ws[ref]; };
+    Object.assign(cell(0, 0), { s: { font: { bold: true, sz: 14 } } });
+    Object.assign(cell(1, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
+    for (let c = 0; c < nc; c++) Object.assign(cell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "1A1A1A" } }, alignment: { horizontal: c ? "right" : "left" } } });
+    meta.forEach((m, r) => {
+      if (r < 4) return;
+      for (let c = 1; c < nc; c++) cell(r, c).z = money;
+      if (m.header) { for (let c = 0; c < nc; c++) cell(r, c).s = { font: { bold: true, color: { rgb: "3B4A5A" } }, fill: { fgColor: { rgb: "EAF0F5" } } }; return; }
+      if (m.kind === "strong" || m.kind === "tot" || m.kind === "final") {
+        const dark = m.kind === "final";
+        for (let c = 0; c < nc; c++) cell(r, c).s = { font: { bold: true, color: { rgb: dark ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: dark ? "1A1A1A" : "F0EFEA" } }, alignment: { horizontal: c ? "right" : "left" } };
+      } else {
+        for (let c = 1; c < nc; c++) cell(r, c).s = { alignment: { horizontal: "right" } };
+      }
+    });
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Rendiconto");
+    XLSX.writeFile(wb, `Rendiconto_${stagione}${filterBu ? "_" + filterBu : ""}.xlsx`);
+    setExpOpen(false); onToast("Rendiconto esportato");
+  };
+  const esportaRFPdf = () => {
+    if (!window.jspdf) { onToast("PDF non disponibile"); return; }
+    const { mesi, headers, rows, sub } = buildExpModel();
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: mesi.length > 4 ? "landscape" : "portrait" });
+    const W = doc.internal.pageSize.width;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(14); doc.text("Rendiconto Finanziario", W / 2, 14, { align: "center" });
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(120); doc.text(sub, W / 2, 20, { align: "center" }); doc.setTextColor(0);
+    const body = rows.map(r => r.header
+      ? [{ content: r.label, colSpan: headers.length, styles: { fontStyle: "bold", fillColor: [234, 240, 245], textColor: [59, 74, 90] } }]
+      : [r.label, ...r.cells.map(v => v ? money2(v) : ""), money2(r.tot)]);
+    const rowKind = rows.map(r => r.header ? "header" : r.kind);
+    doc.autoTable({
+      startY: 24, head: [headers], body,
+      styles: { fontSize: 8, cellPadding: 1.4 },
+      headStyles: { fillColor: [26, 26, 26], textColor: 240, halign: "right" },
+      columnStyles: { 0: { halign: "left", cellWidth: mesi.length ? 44 : 100 } },
+      didParseCell: (d) => {
+        if (d.column.index > 0) d.cell.styles.halign = "right";
+        if (d.section !== "body") return;
+        const k = rowKind[d.row.index];
+        if (k === "strong" || k === "tot") { d.cell.styles.fontStyle = "bold"; d.cell.styles.fillColor = [240, 239, 234]; }
+        else if (k === "final") { d.cell.styles.fontStyle = "bold"; d.cell.styles.fillColor = [26, 26, 26]; d.cell.styles.textColor = [255, 255, 255]; }
+      },
+    });
+    doc.save(`Rendiconto_${stagione}${filterBu ? "_" + filterBu : ""}.pdf`);
+    setExpOpen(false); onToast("Rendiconto esportato in PDF");
+  };
+
   return (
     <div>
       <div className="page-head">
@@ -3863,12 +3971,39 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
       <CategorieManager stagione={stagione} categorieRF={categorieRF} movimenti={movimenti}
         aperto={gestApri} onToggle={() => setGestApri(o => !o)} onToast={onToast} />
 
-      <div className="filters" style={{marginTop:14}}>
+      <div className="filters" style={{marginTop:14, flexWrap:"wrap"}}>
         <span className="label">Filtra:</span>
         <select value={filterBu} onChange={e => setFilterBu(e.target.value)}>
           <option value="">Tutte le BU</option>
           {BUSINESS_UNITS.map(b => <option key={b} value={b}>{b}</option>)}
         </select>
+        <details style={{position:"relative"}}>
+          <summary className="btn ghost sm" style={{listStyle:"none", cursor:"pointer"}}>Conti{filterConti.length ? ` (${filterConti.length})` : ""} ▾</summary>
+          <div style={{position:"absolute", zIndex:20, background:"var(--panel)", border:"1px solid var(--line)", borderRadius:8, padding:8, marginTop:4, maxHeight:260, overflowY:"auto", minWidth:240, boxShadow:"0 8px 24px rgba(0,0,0,.12)"}}>
+            {filterConti.length > 0 && <button className="btn ghost sm" style={{marginBottom:6}} onClick={() => setFilterConti([])}>× azzera</button>}
+            {contiOpts.length === 0 ? <div style={{color:"var(--ink-3)", fontSize:12}}>nessun conto</div> :
+              contiOpts.map(cod => (
+                <label key={cod} style={{display:"flex", alignItems:"center", gap:6, fontSize:12, padding:"2px 0"}}>
+                  <input type="checkbox" checked={filterConti.includes(cod)} onChange={() => setFilterConti(s => s.includes(cod) ? s.filter(x => x !== cod) : [...s, cod])} />
+                  <span className="mono" style={{fontSize:11}}>{String(cod).padStart(2,"0")}</span> {(cMap[cod]?.nome || ("Conto " + cod)).trim()}
+                </label>
+              ))}
+          </div>
+        </details>
+        <details style={{position:"relative"}}>
+          <summary className="btn ghost sm" style={{listStyle:"none", cursor:"pointer"}}>Categorie{filterCat.length ? ` (${filterCat.length})` : ""} ▾</summary>
+          <div style={{position:"absolute", zIndex:20, background:"var(--panel)", border:"1px solid var(--line)", borderRadius:8, padding:8, marginTop:4, maxHeight:260, overflowY:"auto", minWidth:240, boxShadow:"0 8px 24px rgba(0,0,0,.12)"}}>
+            {filterCat.length > 0 && <button className="btn ghost sm" style={{marginBottom:6}} onClick={() => setFilterCat([])}>× azzera</button>}
+            {catOpts.length === 0 ? <div style={{color:"var(--ink-3)", fontSize:12}}>nessuna categoria</div> :
+              catOpts.map(cat => (
+                <label key={cat} style={{display:"flex", alignItems:"center", gap:6, fontSize:12, padding:"2px 0"}}>
+                  <input type="checkbox" checked={filterCat.includes(cat)} onChange={() => setFilterCat(s => s.includes(cat) ? s.filter(x => x !== cat) : [...s, cat])} />
+                  {cat}
+                </label>
+              ))}
+          </div>
+        </details>
+        {nFiltri > 0 && <button className="btn ghost sm" onClick={() => { setFilterConti([]); setFilterCat([]); }}>× filtri</button>}
         <span className="label">Vista:</span>
         <select value={vista} onChange={e => setVista(e.target.value)}>
           <option value="mensile">Per mese</option>
@@ -3876,7 +4011,36 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
         </select>
         <button className="btn ghost sm" onClick={() => setCollapsed({entrate:true, uscite:true, investimenti:true})}>Raggruppa tutto</button>
         <button className="btn ghost sm" onClick={() => setCollapsed({entrate:false, uscite:false, investimenti:false})}>Espandi tutto</button>
+        <button className="btn accent sm" onClick={() => setExpOpen(true)}>⤓ Esporta…</button>
       </div>
+
+      {expOpen && (
+        <div className="modal-bg" onClick={() => setExpOpen(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:440}}>
+            <h3 className="serif" style={{marginTop:0}}>Esporta rendiconto</h3>
+            <p style={{fontSize:12.5, color:"var(--ink-3)", marginTop:-4}}>Rispetta i filtri attivi (BU{filterConti.length?`, ${filterConti.length} conti`:""}{filterCat.length?`, ${filterCat.length} categorie`:""}). Scegli il livello di dettaglio:</p>
+            <label style={{display:"flex", alignItems:"center", gap:8, padding:"4px 0"}}>
+              <input type="checkbox" checked={expOpts.mensile} onChange={e => setExpOpts(o => ({...o, mensile: e.target.checked}))} />
+              Colonne per mese <span style={{color:"var(--ink-3)", fontSize:11}}>(deseleziona = solo totali)</span>
+            </label>
+            <label style={{display:"flex", alignItems:"center", gap:8, padding:"4px 0"}}>
+              <input type="checkbox" checked={expOpts.dettaglio} onChange={e => setExpOpts(o => ({...o, dettaglio: e.target.checked}))} />
+              Dettaglio per categoria <span style={{color:"var(--ink-3)", fontSize:11}}>(deseleziona = solo macroaree/totali di sezione)</span>
+            </label>
+            <div style={{marginTop:8, marginBottom:4, fontSize:11, textTransform:"uppercase", letterSpacing:".04em", color:"var(--ink-3)"}}>Sezioni</div>
+            {[["entrate","Entrate operative"],["uscite","Uscite operative"],["investimenti","Investimenti"]].map(([k,lbl]) => (
+              <label key={k} style={{display:"inline-flex", alignItems:"center", gap:6, marginRight:14, fontSize:13}}>
+                <input type="checkbox" checked={expOpts[k]} onChange={e => setExpOpts(o => ({...o, [k]: e.target.checked}))} /> {lbl}
+              </label>
+            ))}
+            <div style={{display:"flex", gap:8, marginTop:16, justifyContent:"flex-end"}}>
+              <button className="btn ghost" onClick={() => setExpOpen(false)}>Annulla</button>
+              <button className="btn" onClick={esportaRFPdf}>PDF</button>
+              <button className="btn accent" onClick={esportaRFExcel}>Excel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="kpi-grid">
         <div className="kpi"><div className="label">Entrate operative</div><div className="value" style={{color:"var(--accent)"}}>{fmtEuro(rf.grandEntrate)}</div></div>
