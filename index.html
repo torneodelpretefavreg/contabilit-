@@ -10077,6 +10077,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   const [filtroConti, setFiltroConti] = useState("movimentati"); // movimentati | ce | sp | tutti
   const [ipotesi, setIpotesi] = useState({});       // { codice: valore } valori a mano nel pannello
   const [selConti, setSelConti] = useState([]);     // conti spuntati nel pannello Stato conti
+  const [vistaBudget, setVistaBudget] = useState("dettaglio"); // dettaglio | nuove | macro
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -11093,13 +11094,22 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           )}
 
           {/* Tabella voci */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0 10px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "8px 0 10px" }}>
             <h3 className="serif" style={{ fontWeight: 500, fontSize: 18, margin: 0 }}>Voci di budget</h3>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)" }}>Vista</span>
+              {[["dettaglio", "Dettaglio"], ["nuove", "Solo nuove"], ["macro", "Macroaree"]].map(([k, lbl]) => (
+                <button key={k} type="button" className={"btn sm " + (vistaBudget === k ? "accent" : "ghost")} onClick={() => setVistaBudget(k)}>{lbl}</button>
+              ))}
               {addAct && <button className="btn ghost sm" title="Azzera gli importi che coincidono col consuntivo (venivano contati due volte). Le voci con un extra reale restano invariate." onClick={scorporaConsuntivoDaImporti}>⇊ scorpora consuntivo</button>}
               <button className="btn accent sm" onClick={addVoce}>+ Aggiungi voce</button>
             </div>
           </div>
+          {vistaBudget === "nuove" && (
+            <div style={{ fontSize: 12.5, color: "#7a5a1d", background: "#f4efe6", border: "1px dashed #d8c9a8", borderRadius: 6, padding: "6px 10px", marginBottom: 8 }}>
+              Stai vedendo <b>solo le voci nuove</b> inserite a mano (fuori consuntivo). Torna a “Dettaglio” per vedere tutte le voci.
+            </div>
+          )}
 
           {(attivo.voci || []).length === 0 ? (
             <div className="empty-state">Nessuna voce. Aggiungine una: scrivi la descrizione, scegli la natura e aggancia uno o più conti.</div>
@@ -11245,6 +11255,55 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                       </tr>
                       );
                     };
+                    // Riga di sintesi macroarea (usata nella vista "Macroaree")
+                    const macroRow = (label, cons, fore, nat, strong) => {
+                      const scost = nat === "ricavo" || nat === "ris" ? (cons - fore) : nat === "costo" ? (fore - cons) : 0;
+                      return (
+                        <tr key={"m_" + label} style={{ fontWeight: 700, background: strong ? "var(--ink)" : "var(--panel-2)", color: strong ? "#fff" : undefined }}>
+                          <td colSpan={4} style={{ fontFamily: strong ? "'Fraunces',serif" : undefined, paddingLeft: strong ? 8 : 16 }}>{label}</td>
+                          <td className="num">{fmt(fore)}</td>
+                          {showAct && <td className="num">{fmt(cons)}</td>}
+                          {showAct && <td className="num">{nat === "patrimoniale" ? "—" : fmt(fore - cons)}</td>}
+                          <td></td>
+                        </tr>
+                      );
+                    };
+                    const sumCons = (arr) => arr.reduce((s, v) => s + actualVoce(v), 0);
+                    const sumFore = (arr) => arr.reduce((s, v) => s + (addAct ? (Number(v.importo) || 0) + actualVoce(v) : (Number(v.importo) || 0)), 0);
+
+                    if (vistaBudget === "macro") {
+                      const ricT = [...ricCons, ...ricAgg], cosT = [...cosCons, ...cosAgg];
+                      const segFore = (arr, side) => arr.reduce((s, v) => { const f = (addAct ? (Number(v.importo) || 0) + actualVoce(v) : (Number(v.importo) || 0)); return s + (side === "passivo" ? -f : f); }, 0);
+                      const segCons = (arr, side) => arr.reduce((s, v) => s + (side === "passivo" ? -actualVoce(v) : actualVoce(v)), 0);
+                      return <>
+                        {eco.length > 0 && groupHead("Conto economico")}
+                        {eco.length > 0 && macroRow("Ricavi", sumCons(ricT), sumFore(ricT), "ricavo")}
+                        {eco.length > 0 && macroRow("Costi", sumCons(cosT), sumFore(cosT), "costo")}
+                        {eco.length > 0 && macroRow("RISULTATO (ricavi − costi)", sumCons(ricT) - sumCons(cosT), sumFore(ricT) - sumFore(cosT), "ris", true)}
+                        {pat.length > 0 && groupHead("Stato patrimoniale")}
+                        {attSP.length > 0 && macroRow("Attività", segCons(attSP, "attivo"), segFore(attSP, "attivo"), "patrimoniale")}
+                        {pasSP.length > 0 && macroRow("Passività", segCons(pasSP, "passivo"), segFore(pasSP, "passivo"), "patrimoniale")}
+                        {pat.length > 0 && macroRow("Patrimoniale netto", segCons(attSP, "attivo") - segCons(pasSP, "passivo"), segFore(attSP, "attivo") - segFore(pasSP, "passivo"), "patrimoniale", true)}
+                      </>;
+                    }
+                    if (vistaBudget === "nuove") {
+                      const nEco = ricAgg.length + cosAgg.length, nPat = patAgg.length;
+                      return <>
+                        {nEco > 0 && groupHead("Conto economico — voci nuove")}
+                        {ricAgg.length > 0 && subHead("Ricavi")}
+                        {ricAgg.map(v => renderVoce(v, true))}
+                        {cosAgg.length > 0 && subHead("Costi")}
+                        {cosAgg.map(v => renderVoce(v, true))}
+                        {nPat > 0 && groupHead("Stato patrimoniale — voci nuove")}
+                        {patAgg.map(v => renderVoce(v, true))}
+                        {(nEco + nPat) === 0 && <tr><td colSpan={nCols} style={{ padding: 14, color: "var(--ink-3)", textAlign: "center" }}>Nessuna voce nuova: usa i pulsanti qui sotto o “+ Aggiungi voce”.</td></tr>}
+                        <tr><td colSpan={nCols} style={{ padding: "5px 8px 5px 16px" }}>
+                          <button className="btn ghost sm" onClick={() => addVoceTipo("ricavo")}>+ ricavo</button>{" "}
+                          <button className="btn ghost sm" onClick={() => addVoceTipo("costo")}>+ costo</button>{" "}
+                          <button className="btn ghost sm" onClick={() => addVoceTipo("patrimoniale")}>+ patrimoniale</button>
+                        </td></tr>
+                      </>;
+                    }
                     return <>
                       {eco.length > 0 && groupHead("Conto economico")}
                       {eco.length > 0 && subHead("Ricavi")}
@@ -11263,7 +11322,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                       {patAgg.map(v => renderVoce(v, true))}
                     </>;
                   })()}
-                  {totali && (
+                  {totali && vistaBudget !== "macro" && (
                     <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
                       <td colSpan={4} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
                       <td className="num">{fmt(addAct ? totali.effRis : totali.budRis)}</td>
