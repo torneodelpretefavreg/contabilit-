@@ -902,6 +902,14 @@ function stagioneDaData(d) {
 }
 const STAGIONE_DEFAULT = stagioneDaData(new Date());
 
+// Esercizio (anno di chiusura) a cui appartiene una data: da settembre in poi
+// si entra nell'esercizio che chiude il 31/08 dell'anno successivo.
+function esercizioDaData(d) {
+  const date = new Date(d);
+  if (isNaN(date)) return new Date().getFullYear();
+  return date.getMonth() >= 8 ? date.getFullYear() + 1 : date.getFullYear();
+}
+
 // ============================================================
 // SEED DATI
 // ============================================================
@@ -1893,7 +1901,7 @@ function PageNuovo({ conti, stagione, categorie, onSaved, onCancel }) {
           conto: conto.nome.trim(),
           classe: conto.categoria === "IMM. MATERIALI" ? "IMMOBILIZZAZIONI MATERIALI" : "IMMOBILIZZAZIONI IMMATERIALI",
           n_beni: 1,
-          anno_inizio: payload.data ? new Date(payload.data).getFullYear() : new Date().getFullYear(),
+          anno_inizio: esercizioDaData(payload.data || new Date()),
           costo_storico: payload.importo,
           aliquota: 0.10,
           quota_esercizio: 0,
@@ -6087,9 +6095,17 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
 // ============================================================
 // PAGINA: PIANO DI AMMORTAMENTO
 // ============================================================
-function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
+function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagione, onToast }) {
   const annoCorrente = new Date().getFullYear();
-  const [annoRiferimento, setAnnoRiferimento] = useState(2026);
+
+  // Esercizio derivato dalla stagione selezionata ("2025-26" → chiude il 31/08/2026)
+  const annoFine = useMemo(() => {
+    const m = String(stagione || "").match(/^(\d{4})-(\d{2})$/);
+    if (m) return 2000 + Number(m[2]);
+    return esercizioDaData(new Date());
+  }, [stagione]);
+  const [annoRiferimento, setAnnoRiferimento] = useState(annoFine);
+  useEffect(() => { setAnnoRiferimento(annoFine); }, [annoFine]);
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -6097,12 +6113,14 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
     return m;
   }, [conti]);
 
-  // Esercizio corrente: chiude il 31/08/2026. I cespiti "di quest'anno"
-  // (anno_inizio === 2026) si ammortizzano con ragguaglio ai giorni dalla data
-  // di registrazione in contabilità fino al 31/08/2026. Gli anni precedenti
-  // restano immutati (uso la quota_esercizio salvata).
-  const ANNO_ESERCIZIO = 2026;
-  const FINE_ESERCIZIO = useMemo(() => new Date(2026, 7, 31), []); // 31 agosto 2026
+  // Esercizio corrente: chiude il 31/08 dell'anno di fine stagione. I cespiti
+  // "di quest'anno" (anno_inizio === ANNO_ESERCIZIO) si ammortizzano con ragguaglio
+  // ai giorni dalla data di registrazione in contabilità fino alla chiusura.
+  // Gli anni precedenti restano immutati (uso la quota_esercizio salvata).
+  const ANNO_ESERCIZIO = annoFine;
+  const FINE_ESERCIZIO = useMemo(() => new Date(annoFine, 7, 31), [annoFine]);
+  const FINE_ESERCIZIO_ISO = `${annoFine}-08-31`;
+  const FINE_ESERCIZIO_LABEL = `31/08/${annoFine}`;
   const GIORNI_ANNO = 365;
 
   // Sottoscrivo i cespiti con la loro key, così posso salvare la data_inizio inline
@@ -6150,7 +6168,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
       const importoOk = candidati.filter(m => Math.abs((m.importo || 0) - costoC) < 0.5);
       const pool = importoOk.length ? importoOk : candidati;
       const sorted = [...pool].sort((a, b) => (a.data || "").localeCompare(b.data || ""));
-      out[c._key] = { data: sorted[0].data, count: pool.length, exact: importoOk.length > 0 };
+      out[c._key] = { data: sorted[0].data, bu: sorted[0].bu || null, count: pool.length, exact: importoOk.length > 0 };
     });
     return out;
   }, [cespitiKeyed, movimenti, contiMap]);
@@ -6185,9 +6203,11 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
           quotaEsercizio = quotaAnnua; // senza data uso la quota piena, ma segnalo
         }
       } else {
-        // Anni precedenti / senza aliquota: immutato → quota salvata
-        quotaEsercizio = (c.quota_esercizio !== undefined && c.quota_esercizio !== null)
+        // Anni precedenti / senza aliquota: immutato → quota salvata (nessun ragguaglio
+        // ai giorni), ma non può eccedere il valore ancora da ammortizzare.
+        const quotaSalvata = (c.quota_esercizio !== undefined && c.quota_esercizio !== null)
           ? Number(c.quota_esercizio) : quotaAnnua;
+        quotaEsercizio = Math.min(Math.max(0, costo - fondoAttuale), quotaSalvata);
       }
 
       // Calcolo durata teorica in anni
@@ -6225,6 +6245,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
         dataReg,
         dataFromLedger,
         ledgerCount: ledger ? ledger.count : 0,
+        buLedger: (ledger && ledger.bu) || null,
         durataTeorica,
         anniDecorsi,
         fondoTeorico,
@@ -6250,6 +6271,204 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
     };
   }, [piano]);
 
+  // ---------- Scritture di ammortamento ----------
+  // Conti candidati: costo (CE) e fondo (rettifica attivo, SP)
+  const contiCosto = useMemo(() => (conti || [])
+    .filter(c => ["COSTI", "COSTI/RICAVI"].includes((c.categoria || "").toUpperCase()))
+    .sort((a, b) => {
+      const aA = /AMMORTAMENT/.test((a.nome || "").toUpperCase()) ? 0 : 1;
+      const bA = /AMMORTAMENT/.test((b.nome || "").toUpperCase()) ? 0 : 1;
+      return aA - bA || a.codice - b.codice;
+    }), [conti]);
+  const contiFondo = useMemo(() => (conti || [])
+    .filter(c => (c.categoria || "").toUpperCase().includes("RETTIFICA"))
+    .sort((a, b) => a.codice - b.codice), [conti]);
+
+  // Abbinamento automatico cespite → conto (per parole chiave del nome)
+  const STOPWORDS = ["AMMORTAMENTO", "AMMORTAMENTI", "FONDO", "AMM", "DEL", "DELLA", "DEI", "PER", "CON", "CONTO"];
+  const tokenizza = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").split(" ")
+    .filter(w => w.length > 2 && !STOPWORDS.includes(w));
+  const abbina = (nomeCespite, lista) => {
+    const t1 = tokenizza(nomeCespite);
+    if (!t1.length) return { codice: null, score: 0 };
+    let best = null, bestScore = 0;
+    lista.forEach(c => {
+      const t2 = tokenizza(c.nome);
+      if (!t2.length) return;
+      let hit = 0;
+      t1.forEach(w => { if (t2.some(x => x === w || x.startsWith(w) || w.startsWith(x))) hit++; });
+      const score = hit / t1.length;
+      if (score > bestScore) { bestScore = score; best = c; }
+    });
+    return bestScore >= 0.5 ? { codice: best.codice, score: bestScore } : { codice: null, score: 0 };
+  };
+
+  const [modaleScritture, setModaleScritture] = useState(false);
+
+  // Righe proponibili: quota > 0, non già registrate in questo esercizio
+  const proposte = useMemo(() => piano.map(c => {
+    const quota = Number(c.quotaEsercizio) || 0;
+    const residuo = Math.max(0, Number(c.valoreResiduo) || 0);
+    const importo = Math.round(Math.min(quota, residuo) * 100) / 100;
+    const gAmm = c.conto_amm != null ? { codice: Number(c.conto_amm), score: 1 } : abbina(c.conto, contiCosto);
+    const gFondo = c.conto_fondo != null ? { codice: Number(c.conto_fondo), score: 1 } : abbina(c.conto, contiFondo);
+    return {
+      key: c._key,
+      nome: c.conto,
+      quota,
+      residuo,
+      importo,
+      limitato: quota - importo > 0.005,
+      contoAmm: gAmm.codice,
+      contoFondo: gFondo.codice,
+      incerto: gAmm.score < 0.99 || gFondo.score < 0.99,
+      bu: c.bu_amm || c.buLedger || "GENERAL",
+      giaRegistrato: !!(c.amm_reg && c.amm_reg.scritturaId),
+      fondoPrec: Number(c.fondo_ammortamento) || 0,
+    };
+  }), [piano, contiCosto, contiFondo]);
+
+  const daRegistrare = proposte.filter(r => !r.giaRegistrato && r.importo > 0.005);
+  const registrate = proposte.filter(r => r.giaRegistrato);
+  // Registra le scritture selezionate: DARE conto ammortamento / AVERE fondo
+  const registraScritture = async (righe, dataScrittura) => {
+    if (!firebaseReady) return alert("Firebase non disponibile");
+    if (!righe.length) return;
+    try {
+      const now = new Date().toISOString();
+      const updates = {};
+      const patchCespiti = [];
+      righe.forEach((r, i) => {
+        const scritturaId = "scr_amm_" + Date.now().toString(36) + "_" + i + "_" + Math.random().toString(36).slice(2, 7);
+        const comune = {
+          data: dataScrittura,
+          contoLiquidita: null, contoLiquiditaDest: null,
+          categoria: "AMMORTAMENTI",
+          bu: r.bu || "GENERAL",
+          descrizione: `Ammortamento esercizio · ${r.nome}`,
+          mese: meseDaData(dataScrittura),
+          nonMonetario: true,
+          scritturaComposta: true,
+          scritturaId,
+          importo: r.importo,
+          creatoIl: now, modificatoIl: now,
+        };
+        const k1 = db.ref(`stagioni/${stagione}/movimenti`).push().key;
+        updates[k1] = { ...comune, tipo: "uscita", contoPdC: Number(r.contoAmm), dare: r.importo, avere: 0 };
+        const k2 = db.ref(`stagioni/${stagione}/movimenti`).push().key;
+        updates[k2] = { ...comune, tipo: "entrata", contoPdC: Number(r.contoFondo), dare: 0, avere: r.importo };
+        patchCespiti.push({
+          key: r.key,
+          patch: {
+            fondo_ammortamento: Math.round((r.fondoPrec + r.importo) * 100) / 100,
+            quota_esercizio: r.importo,
+            conto_amm: Number(r.contoAmm),
+            conto_fondo: Number(r.contoFondo),
+            bu_amm: r.bu || "GENERAL",
+            amm_reg: { scritturaId, importo: r.importo, data: dataScrittura, registratoIl: now },
+          },
+        });
+      });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+      for (const u of patchCespiti) {
+        if (!String(u.key).startsWith("idx_")) await db.ref(`stagioni/${stagione}/cespiti/${u.key}`).update(u.patch);
+      }
+      setModaleScritture(false);
+      onToast(`${righe.length} scrittur${righe.length === 1 ? "a" : "e"} di ammortamento registrat${righe.length === 1 ? "a" : "e"}`);
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  // Storno: elimina le righe della scrittura e ripristina il fondo
+  const stornaScrittura = async (c) => {
+    const reg = c.amm_reg;
+    if (!reg || !firebaseReady) return;
+    if (!confirm(`Stornare l'ammortamento di ${c.conto} (${fmtEuro(reg.importo || 0)} del ${fmtDate(reg.data)})?\n\nVengono eliminate le righe in libro giornale e il fondo torna indietro.`)) return;
+    try {
+      const ids = (movimenti || []).filter(m => m.scritturaId === reg.scritturaId).map(m => m._id).filter(Boolean);
+      for (const id of ids) await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
+      await db.ref(`stagioni/${stagione}/cespiti/${c._key}`).update({
+        fondo_ammortamento: Math.round(Math.max(0, (Number(c.fondo_ammortamento) || 0) - (Number(reg.importo) || 0)) * 100) / 100,
+        amm_reg: null,
+      });
+      onToast("Ammortamento stornato");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  // Crea al volo i conti mancanti (costo + fondo) per i cespiti non abbinati
+  const creaContiMancanti = async (righe) => {
+    const mancanti = (righe || []).filter(r => !r.contoAmm || !r.contoFondo);
+    if (!mancanti.length) return {};
+    if (!firebaseReady) { alert("Firebase non disponibile"); return {}; }
+    const elenco = mancanti.map(r => {
+      const parti = [];
+      if (!r.contoAmm) parti.push(`AMMORTAMENTO ${r.nome}`.toUpperCase());
+      if (!r.contoFondo) parti.push(`FONDO AMMORTAMENTO ${r.nome}`.toUpperCase());
+      return "• " + parti.join("\n• ");
+    }).join("\n");
+    if (!confirm(`Creare i conti mancanti nel Piano dei Conti?\n\n${elenco}`)) return {};
+    try {
+      let next = (conti || []).reduce((mx, c) => Math.max(mx, Number(c.codice) || 0), 0);
+      const updates = {}, out = {};
+      mancanti.forEach(r => {
+        const patch = {};
+        if (!r.contoAmm) {
+          next++;
+          updates[`c${next}`] = { codice: next, nome: `AMMORTAMENTO ${r.nome}`.toUpperCase(), eccedenza: "DARE", prospetto: "CE", categoria: "COSTI" };
+          patch.contoAmm = next;
+        }
+        if (!r.contoFondo) {
+          next++;
+          updates[`c${next}`] = { codice: next, nome: `FONDO AMMORTAMENTO ${r.nome}`.toUpperCase(), eccedenza: "AVERE", prospetto: "SP", categoria: "RETTIFICA ATTIVO" };
+          patch.contoFondo = next;
+        }
+        out[r.key] = patch;
+      });
+      await db.ref(`stagioni/${stagione}/conti`).update(updates);
+      onToast(`${Object.keys(updates).length} conti creati`);
+      return out;
+    } catch (e) { alert("Errore: " + e.message); return {}; }
+  };
+
+  // ---------- Quadratura fondi: scheda cespite vs saldo contabile ----------
+  const mastriniMap = useMemo(() => {
+    const scritture = generaLibroGiornale(movimenti || [], saldiIniziali || {}, contiMap);
+    const m = {};
+    calcolaMastrini(scritture).forEach(x => { m[Number(x.codice)] = x; });
+    return m;
+  }, [movimenti, saldiIniziali, contiMap]);
+
+  const quadraturaFondi = useMemo(() => {
+    const perConto = {};
+    const senzaConto = [];
+    proposte.forEach(r => {
+      const cesp = piano.find(c => c._key === r.key);
+      const fondoCesp = Number(cesp?.fondo_ammortamento) || 0;
+      if (!r.contoFondo) {
+        if (fondoCesp > 0.005 || (Number(cesp?.quotaEsercizio) || 0) > 0.005) senzaConto.push({ nome: r.nome, fondo: fondoCesp });
+        return;
+      }
+      if (!perConto[r.contoFondo]) perConto[r.contoFondo] = { codice: r.contoFondo, cespiti: [], schede: 0 };
+      perConto[r.contoFondo].cespiti.push(r.nome);
+      perConto[r.contoFondo].schede += fondoCesp;
+    });
+    // Conti fondo con movimenti ma senza cespiti abbinati
+    contiFondo.forEach(c => {
+      const mst = mastriniMap[Number(c.codice)];
+      const saldo = mst ? (mst.avere - mst.dare) : 0;
+      if (!perConto[c.codice] && Math.abs(saldo) > 0.005) {
+        perConto[c.codice] = { codice: Number(c.codice), cespiti: [], schede: 0 };
+      }
+    });
+    const righe = Object.values(perConto).map(x => {
+      const mst = mastriniMap[x.codice];
+      const contabile = mst ? (mst.avere - mst.dare) : 0;
+      const diff = Math.round((x.schede - contabile) * 100) / 100;
+      return { ...x, nome: contiMap[x.codice]?.nome?.trim() || `Conto ${x.codice}`, contabile, diff };
+    }).sort((a, b) => a.codice - b.codice);
+    const fuoriQuadratura = righe.filter(r => Math.abs(r.diff) > 0.01);
+    return { righe, fuoriQuadratura, senzaConto };
+  }, [proposte, piano, contiFondo, mastriniMap, contiMap]);
+
   return (
     <div>
       <div className="page-head">
@@ -6257,10 +6476,14 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
           <h2>Piano di Ammortamento</h2>
           <div className="sub">Calcolo automatico delle quote di ammortamento per ogni cespite</div>
         </div>
-        <div className="filters" style={{marginLeft:"auto"}}>
+        <div className="filters" style={{marginLeft:"auto", gap:10}}>
           <span className="label">Anno riferimento:</span>
           <input type="number" value={annoRiferimento} onChange={e => setAnnoRiferimento(Number(e.target.value))}
                  style={{maxWidth:100, padding:"6px 10px", border:"1px solid var(--rule)", borderRadius:6}}/>
+          <button className="btn accent" disabled={daRegistrare.length === 0} onClick={() => setModaleScritture(true)}
+                  title={daRegistrare.length ? "Proponi le scritture di ammortamento" : "Nessuna quota da registrare"}>
+            📓 Proponi scritture ({daRegistrare.length})
+          </button>
         </div>
       </div>
 
@@ -6278,7 +6501,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
         <div className="kpi">
           <div className="label">Fondo ammortamento attuale</div>
           <div className="value">{fmtEuro(tot.fondoAttuale)}</div>
-          <div className="hint">accumulato in libro</div>
+          <div className="hint">{registrate.length ? `${registrate.length} scrittur${registrate.length === 1 ? "a" : "e"} registrat${registrate.length === 1 ? "a" : "e"}` : "accumulato in libro"}</div>
         </div>
         <div className="kpi">
           <div className="label">Valore residuo</div>
@@ -6288,8 +6511,21 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
       </div>
 
       <div style={{padding:"12px 16px", background:"#fff8e7", border:"1px solid #f0d860", borderRadius:8, fontSize:13, marginBottom:16, color:"#7a5d00"}}>
-        <strong>💡 Come leggere.</strong> La <em>quota annua</em> è costo × aliquota. Per i cespiti di <strong>quest'esercizio</strong> (anno {ANNO_ESERCIZIO}) la <em>quota d'esercizio</em> è ragguagliata ai giorni dalla data di registrazione in contabilità fino al <strong>31/08/2026</strong> (gg/365). La <strong>data reg.</strong> viene pescata automaticamente dal <strong>libro giornale</strong> (movimento di acquisto del cespite, icona 📖); se non trova un movimento corrispondente puoi inserirla a mano. I cespiti degli <strong>anni precedenti</strong> restano immutati (quota salvata). Lo <em>scostamento</em> è la differenza fra fondo teorico e fondo attuale.
+        <strong>💡 Come leggere.</strong> La <em>quota annua</em> è costo × aliquota. Per i cespiti di <strong>quest'esercizio</strong> (anno {ANNO_ESERCIZIO}) la <em>quota d'esercizio</em> è ragguagliata ai giorni dalla data di registrazione in contabilità fino al <strong>{FINE_ESERCIZIO_LABEL}</strong> (gg/365). La <strong>data reg.</strong> viene pescata automaticamente dal <strong>libro giornale</strong> (movimento di acquisto del cespite, icona 📖); se non trova un movimento corrispondente puoi inserirla a mano. I cespiti degli <strong>anni precedenti</strong> restano immutati (quota salvata). Lo <em>scostamento</em> è la differenza fra fondo teorico e fondo attuale. Con <strong>📓 Proponi scritture</strong> generi le scritture DARE ammortamento / AVERE fondo al {FINE_ESERCIZIO_LABEL}: le controlli una per una prima di registrarle, e ogni cespite può essere ammortizzato una sola volta (con storno disponibile).
       </div>
+
+      {(quadraturaFondi.fuoriQuadratura.length > 0 || quadraturaFondi.senzaConto.length > 0) && (
+        <div style={{padding:"12px 16px", background:"var(--danger-soft)", border:"1px solid var(--danger)", borderRadius:8, fontSize:13, marginBottom:16, color:"var(--danger)"}}>
+          <strong>⚠ Fondi non allineati.</strong>{" "}
+          {quadraturaFondi.fuoriQuadratura.length > 0 && (
+            <span>{quadraturaFondi.fuoriQuadratura.length} cont{quadraturaFondi.fuoriQuadratura.length === 1 ? "o fondo non quadra" : "i fondo non quadrano"} con le schede cespite ({quadraturaFondi.fuoriQuadratura.map(r => r.nome).join(", ")}). </span>
+          )}
+          {quadraturaFondi.senzaConto.length > 0 && (
+            <span>{quadraturaFondi.senzaConto.length} cespit{quadraturaFondi.senzaConto.length === 1 ? "e è" : "i sono"} senza conto fondo abbinato ({quadraturaFondi.senzaConto.map(r => r.nome).join(", ")}).</span>
+          )}
+          <div style={{marginTop:4, fontSize:12}}>Dettaglio nella tabella "Quadratura fondi" in fondo alla pagina.</div>
+        </div>
+      )}
 
       <div className="tbl-wrap">
         <table className="tbl">
@@ -6308,6 +6544,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
               <th className="num">Scostamento</th>
               <th className="num">Valore residuo</th>
               <th>Stato</th>
+              <th style={{width:150}}>Scrittura</th>
             </tr>
           </thead>
           <tbody>
@@ -6331,7 +6568,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
                       📖 {fmtDate(c.dataReg)}
                     </span>
                   ) : c.isCorrente ? (
-                    <input type="date" value={c.data_inizio || ""} max="2026-08-31"
+                    <input type="date" value={c.data_inizio || ""} max={FINE_ESERCIZIO_ISO}
                            onChange={e => setDataInizio(c._key, e.target.value)}
                            title="Nessun movimento trovato in libro giornale: inserisci manualmente"
                            style={{width:130, padding:"3px 6px", border:"1px solid var(--rule)", borderRadius:4, fontSize:12,
@@ -6359,6 +6596,21 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
                            (c.stato.includes("In ammortamento") || c.stato.includes("Primo anno")) ? "var(--accent-ink)" : "var(--ink-3)"
                   }}>{c.stato}</span>
                 </td>
+                <td style={{fontSize:11.5}}>
+                  {c.amm_reg ? (
+                    <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap"}}>
+                      <span title={`Registrata il ${fmtDate(c.amm_reg.data)}`} style={{color:"var(--ok)", fontWeight:600}}>
+                        ✓ {fmt(c.amm_reg.importo)}
+                      </span>
+                      <button className="btn ghost sm" title="Storna la scrittura e ripristina il fondo"
+                              onClick={() => stornaScrittura(c)}>↩</button>
+                    </div>
+                  ) : (Number(c.quotaEsercizio) || 0) > 0.005 ? (
+                    <span style={{color:"var(--ink-3)"}}>da registrare</span>
+                  ) : (
+                    <span style={{color:"var(--ink-3)"}}>—</span>
+                  )}
+                </td>
               </tr>
             ))}
             <tr style={{borderTop:"2px solid var(--ink)", fontWeight:700, background:"var(--panel-2)"}}>
@@ -6374,10 +6626,192 @@ function PageAmmortamenti({ cespiti, movimenti, conti, stagione, onToast }) {
                 {(tot.fondoAttuale - tot.fondoTeorico) > 0 ? "+" : ""}{fmt(tot.fondoAttuale - tot.fondoTeorico)}
               </td>
               <td className="num">{fmt(tot.valoreResiduo)}</td>
-              <td></td>
+              <td colSpan={2}></td>
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"28px 0 12px"}}>Quadratura fondi ammortamento</h3>
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th style={{width:50}}>Cod.</th>
+              <th>Conto fondo</th>
+              <th>Cespiti abbinati</th>
+              <th className="num" style={{width:130}}>Schede cespiti</th>
+              <th className="num" style={{width:130}}>Saldo contabile</th>
+              <th className="num" style={{width:120}}>Differenza</th>
+            </tr>
+          </thead>
+          <tbody>
+            {quadraturaFondi.righe.length === 0 && (
+              <tr><td colSpan={6} style={{color:"var(--ink-3)"}}>Nessun conto fondo movimentato o abbinato.</td></tr>
+            )}
+            {quadraturaFondi.righe.map(r => {
+              const ko = Math.abs(r.diff) > 0.01;
+              return (
+                <tr key={r.codice} style={ko ? {background:"var(--danger-soft)"} : {}}>
+                  <td className="mono" style={{fontWeight:600}}>{String(r.codice).padStart(2,"0")}</td>
+                  <td>{r.nome}</td>
+                  <td style={{fontSize:12, color:"var(--ink-2)"}}>{r.cespiti.length ? r.cespiti.join(", ") : <span style={{color:"var(--danger)"}}>nessun cespite abbinato</span>}</td>
+                  <td className="num">{fmt(r.schede)}</td>
+                  <td className="num">{fmt(r.contabile)}</td>
+                  <td className="num" style={{fontWeight: ko ? 700 : 400, color: ko ? "var(--danger)" : "var(--ok)"}}>
+                    {ko ? (r.diff > 0 ? "+" : "") + fmt(r.diff) : "✓"}
+                  </td>
+                </tr>
+              );
+            })}
+            {quadraturaFondi.senzaConto.map(r => (
+              <tr key={"nc_" + r.nome} style={{background:"var(--danger-soft)"}}>
+                <td className="mono">—</td>
+                <td style={{color:"var(--danger)"}}>Conto fondo mancante</td>
+                <td style={{fontSize:12}}>{r.nome}</td>
+                <td className="num">{fmt(r.fondo)}</td>
+                <td className="num">—</td>
+                <td className="num" style={{color:"var(--danger)", fontWeight:700}}>?</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{marginTop:10, fontSize:12, color:"var(--ink-3)"}}>
+        Confronto fra il <strong>fondo ammortamento scritto sulla scheda cespite</strong> e il <strong>saldo del conto fondo in libro giornale</strong> (avere − dare, aperture comprese). Una differenza segnala un ammortamento registrato a mano senza aggiornare la scheda, uno storno parziale o un abbinamento sbagliato.
+      </div>
+
+      {modaleScritture && (
+        <ScrittureAmmortamentoModal
+          righe={daRegistrare}
+          contiCosto={contiCosto}
+          contiFondo={contiFondo}
+          bu={bu}
+          dataDefault={FINE_ESERCIZIO_ISO}
+          onCreaConti={creaContiMancanti}
+          onConfirm={registraScritture}
+          onClose={() => setModaleScritture(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Modale: proposta delle scritture di ammortamento (DARE costo / AVERE fondo)
+function ScrittureAmmortamentoModal({ righe, contiCosto, contiFondo, bu, dataDefault, onCreaConti, onConfirm, onClose }) {
+  const [data, setData] = useState(dataDefault || "");
+  const [rows, setRows] = useState(() => righe.map(r => ({ ...r, sel: !!(r.contoAmm && r.contoFondo) })));
+  const [saving, setSaving] = useState(false);
+  const setRow = (i, patch) => setRows(rs => rs.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+
+  const selezionate = rows.filter(r => r.sel);
+  const incomplete = selezionate.filter(r => !r.contoAmm || !r.contoFondo);
+  const totale = selezionate.reduce((s, r) => s + (Number(r.importo) || 0), 0);
+  const buList = (bu && bu.length ? bu : ["GENERAL"]);
+
+  const creaConti = async () => {
+    if (!onCreaConti) return;
+    const mappa = await onCreaConti(selezionate);
+    if (!mappa || !Object.keys(mappa).length) return;
+    setRows(rs => rs.map(r => mappa[r.key] ? { ...r, ...mappa[r.key], incerto: false } : r));
+  };
+
+  const submit = async () => {
+    if (!selezionate.length) return alert("Nessuna riga selezionata.");
+    if (incomplete.length) return alert("Alcune righe selezionate non hanno il conto di ammortamento o il fondo.");
+    setSaving(true);
+    await onConfirm(selezionate.map(r => ({ ...r, importo: Number(r.importo) || 0 })).filter(r => r.importo > 0), data);
+    setSaving(false);
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" style={{maxWidth:1000}} onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>Scritture di ammortamento proposte</h3>
+          <button className="btn ghost sm" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          <div style={{fontSize:12.5, color:"var(--ink-2)", marginBottom:12}}>
+            Per ogni cespite: <strong>DARE</strong> conto ammortamento (costo) / <strong>AVERE</strong> fondo ammortamento, per la quota d'esercizio.
+            Controlla i conti abbinati automaticamente — <strong>niente viene scritto finché non premi Registra</strong>.
+          </div>
+
+          <div className="form-row" style={{maxWidth:280}}>
+            <label>Data scrittura</label>
+            <input type="date" value={data} onChange={e => setData(e.target.value)} />
+          </div>
+
+          <div className="tbl-wrap" style={{marginTop:12, maxHeight:380, overflowY:"auto"}}>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th style={{width:34}}></th>
+                  <th>Cespite</th>
+                  <th className="num" style={{width:100}}>Importo</th>
+                  <th style={{width:210}}>DARE · ammortamento</th>
+                  <th style={{width:210}}>AVERE · fondo</th>
+                  <th style={{width:130}}>BU</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.key} style={{background: r.sel ? "var(--panel)" : "var(--panel-2)"}}>
+                    <td><input type="checkbox" checked={r.sel} onChange={e => setRow(i, { sel: e.target.checked })} /></td>
+                    <td style={{fontWeight:500}}>
+                      {r.nome}
+                      {r.incerto && <span className="pill" style={{marginLeft:6, fontSize:9.5, background:"var(--danger-soft)", color:"var(--danger)"}}>verifica conti</span>}
+                      {r.limitato && <div style={{fontSize:10.5, color:"var(--ink-3)"}}>quota {fmt(r.quota)} limitata al residuo</div>}
+                    </td>
+                    <td className="num">
+                      <input type="number" inputMode="decimal" step="0.01" value={r.importo}
+                             onChange={e => setRow(i, { importo: e.target.value })}
+                             style={{width:90, padding:"3px 6px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right"}} />
+                    </td>
+                    <td>
+                      <select value={r.contoAmm || ""} onChange={e => setRow(i, { contoAmm: Number(e.target.value) || null })} style={{width:"100%"}}>
+                        <option value="">— scegli —</option>
+                        {contiCosto.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2,"0")} · {c.nome.trim()}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={r.contoFondo || ""} onChange={e => setRow(i, { contoFondo: Number(e.target.value) || null })} style={{width:"100%"}}>
+                        <option value="">— scegli —</option>
+                        {contiFondo.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2,"0")} · {c.nome.trim()}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={r.bu} onChange={e => setRow(i, { bu: e.target.value })} style={{width:"100%"}}>
+                        {buList.map(b => <option key={b} value={b}>{b}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {incomplete.length > 0 && (
+            <div style={{marginTop:10, padding:"8px 12px", background:"var(--danger-soft)", border:"1px solid var(--danger)", borderRadius:6, fontSize:12, color:"var(--danger)", display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+              <span style={{flex:1, minWidth:220}}>
+                {incomplete.length} rig{incomplete.length === 1 ? "a selezionata" : "he selezionate"} senza conto ammortamento o fondo.
+              </span>
+              <button type="button" className="btn ghost sm" onClick={creaConti}>➕ Crea i conti mancanti</button>
+            </div>
+          )}
+
+          <div style={{display:"flex", justifyContent:"space-between", padding:"8px 12px", marginTop:12, background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:6, fontSize:13}}>
+            <span>Totale ammortamenti da registrare ({selezionate.length}):</span>
+            <strong className="mono">{fmtEuro(totale)}</strong>
+          </div>
+
+          <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+            <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
+            <button type="button" className="btn accent" disabled={saving || !selezionate.length} onClick={submit}>
+              {saving ? "Registro…" : `Registra ${selezionate.length} scrittur${selezionate.length === 1 ? "a" : "e"}`}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -6718,7 +7152,10 @@ function PageCespiti({ cespiti, stagione, onToast }) {
   const saveCespite = async (data, oldKey) => {
     try {
       const key = oldKey || `cesp_${Date.now().toString(36)}`;
-      await db.ref(`stagioni/${stagione}/cespiti/${key}`).set(data);
+      // In modifica uso update() così non perdo i campi non gestiti dal form
+      // (conti di ammortamento abbinati, scrittura registrata, ecc.)
+      if (oldKey) await db.ref(`stagioni/${stagione}/cespiti/${key}`).update(data);
+      else await db.ref(`stagioni/${stagione}/cespiti/${key}`).set(data);
       onToast("Cespite salvato");
       setEditing(null); setCreating(false);
     } catch(e) { alert("Errore: " + e.message); }
@@ -6851,7 +7288,7 @@ function CespiteForm({ cespite, onSave, onCancel }) {
   const [conto, setConto] = useState(cespite?.conto || "");
   const [classe, setClasse] = useState(cespite?.classe || "IMMOBILIZZAZIONI MATERIALI");
   const [nBeni, setNBeni] = useState(cespite?.n_beni || 1);
-  const [annoInizio, setAnnoInizio] = useState(cespite?.anno_inizio || new Date().getFullYear());
+  const [annoInizio, setAnnoInizio] = useState(cespite?.anno_inizio || esercizioDaData(new Date()));
   const [costoUnit, setCostoUnit] = useState(() => {
     if (!cespite) return "";
     const n = Number(cespite.n_beni) || 1;
@@ -6986,477 +7423,9 @@ function CespiteForm({ cespite, onSave, onCancel }) {
 }
 
 // ============================================================
-// PAGINA: ISCRIZIONI TdP (lette dal TdP Manager + pagamenti + contabilità)
+// Conto P.d.C. degli incassi serate torneo (usato dalla pagina Torneo)
 // ============================================================
-// Mappa metodo di pagamento → conto di liquidità (codice P.d.C.)
-const METODI_TDP = [
-  { val: "contanti", label: "Contanti", conto: 3 },
-  { val: "bonifico", label: "Bonifico", conto: 1 },
-  { val: "pos", label: "POS", conto: 5 },
-  { val: "satispay", label: "Satispay", conto: 10 },
-  { val: "paypal", label: "PayPal", conto: 9 },
-];
-// Conti P.d.C. di destinazione dei ricavi torneo
-const CONTO_ISCRIZIONE = 6;   // ISCRIZIONI C/ENT.
-const CONTO_ASSICURAZIONE = 7; // ASSICURAZIONI GIOCATORI
 const CONTO_ENTRATE_SERATE = 41; // ENTRATE SERATE TORNEO
-
-// Slug stabile per chiave squadra (sopravvive agli aggiornamenti del master)
-function slugSquadra(nome) {
-  return String(nome || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "SQUADRA";
-}
-// Mappa il metodo di pagamento (testo libero del foglio) → conto di liquidità suggerito
-function contoLiquiditaDaMetodo(metodo) {
-  const m = String(metodo || "").toUpperCase();
-  if (m.includes("PAYPAL")) return 9;
-  if (m.includes("SATISPAY")) return 10;
-  if (m.includes("SUMUP") || m.includes("POS")) return 5;
-  if (m.includes("CONTO FUTSAL") || m.includes("BONIFICO") || m.includes("C/C")) return 1;
-  return 3; // contanti / cash / delta cassa / default
-}
-// Interpreta le colonne RISCOSSI / DA RISCUOTERE (categoriche) → { iscr, ass } pagati
-function parseStatoRiscossi(riscosso, daRiscuotere) {
-  const r = String(riscosso || "").trim().toUpperCase();
-  const d = String(daRiscuotere || "").trim().toUpperCase();
-  if (r.includes("TUTTO")) return { iscr: true, ass: true };
-  if (r.includes("ISCRIZIONE") || r.includes("ASSICURAZIONE")) {
-    return { iscr: r.includes("ISCRIZIONE"), ass: r.includes("ASSICURAZIONE") };
-  }
-  // RISCOSSI vuoto → deduco da "da riscuotere" (complemento)
-  if (!d || d.includes("TUTTO")) return { iscr: false, ass: false };
-  return { iscr: !d.includes("ISCRIZIONE"), ass: !d.includes("ASSICURAZIONE") };
-}
-
-function PageIscrizioniTdP({ stagione, conti, onToast }) {
-  const [data, setData] = useState(null);     // { filename, importedAt, squadre:{} }
-  const [loading, setLoading] = useState(true);
-  const [parsing, setParsing] = useState(false);
-  const [regSlug, setRegSlug] = useState(null); // slug squadra in registrazione
-  const fileRef = useRef(null);
-
-  useEffect(() => {
-    if (!firebaseReady) { setLoading(false); return; }
-    const ref = db.ref(`stagioni/${stagione}/iscrizioniTdP`);
-    const cb = ref.on("value", snap => { setData(snap.exists() ? snap.val() : null); setLoading(false); });
-    return () => ref.off("value", cb);
-  }, [stagione]);
-
-  const squadre = useMemo(() => {
-    const s = (data && data.squadre) || {};
-    return Object.entries(s)
-      .map(([slug, t]) => ({ ...t, slug }))
-      .sort((a, b) => (a.nomeSquadra || "").localeCompare(b.nomeSquadra || ""));
-  }, [data]);
-
-  // ---- import / merge dal foglio "STATO SQUADRE" ----
-  const onFile = (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    if (typeof XLSX === "undefined") { alert("Libreria Excel non caricata. Ricarica la pagina."); return; }
-    setParsing(true);
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      try {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
-        const norm = (v) => String(v == null ? "" : v).trim().toUpperCase().replace(/\s+/g, " ");
-        const sheetName = wb.SheetNames.find(n => norm(n) === "STATO SQUADRE")
-          || wb.SheetNames.find(n => norm(n).includes("STATO SQUADR"));
-        if (!sheetName) {
-          alert('Nel file non c\'è un foglio "STATO SQUADRE".\nFogli trovati: ' + wb.SheetNames.join(", "));
-          setParsing(false); return;
-        }
-        const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: "" });
-        const hIdx = aoa.findIndex(r => Array.isArray(r) && r.some(c => norm(c) === "SQUADRA"));
-        if (hIdx < 0) { alert('Intestazione "SQUADRA" non trovata nel foglio.'); setParsing(false); return; }
-        const header = aoa[hIdx].map(norm);
-        const exact = (label) => header.findIndex(h => h === label);
-        const incl = (frag) => header.findIndex(h => h.includes(frag));
-        const ci = {
-          squadra: exact("SQUADRA"),
-          resp: exact("RESPONSABILE") >= 0 ? exact("RESPONSABILE") : incl("RESPONSAB"),
-          comp: incl("COMPONENT"),
-          iscr: exact("ISCRIZIONE") >= 0 ? exact("ISCRIZIONE") : incl("ISCRIZION"),
-          ass: incl("ASSICURAZ"),
-          tot: exact("TOTALE") >= 0 ? exact("TOTALE") : incl("TOTALE"),
-          risc: exact("RISCOSSI") >= 0 ? exact("RISCOSSI") : incl("RISCOSS"),
-          dar: incl("DA RISCUOTERE"),
-          met: incl("METODO"),
-        };
-        const parsed = {};
-        for (let i = hIdx + 1; i < aoa.length; i++) {
-          const row = aoa[i] || [];
-          const nome = String(row[ci.squadra] == null ? "" : row[ci.squadra]).trim();
-          if (!nome || norm(nome).startsWith("TOTAL")) continue;
-          const comp = Number(row[ci.comp]) || 0;
-          const quotaIscr = (ci.iscr >= 0 ? Number(row[ci.iscr]) : 0) || 0;
-          const quotaAss = (ci.ass >= 0 ? Number(row[ci.ass]) : 0) || 0;
-          const totale = (ci.tot >= 0 ? Number(row[ci.tot]) : 0) || (quotaIscr + quotaAss);
-          const st = parseStatoRiscossi(ci.risc >= 0 ? row[ci.risc] : "", ci.dar >= 0 ? row[ci.dar] : "");
-          const metodo = ci.met >= 0 ? String(row[ci.met] || "").trim() : "";
-          const deltaCassa = row.some(c => norm(c).includes("DELTA CASSA")) || norm(metodo).includes("DELTA CASSA");
-          const slug = slugSquadra(nome);
-          parsed[slug] = {
-            slug, nomeSquadra: nome, responsabile: String(row[ci.resp] || "").trim(),
-            numeroComponenti: comp, quotaIscrizione: quotaIscr, quotaAssicurazione: quotaAss,
-            totaleDovuto: totale, iscrRiscossa: st.iscr, assRiscossa: st.ass, metodo, deltaCassa,
-          };
-        }
-        if (Object.keys(parsed).length === 0) { alert("Nessuna squadra leggibile nel foglio."); setParsing(false); return; }
-
-        // MERGE: i numeri e lo stato arrivano dal foglio, ma preservo SEMPRE la
-        // registrazione contabile (reg) e le note già presenti → niente duplicati.
-        const prev = (data && data.squadre) || {};
-        const squadreMerge = {};
-        Object.entries(parsed).forEach(([slug, p]) => {
-          const old = prev[slug] || {};
-          squadreMerge[slug] = { ...p, reg: old.reg || null, note: old.note || "" };
-        });
-        // squadre già presenti ma sparite dal foglio: le tengo (con reg) e le segnalo
-        Object.entries(prev).forEach(([slug, old]) => {
-          if (!squadreMerge[slug]) squadreMerge[slug] = { ...old, assenteNelFoglio: true };
-        });
-
-        const payload = { filename: file.name, importedAt: new Date().toISOString(), squadre: squadreMerge };
-        if (firebaseReady) await db.ref(`stagioni/${stagione}/iscrizioniTdP`).set(payload);
-        else setData(payload);
-        onToast(`STATO SQUADRE importato · ${Object.keys(parsed).length} squadre (reg. contabili preservate)`);
-      } catch (err) {
-        alert("Errore lettura file: " + err.message);
-      } finally {
-        setParsing(false);
-        if (fileRef.current) fileRef.current.value = "";
-      }
-    };
-    reader.onerror = () => { alert("Impossibile leggere il file."); setParsing(false); };
-    reader.readAsArrayBuffer(file);
-  };
-
-  const svuota = async () => {
-    if (!confirm("Rimuovere la copia locale delle iscrizioni? (i movimenti già registrati in contabilità NON vengono toccati)")) return;
-    try { await db.ref(`stagioni/${stagione}/iscrizioniTdP`).remove(); onToast("Copia locale rimossa"); }
-    catch (e) { alert("Errore: " + e.message); }
-  };
-
-  // ---- modifica stato in-app ----
-  const patchSquadra = async (slug, patch) => {
-    try { await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${slug}`).update(patch); }
-    catch (e) { alert("Errore: " + e.message); }
-  };
-
-  // componenti riscossi ma non ancora a libro giornale
-  const pendentiDi = (t) => {
-    const out = []; const reg = t.reg || {};
-    if (t.iscrRiscossa && !(reg.iscr && reg.iscr.posted) && (Number(t.quotaIscrizione) || 0) > 0)
-      out.push({ tipo: "iscr", label: "Iscrizione", contoPdC: CONTO_ISCRIZIONE, importo: Number(t.quotaIscrizione) || 0 });
-    if (t.assRiscossa && !(reg.ass && reg.ass.posted) && (Number(t.quotaAssicurazione) || 0) > 0)
-      out.push({ tipo: "ass", label: "Assicurazione", contoPdC: CONTO_ASSICURAZIONE, importo: Number(t.quotaAssicurazione) || 0 });
-    return out;
-  };
-  // componenti registrati ma non più riscossi → da stornare
-  const daStornareDi = (t) => {
-    const out = []; const reg = t.reg || {};
-    if (reg.iscr && reg.iscr.posted && !t.iscrRiscossa) out.push({ tipo: "iscr", label: "Iscrizione" });
-    if (reg.ass && reg.ass.posted && !t.assRiscossa) out.push({ tipo: "ass", label: "Assicurazione" });
-    return out;
-  };
-
-  const nPendenti = useMemo(() => squadre.reduce((s, t) => s + pendentiDi(t).length, 0), [squadre]);
-
-  // registra le righe scelte → crea movimenti + aggiorna reg (idempotente per componente)
-  const registra = async (slug, righe, dataPag) => {
-    const t = (data.squadre || {})[slug]; if (!t) return;
-    try {
-      const regUpd = { ...(t.reg || {}) };
-      for (const r of righe) {
-        const importo = Math.round((Number(r.importo) || 0) * 100) / 100;
-        if (importo <= 0 || !r.conto) continue;
-        const mov = {
-          tipo: "entrata", data: dataPag, contoLiquidita: Number(r.conto), contoLiquiditaDest: null,
-          contoPdC: r.contoPdC, categoria: "ISCRIZIONI TDP", bu: "TDP", mese: meseDaData(dataPag),
-          nonMonetario: false, importo,
-          descrizione: (r.tipo === "ass" ? "Assicurazione TdP — " : "Iscrizione TdP — ") + t.nomeSquadra,
-          origineTdP: slug, creatoIl: new Date().toISOString(), modificatoIl: new Date().toISOString(),
-        };
-        const ref = db.ref(`stagioni/${stagione}/movimenti`).push();
-        await ref.set(mov);
-        regUpd[r.tipo] = { posted: true, importo, conto: Number(r.conto), movId: ref.key, registratoIl: mov.creatoIl };
-      }
-      await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${slug}/reg`).set(regUpd);
-      onToast(`Scrittura registrata · ${t.nomeSquadra}`);
-      setRegSlug(null);
-    } catch (e) { alert("Errore: " + e.message); }
-  };
-
-  const annullaRegistrazione = async (t) => {
-    const reg = t.reg || {};
-    const ids = [reg.iscr && reg.iscr.movId, reg.ass && reg.ass.movId].filter(Boolean);
-    const msg = ids.length > 0
-      ? `Annullare la registrazione contabile di "${t.nomeSquadra}"?\nVerranno rimossi ${ids.length} movimento/i dal libro giornale.`
-      : `Annullare la registrazione di "${t.nomeSquadra}"?\n(era segnata come "già registrata", nessun movimento da rimuovere)`;
-    if (!confirm(msg)) return;
-    try {
-      for (const id of ids) await db.ref(`stagioni/${stagione}/movimenti/${id}`).remove();
-      await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${t.slug}/reg`).set(null);
-      onToast("Registrazione annullata");
-    } catch (e) { alert("Errore: " + e.message); }
-  };
-
-  // marca le quote come GIÀ a libro giornale, senza creare movimenti
-  const segnaGiaRegistrata = async (slug, righe) => {
-    const t = (data.squadre || {})[slug]; if (!t || !righe || righe.length === 0) return;
-    const lab = righe.map(r => r.label).join(" + ");
-    if (!confirm(`Segnare ${lab} di "${t.nomeSquadra}" come GIÀ registrata in contabilità?\nNon verrà creato nessun movimento (utile se l'avevi già messa a libro giornale).`)) return;
-    try {
-      const regUpd = { ...(t.reg || {}) };
-      righe.forEach(r => {
-        regUpd[r.tipo] = { posted: true, manuale: true, importo: Math.round((Number(r.importo) || 0) * 100) / 100, conto: null, movId: null, registratoIl: new Date().toISOString() };
-      });
-      await db.ref(`stagioni/${stagione}/iscrizioniTdP/squadre/${slug}/reg`).set(regUpd);
-      onToast(`Segnata come già registrata · ${t.nomeSquadra}`);
-      setRegSlug(null);
-    } catch (e) { alert("Errore: " + e.message); }
-  };
-
-  const kpi = useMemo(() => {
-    let dovuto = 0, riscosso = 0, registrato = 0;
-    squadre.forEach(t => {
-      dovuto += Number(t.totaleDovuto) || 0;
-      if (t.iscrRiscossa) riscosso += Number(t.quotaIscrizione) || 0;
-      if (t.assRiscossa) riscosso += Number(t.quotaAssicurazione) || 0;
-      const reg = t.reg || {};
-      if (reg.iscr && reg.iscr.posted) registrato += Number(reg.iscr.importo) || 0;
-      if (reg.ass && reg.ass.posted) registrato += Number(reg.ass.importo) || 0;
-    });
-    return { dovuto, riscosso, daRiscuotere: dovuto - riscosso, registrato, nSquadre: squadre.length };
-  }, [squadre]);
-
-  const badge = (t) => {
-    const reg = t.reg || {};
-    const iscrP = reg.iscr && reg.iscr.posted, assP = reg.ass && reg.ass.posted;
-    if (daStornareDi(t).length > 0) return <span className="pill" style={{ background: "#fff3e0", borderColor: "#f0d6a8", color: "#e65100" }}>da stornare</span>;
-    if (pendentiDi(t).length > 0) return <span className="pill" style={{ background: "var(--danger-soft)", borderColor: "#f1d6d6", color: "var(--danger)" }}>da registrare</span>;
-    if (iscrP || assP) {
-      const man = (iscrP && reg.iscr.manuale) || (assP && reg.ass.manuale);
-      return <span className="pill" style={{ background: "var(--accent-soft)", borderColor: "#c8d8ce", color: "var(--accent-ink)" }} title={man ? "Segnata come già a libro giornale (nessun movimento creato)" : "Movimenti creati a libro giornale"}>{man ? "già registrata" : "registrato"}</span>;
-    }
-    return <span className="pill" style={{ color: "var(--ink-3)" }}>—</span>;
-  };
-
-  const regSquadra = regSlug ? squadre.find(s => s.slug === regSlug) : null;
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h2>Iscrizioni TdP</h2>
-          <div className="sub">Copia locale dal foglio <span className="mono">STATO SQUADRE</span> · {kpi.nSquadre} squadre · le scritture si registrano a mano</div>
-        </div>
-      </div>
-
-      <div className="card" style={{ maxWidth: 820 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-          <div>
-            <h3 className="card-title" style={{ margin: "0 0 4px" }}>Importa STATO SQUADRE</h3>
-            <div style={{ fontSize: 12.5, color: "var(--ink-2)", maxWidth: 520 }}>
-              Carica il file Excel del campo: leggo il foglio <span className="mono">STATO SQUADRE</span> e ne tengo una copia locale stabile.
-              Re-importando aggiorno numeri e stato, ma le registrazioni contabili già fatte vengono <strong>sempre preservate</strong> (nessun duplicato).
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={onFile} style={{ display: "none" }} />
-            <button className="btn accent" disabled={parsing} onClick={() => fileRef.current && fileRef.current.click()}>
-              {parsing ? "Lettura…" : (data ? "Reimporta" : "Importa Excel")}
-            </button>
-            {data && <button className="btn ghost" onClick={svuota}>Svuota</button>}
-          </div>
-        </div>
-        {data && (
-          <div style={{ marginTop: 12, fontSize: 12, color: "var(--ink-3)" }}>
-            <span className="mono">{data.filename}</span> · importato il {fmtDate(data.importedAt)}
-          </div>
-        )}
-      </div>
-
-      {kpi.nSquadre > 0 && (
-        <div className="kpi-grid" style={{ marginTop: 20 }}>
-          <div className="kpi">
-            <div className="label">Totale dovuto</div>
-            <div className="value">{fmtEuro(kpi.dovuto)}</div>
-            <div className="hint">{kpi.nSquadre} squadre</div>
-          </div>
-          <div className="kpi accent">
-            <div className="label">Riscosso (dichiarato)</div>
-            <div className="value">{fmtEuro(kpi.riscosso)}</div>
-            <div className="hint">stato dal foglio / app</div>
-          </div>
-          <div className="kpi">
-            <div className="label">Da riscuotere</div>
-            <div className="value" style={{ color: kpi.daRiscuotere > 0.01 ? "var(--danger)" : "var(--accent-ink)" }}>{fmtEuro(kpi.daRiscuotere)}</div>
-          </div>
-          <div className="kpi">
-            <div className="label">Registrato in contabilità</div>
-            <div className="value" style={{ color: "var(--accent)" }}>{fmtEuro(kpi.registrato)}</div>
-            <div className="hint">{nPendenti > 0 ? `${nPendenti} scritture da registrare` : "tutto allineato"}</div>
-          </div>
-        </div>
-      )}
-
-      {nPendenti > 0 && (
-        <div style={{ marginTop: 16, padding: "10px 14px", background: "var(--danger-soft)", border: "1px solid #f1d6d6", borderRadius: 8, fontSize: 13, color: "var(--danger)" }}>
-          <strong>{nPendenti} scrittur{nPendenti === 1 ? "a" : "e"} da registrare.</strong> Apri "Registra" sulla squadra per rivedere conto e importo prima di scrivere a libro giornale.
-        </div>
-      )}
-
-      {loading ? (
-        <div className="empty-state" style={{ marginTop: 24 }}>Caricamento…</div>
-      ) : kpi.nSquadre === 0 ? (
-        <div className="card" style={{ marginTop: 20, textAlign: "center" }}>
-          <h3 className="card-title">Nessuna squadra</h3>
-          <p style={{ fontSize: 13, color: "var(--ink-2)" }}>Usa <strong>Importa Excel</strong> e seleziona il file con il foglio <span className="mono">STATO SQUADRE</span>.</p>
-        </div>
-      ) : (
-        <div className="tbl-wrap" style={{ marginTop: 18 }}>
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Squadra</th>
-                <th>Resp.</th>
-                <th className="num" style={{ width: 50 }}>Comp.</th>
-                <th style={{ width: 150 }}>Iscrizione</th>
-                <th style={{ width: 150 }}>Assicuraz.</th>
-                <th className="num" style={{ width: 80 }}>Dovuto</th>
-                <th style={{ width: 150 }}>Metodo</th>
-                <th style={{ width: 110 }}>Contabilità</th>
-                <th style={{ width: 170 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {squadre.map(t => {
-                const pend = pendentiDi(t);
-                const storno = daStornareDi(t);
-                const reg = t.reg || {};
-                const anyPosted = (reg.iscr && reg.iscr.posted) || (reg.ass && reg.ass.posted);
-                return (
-                  <tr key={t.slug}>
-                    <td style={{ fontWeight: 600 }}>
-                      {t.nomeSquadra}
-                      {t.assenteNelFoglio && <span title="Non più nel foglio importato" style={{ color: "var(--warn)", marginLeft: 4 }}>⚠</span>}
-                    </td>
-                    <td style={{ fontSize: 12, color: "var(--ink-2)" }}>{t.responsabile || "—"}</td>
-                    <td className="num">{t.numeroComponenti || "—"}</td>
-                    <td>
-                      <button className={"btn sm " + (t.iscrRiscossa ? "accent" : "ghost")} onClick={() => patchSquadra(t.slug, { iscrRiscossa: !t.iscrRiscossa })}>
-                        {t.iscrRiscossa ? "✓" : "○"} {fmt(t.quotaIscrizione || 0)}
-                      </button>
-                    </td>
-                    <td>
-                      <button className={"btn sm " + (t.assRiscossa ? "accent" : "ghost")} onClick={() => patchSquadra(t.slug, { assRiscossa: !t.assRiscossa })}>
-                        {t.assRiscossa ? "✓" : "○"} {fmt(t.quotaAssicurazione || 0)}
-                      </button>
-                    </td>
-                    <td className="num" style={{ fontWeight: 600 }}>{fmt(t.totaleDovuto || 0)}</td>
-                    <td style={{ fontSize: 11.5, color: "var(--ink-2)" }}>
-                      {t.metodo || "—"}
-                      {t.deltaCassa && <span className="pill" style={{ marginLeft: 4, fontSize: 9.5 }}>Δcassa</span>}
-                    </td>
-                    <td>{badge(t)}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                        {pend.length > 0 && <button className="btn accent sm" onClick={() => setRegSlug(t.slug)}>Registra ({pend.length})</button>}
-                        {pend.length > 0 && <button className="btn ghost sm" title="Segna come già a libro giornale, senza creare movimenti" onClick={() => segnaGiaRegistrata(t.slug, pend)}>Già reg.</button>}
-                        {(storno.length > 0 || anyPosted) && <button className="btn danger sm" onClick={() => annullaRegistrazione(t)}>Annulla reg.</button>}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <div style={{ marginTop: 18, padding: "12px 16px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 8, fontSize: 12, color: "var(--ink-2)" }}>
-        <strong>💡 Come funziona.</strong> I dati sono una copia locale del foglio <span className="mono">STATO SQUADRE</span> (chiave = nome squadra), quindi non spariscono quando aggiorni il master.
-        Marchi iscrizione/assicurazione come riscosse coi pulsanti; ogni quota riscossa ma non ancora contabilizzata diventa una <strong>scrittura suggerita</strong> (conti {CONTO_ISCRIZIONE} e {CONTO_ASSICURAZIONE}, BU TDP) che registri o ignori. Se una quota era già a libro giornale, usa <strong>"Già reg."</strong> per segnarla senza creare movimenti. Nulla è automatico e non ci sono duplicati: ogni quota può essere registrata una sola volta.
-      </div>
-
-      {regSquadra && (
-        <RegistrazioneTdPModal
-          squadra={regSquadra}
-          pendenti={pendentiDi(regSquadra)}
-          onConfirm={registra}
-          onGiaRegistrata={segnaGiaRegistrata}
-          onClose={() => setRegSlug(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-function RegistrazioneTdPModal({ squadra, pendenti, onConfirm, onGiaRegistrata, onClose }) {
-  const contoGuess = contoLiquiditaDaMetodo(squadra.metodo);
-  const [righe, setRighe] = useState(pendenti.map(p => ({ ...p, conto: contoGuess, importo: String(p.importo) })));
-  const [dataPag, setDataPag] = useState(todayISO());
-  const setRiga = (i, patch) => setRighe(rs => rs.map((r, idx) => idx === i ? { ...r, ...patch } : r));
-  const totale = righe.reduce((s, r) => s + (Number(r.importo) || 0), 0);
-
-  const submit = (e) => {
-    e.preventDefault();
-    const valide = righe
-      .map(r => ({ ...r, importo: Number(r.importo) || 0, conto: Number(r.conto) }))
-      .filter(r => r.importo > 0 && r.conto);
-    if (valide.length === 0) return alert("Nessuna riga valida da registrare.");
-    onConfirm(squadra.slug, valide, dataPag);
-  };
-
-  const giaRegistrata = () => {
-    const valide = righe.map(r => ({ ...r, importo: Number(r.importo) || 0 })).filter(r => r.importo > 0);
-    if (valide.length === 0) return alert("Nessuna riga valida.");
-    onGiaRegistrata(squadra.slug, valide);
-  };
-
-  return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>Scrittura suggerita — {squadra.nomeSquadra}</h3>
-          <button className="btn ghost sm" onClick={onClose}>✕</button>
-        </div>
-        <div className="modal-body">
-          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12 }}>
-            Metodo dichiarato: <strong>{squadra.metodo || "—"}</strong>{squadra.deltaCassa ? " · Delta cassa" : ""}.
-            Controlla conto di liquidità e importo, poi conferma. <strong>Niente viene scritto finché non premi Registra.</strong>
-          </div>
-          <form className="form-grid" onSubmit={submit}>
-            {righe.map((r, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span className="pill" style={{ flex: "0 0 96px" }}>{r.label}</span>
-                <span style={{ flex: "0 0 60px", fontSize: 11.5, color: "var(--ink-3)" }}>→ conto {r.contoPdC}</span>
-                <input type="number" inputMode="decimal" step="0.01" value={r.importo}
-                       onChange={e => setRiga(i, { importo: e.target.value })} style={{ flex: "0 0 110px" }} />
-                <select value={r.conto} onChange={e => setRiga(i, { conto: Number(e.target.value) })} style={{ flex: 1 }}>
-                  {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {c.nome.trim()}</option>)}
-                </select>
-              </div>
-            ))}
-            <div className="form-row">
-              <label>Data registrazione</label>
-              <input type="date" value={dataPag} onChange={e => setDataPag(e.target.value)} required />
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", background: "var(--panel-2)", border: "1px solid var(--rule)", borderRadius: 6, fontSize: 13 }}>
-              <span>Totale da registrare:</span><strong className="mono">{fmtEuro(totale)}</strong>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12, paddingTop: 14, borderTop: "1px solid var(--rule)", flexWrap: "wrap" }}>
-              <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
-              <button type="button" className="btn ghost" title="Marca come già a libro giornale, senza creare movimenti" onClick={giaRegistrata}>Già registrata</button>
-              <button type="submit" className="btn accent">Registra in contabilità</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ============================================================
 // PAGINA: TORNEO
@@ -10077,7 +10046,6 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   const [filtroConti, setFiltroConti] = useState("movimentati"); // movimentati | ce | sp | tutti
   const [ipotesi, setIpotesi] = useState({});       // { codice: valore } valori a mano nel pannello
   const [selConti, setSelConti] = useState([]);     // conti spuntati nel pannello Stato conti
-  const [vistaBudget, setVistaBudget] = useState("dettaglio"); // dettaglio | nuove | macro
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -11094,22 +11062,13 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           )}
 
           {/* Tabella voci */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "8px 0 10px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0 10px" }}>
             <h3 className="serif" style={{ fontWeight: 500, fontSize: 18, margin: 0 }}>Voci di budget</h3>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)" }}>Vista</span>
-              {[["dettaglio", "Dettaglio"], ["nuove", "Solo nuove"], ["macro", "Macroaree"]].map(([k, lbl]) => (
-                <button key={k} type="button" className={"btn sm " + (vistaBudget === k ? "accent" : "ghost")} onClick={() => setVistaBudget(k)}>{lbl}</button>
-              ))}
+            <div style={{ display: "flex", gap: 8 }}>
               {addAct && <button className="btn ghost sm" title="Azzera gli importi che coincidono col consuntivo (venivano contati due volte). Le voci con un extra reale restano invariate." onClick={scorporaConsuntivoDaImporti}>⇊ scorpora consuntivo</button>}
               <button className="btn accent sm" onClick={addVoce}>+ Aggiungi voce</button>
             </div>
           </div>
-          {vistaBudget === "nuove" && (
-            <div style={{ fontSize: 12.5, color: "#7a5a1d", background: "#f4efe6", border: "1px dashed #d8c9a8", borderRadius: 6, padding: "6px 10px", marginBottom: 8 }}>
-              Stai vedendo <b>solo le voci nuove</b> inserite a mano (fuori consuntivo). Torna a “Dettaglio” per vedere tutte le voci.
-            </div>
-          )}
 
           {(attivo.voci || []).length === 0 ? (
             <div className="empty-state">Nessuna voce. Aggiungine una: scrivi la descrizione, scegli la natura e aggancia uno o più conti.</div>
@@ -11255,55 +11214,6 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                       </tr>
                       );
                     };
-                    // Riga di sintesi macroarea (usata nella vista "Macroaree")
-                    const macroRow = (label, cons, fore, nat, strong) => {
-                      const scost = nat === "ricavo" || nat === "ris" ? (cons - fore) : nat === "costo" ? (fore - cons) : 0;
-                      return (
-                        <tr key={"m_" + label} style={{ fontWeight: 700, background: strong ? "var(--ink)" : "var(--panel-2)", color: strong ? "#fff" : undefined }}>
-                          <td colSpan={4} style={{ fontFamily: strong ? "'Fraunces',serif" : undefined, paddingLeft: strong ? 8 : 16 }}>{label}</td>
-                          <td className="num">{fmt(fore)}</td>
-                          {showAct && <td className="num">{fmt(cons)}</td>}
-                          {showAct && <td className="num">{nat === "patrimoniale" ? "—" : fmt(fore - cons)}</td>}
-                          <td></td>
-                        </tr>
-                      );
-                    };
-                    const sumCons = (arr) => arr.reduce((s, v) => s + actualVoce(v), 0);
-                    const sumFore = (arr) => arr.reduce((s, v) => s + (addAct ? (Number(v.importo) || 0) + actualVoce(v) : (Number(v.importo) || 0)), 0);
-
-                    if (vistaBudget === "macro") {
-                      const ricT = [...ricCons, ...ricAgg], cosT = [...cosCons, ...cosAgg];
-                      const segFore = (arr, side) => arr.reduce((s, v) => { const f = (addAct ? (Number(v.importo) || 0) + actualVoce(v) : (Number(v.importo) || 0)); return s + (side === "passivo" ? -f : f); }, 0);
-                      const segCons = (arr, side) => arr.reduce((s, v) => s + (side === "passivo" ? -actualVoce(v) : actualVoce(v)), 0);
-                      return <>
-                        {eco.length > 0 && groupHead("Conto economico")}
-                        {eco.length > 0 && macroRow("Ricavi", sumCons(ricT), sumFore(ricT), "ricavo")}
-                        {eco.length > 0 && macroRow("Costi", sumCons(cosT), sumFore(cosT), "costo")}
-                        {eco.length > 0 && macroRow("RISULTATO (ricavi − costi)", sumCons(ricT) - sumCons(cosT), sumFore(ricT) - sumFore(cosT), "ris", true)}
-                        {pat.length > 0 && groupHead("Stato patrimoniale")}
-                        {attSP.length > 0 && macroRow("Attività", segCons(attSP, "attivo"), segFore(attSP, "attivo"), "patrimoniale")}
-                        {pasSP.length > 0 && macroRow("Passività", segCons(pasSP, "passivo"), segFore(pasSP, "passivo"), "patrimoniale")}
-                        {pat.length > 0 && macroRow("Patrimoniale netto", segCons(attSP, "attivo") - segCons(pasSP, "passivo"), segFore(attSP, "attivo") - segFore(pasSP, "passivo"), "patrimoniale", true)}
-                      </>;
-                    }
-                    if (vistaBudget === "nuove") {
-                      const nEco = ricAgg.length + cosAgg.length, nPat = patAgg.length;
-                      return <>
-                        {nEco > 0 && groupHead("Conto economico — voci nuove")}
-                        {ricAgg.length > 0 && subHead("Ricavi")}
-                        {ricAgg.map(v => renderVoce(v, true))}
-                        {cosAgg.length > 0 && subHead("Costi")}
-                        {cosAgg.map(v => renderVoce(v, true))}
-                        {nPat > 0 && groupHead("Stato patrimoniale — voci nuove")}
-                        {patAgg.map(v => renderVoce(v, true))}
-                        {(nEco + nPat) === 0 && <tr><td colSpan={nCols} style={{ padding: 14, color: "var(--ink-3)", textAlign: "center" }}>Nessuna voce nuova: usa i pulsanti qui sotto o “+ Aggiungi voce”.</td></tr>}
-                        <tr><td colSpan={nCols} style={{ padding: "5px 8px 5px 16px" }}>
-                          <button className="btn ghost sm" onClick={() => addVoceTipo("ricavo")}>+ ricavo</button>{" "}
-                          <button className="btn ghost sm" onClick={() => addVoceTipo("costo")}>+ costo</button>{" "}
-                          <button className="btn ghost sm" onClick={() => addVoceTipo("patrimoniale")}>+ patrimoniale</button>
-                        </td></tr>
-                      </>;
-                    }
                     return <>
                       {eco.length > 0 && groupHead("Conto economico")}
                       {eco.length > 0 && subHead("Ricavi")}
@@ -11322,7 +11232,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                       {patAgg.map(v => renderVoce(v, true))}
                     </>;
                   })()}
-                  {totali && vistaBudget !== "macro" && (
+                  {totali && (
                     <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
                       <td colSpan={4} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
                       <td className="num">{fmt(addAct ? totali.effRis : totali.budRis)}</td>
@@ -11792,7 +11702,6 @@ function App() {
           <button className={"navlink " + (page==="crediti"?"active":"")} onClick={() => setPage("crediti")}><span className="ico">🧾</span> Crediti</button>
           <button className={"navlink " + (page==="ammortamenti"?"active":"")} onClick={() => setPage("ammortamenti")}><span className="ico">⊟</span> Ammortamenti</button>
           <button className={"navlink " + (page==="cassa"?"active":"")} onClick={() => setPage("cassa")}><span className="ico">💵</span> Composizione Cassa</button>
-          <button className={"navlink " + (page==="iscrizioni"?"active":"")} onClick={() => setPage("iscrizioni")}><span className="ico">🧾</span> Iscrizioni TdP</button>
           <button className={"navlink " + (page==="torneo"?"active":"")} onClick={() => setPage("torneo")}><span className="ico">★</span> Torneo</button>
         </nav>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}></div>}
@@ -11819,9 +11728,8 @@ function App() {
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
-              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} stagione={stagione} onToast={showToast} />}
+              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiIniziali} onToast={showToast} />}
-              {page === "iscrizioni" && <PageIscrizioniTdP stagione={stagione} conti={conti} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
             </>
           )}
