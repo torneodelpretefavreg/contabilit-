@@ -860,8 +860,8 @@ function casseVoce(v) {
 }
 // Ripartizione dell'importo della voce sui conti: quote indicate a mano, il resto in parti uguali
 // sui conti lasciati vuoti ("a saldo"). Ritorna le parti per conto e quanto è stato assegnato.
-function ripartizioneCasse(v) {
-  const tot = Number(v.importo) || 0;
+function ripartizioneCasse(v, totOverride) {
+  const tot = (totOverride === undefined || totOverride === null) ? (Number(v.importo) || 0) : Number(totOverride);
   const list = casseVoce(v);
   if (!list.length) return { parti: [], assegnato: 0 };
   const isNum = (x) => x !== null && x !== undefined && x !== "" && !isNaN(Number(x));
@@ -6304,6 +6304,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
   };
 
   const [modaleScritture, setModaleScritture] = useState(false);
+  const [modaleConti, setModaleConti] = useState(false);
 
   // Righe proponibili: quota > 0, non già registrate in questo esercizio
   const proposte = useMemo(() => piano.map(c => {
@@ -6330,6 +6331,8 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
 
   const daRegistrare = proposte.filter(r => !r.giaRegistrato && r.importo > 0.005);
   const registrate = proposte.filter(r => r.giaRegistrato);
+  const senzaConti = proposte.filter(r => !r.contoAmm || !r.contoFondo);
+  const prossimoCodice = useMemo(() => (conti || []).reduce((mx, c) => Math.max(mx, Number(c.codice) || 0), 0) + 1, [conti]);
   // Registra le scritture selezionate: DARE conto ammortamento / AVERE fondo
   const registraScritture = async (righe, dataScrittura) => {
     if (!firebaseReady) return alert("Firebase non disponibile");
@@ -6392,6 +6395,46 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
       });
       onToast("Ammortamento stornato");
     } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  // Creazione in blocco dei conti dei cespiti, con dicitura definita da un modello
+  // (es. "FONDO AMMORTAMENTO {cespite}"). Se un conto con lo stesso nome esiste già
+  // non lo duplico: aggancio quello.
+  const creaContiCespiti = async (righe) => {
+    if (!firebaseReady) { alert("Firebase non disponibile"); return false; }
+    const norm = (s) => String(s || "").toUpperCase().replace(/\s+/g, " ").trim();
+    const perNome = {};
+    (conti || []).forEach(c => { perNome[norm(c.nome)] = Number(c.codice); });
+    try {
+      let next = (conti || []).reduce((mx, c) => Math.max(mx, Number(c.codice) || 0), 0);
+      const updates = {};
+      const patchCespiti = [];
+      let creati = 0, agganciati = 0;
+      righe.forEach(r => {
+        const patch = {};
+        const aggiungi = (nome, campo, tipo) => {
+          const chiave = norm(nome);
+          if (!chiave) return;
+          if (perNome[chiave] !== undefined) { patch[campo] = perNome[chiave]; agganciati++; return; }
+          next++;
+          updates[`c${next}`] = tipo === "amm"
+            ? { codice: next, nome: chiave, eccedenza: "DARE", prospetto: "CE", categoria: "COSTI" }
+            : { codice: next, nome: chiave, eccedenza: "AVERE", prospetto: "SP", categoria: "RETTIFICA ATTIVO" };
+          perNome[chiave] = next;
+          patch[campo] = next;
+          creati++;
+        };
+        if (r.creaAmm) aggiungi(r.nomeAmm, "conto_amm", "amm");
+        if (r.creaFondo) aggiungi(r.nomeFondo, "conto_fondo", "fondo");
+        if (Object.keys(patch).length && !String(r.key).startsWith("idx_")) patchCespiti.push({ key: r.key, patch });
+      });
+      if (!creati && !agganciati) { alert("Niente da creare."); return false; }
+      if (Object.keys(updates).length) await db.ref(`stagioni/${stagione}/conti`).update(updates);
+      for (const u of patchCespiti) await db.ref(`stagioni/${stagione}/cespiti/${u.key}`).update(u.patch);
+      setModaleConti(false);
+      onToast(`${creati} conti creati${agganciati ? `, ${agganciati} agganciati a conti esistenti` : ""}`);
+      return true;
+    } catch (e) { alert("Errore: " + e.message); return false; }
   };
 
   // Crea al volo i conti mancanti (costo + fondo) per i cespiti non abbinati
@@ -6480,6 +6523,10 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
           <span className="label">Anno riferimento:</span>
           <input type="number" value={annoRiferimento} onChange={e => setAnnoRiferimento(Number(e.target.value))}
                  style={{maxWidth:100, padding:"6px 10px", border:"1px solid var(--rule)", borderRadius:6}}/>
+          <button className="btn ghost" disabled={senzaConti.length === 0} onClick={() => setModaleConti(true)}
+                  title={senzaConti.length ? "Crea in blocco i conti di ammortamento e i fondi mancanti" : "Tutti i cespiti hanno i conti abbinati"}>
+            🏦 Conti mancanti ({senzaConti.length})
+          </button>
           <button className="btn accent" disabled={daRegistrare.length === 0} onClick={() => setModaleScritture(true)}
                   title={daRegistrare.length ? "Proponi le scritture di ammortamento" : "Nessuna quota da registrare"}>
             📓 Proponi scritture ({daRegistrare.length})
@@ -6681,6 +6728,15 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
         Confronto fra il <strong>fondo ammortamento scritto sulla scheda cespite</strong> e il <strong>saldo del conto fondo in libro giornale</strong> (avere − dare, aperture comprese). Una differenza segnala un ammortamento registrato a mano senza aggiornare la scheda, uno storno parziale o un abbinamento sbagliato.
       </div>
 
+      {modaleConti && (
+        <ContiCespitiModal
+          righe={senzaConti}
+          prossimoCodice={prossimoCodice}
+          onConfirm={creaContiCespiti}
+          onClose={() => setModaleConti(false)}
+        />
+      )}
+
       {modaleScritture && (
         <ScrittureAmmortamentoModal
           righe={daRegistrare}
@@ -6693,6 +6749,128 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
           onClose={() => setModaleScritture(false)}
         />
       )}
+    </div>
+  );
+}
+
+// Modale: creazione in blocco dei conti di ammortamento e dei fondi,
+// con dicitura governata da un modello applicato a tutti i cespiti.
+function ContiCespitiModal({ righe, prossimoCodice, onConfirm, onClose }) {
+  const TPL_AMM = "AMMORTAMENTO {cespite}";
+  const TPL_FONDO = "FONDO AMMORTAMENTO {cespite}";
+  const [tplAmm, setTplAmm] = useState(TPL_AMM);
+  const [tplFondo, setTplFondo] = useState(TPL_FONDO);
+  const [saving, setSaving] = useState(false);
+
+  const componi = (tpl, nome) => String(tpl || "").replace(/\{cespite\}/gi, nome).replace(/\s+/g, " ").trim().toUpperCase();
+
+  const [rows, setRows] = useState(() => righe.map(r => ({
+    key: r.key, nome: r.nome,
+    creaAmm: !r.contoAmm, creaFondo: !r.contoFondo,
+    contoAmm: r.contoAmm, contoFondo: r.contoFondo,
+    nomeAmm: componi(TPL_AMM, r.nome), nomeFondo: componi(TPL_FONDO, r.nome),
+    customAmm: false, customFondo: false,
+    sel: true,
+  })));
+
+  // Cambiando il modello riscrivo tutte le diciture non modificate a mano
+  useEffect(() => {
+    setRows(rs => rs.map(r => r.customAmm ? r : { ...r, nomeAmm: componi(tplAmm, r.nome) }));
+  }, [tplAmm]);
+  useEffect(() => {
+    setRows(rs => rs.map(r => r.customFondo ? r : { ...r, nomeFondo: componi(tplFondo, r.nome) }));
+  }, [tplFondo]);
+
+  const setRow = (i, patch) => setRows(rs => rs.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+  const selezionate = rows.filter(r => r.sel && (r.creaAmm || r.creaFondo));
+  const nNuovi = selezionate.reduce((s, r) => s + (r.creaAmm ? 1 : 0) + (r.creaFondo ? 1 : 0), 0);
+
+  const submit = async () => {
+    if (!selezionate.length) return alert("Nessun cespite selezionato.");
+    const vuoti = selezionate.filter(r => (r.creaAmm && !r.nomeAmm.trim()) || (r.creaFondo && !r.nomeFondo.trim()));
+    if (vuoti.length) return alert("Ci sono diciture vuote.");
+    setSaving(true);
+    await onConfirm(selezionate);
+    setSaving(false);
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" style={{maxWidth:1000}} onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>Crea i conti dei cespiti</h3>
+          <button className="btn ghost sm" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          <div style={{fontSize:12.5, color:"var(--ink-2)", marginBottom:12}}>
+            Imposta la <strong>dicitura per tutti</strong> con i due modelli qui sotto: <code>{"{cespite}"}</code> viene sostituito dal nome del cespite.
+            Puoi comunque correggere la singola riga. Il conto di ammortamento nasce come <strong>costo (CE)</strong>, il fondo come <strong>rettifica attivo (SP)</strong>;
+            i codici partono da <strong>{prossimoCodice}</strong>. Se esiste già un conto con lo stesso nome, non viene duplicato ma agganciato.
+          </div>
+
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+            <div className="form-row">
+              <label>Modello conto ammortamento</label>
+              <input type="text" value={tplAmm} onChange={e => setTplAmm(e.target.value)} placeholder="AMMORTAMENTO {cespite}" />
+            </div>
+            <div className="form-row">
+              <label>Modello conto fondo</label>
+              <input type="text" value={tplFondo} onChange={e => setTplFondo(e.target.value)} placeholder="FONDO AMMORTAMENTO {cespite}" />
+            </div>
+          </div>
+
+          <div className="tbl-wrap" style={{marginTop:12, maxHeight:360, overflowY:"auto"}}>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th style={{width:34}}></th>
+                  <th style={{width:200}}>Cespite</th>
+                  <th>Conto ammortamento</th>
+                  <th>Conto fondo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.key}>
+                    <td><input type="checkbox" checked={r.sel} onChange={e => setRow(i, { sel: e.target.checked })} /></td>
+                    <td style={{fontWeight:500}}>{r.nome}</td>
+                    <td>
+                      {r.creaAmm ? (
+                        <input type="text" value={r.nomeAmm}
+                               onChange={e => setRow(i, { nomeAmm: e.target.value.toUpperCase(), customAmm: true })}
+                               style={{width:"100%", padding:"3px 6px", border:"1px solid var(--rule)", borderRadius:4, fontSize:12}} />
+                      ) : (
+                        <span style={{fontSize:12, color:"var(--ok)"}}>✓ già abbinato (conto {String(r.contoAmm).padStart(2,"0")})</span>
+                      )}
+                    </td>
+                    <td>
+                      {r.creaFondo ? (
+                        <input type="text" value={r.nomeFondo}
+                               onChange={e => setRow(i, { nomeFondo: e.target.value.toUpperCase(), customFondo: true })}
+                               style={{width:"100%", padding:"3px 6px", border:"1px solid var(--rule)", borderRadius:4, fontSize:12}} />
+                      ) : (
+                        <span style={{fontSize:12, color:"var(--ok)"}}>✓ già abbinato (conto {String(r.contoFondo).padStart(2,"0")})</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 12px", marginTop:12, background:"var(--panel-2)", border:"1px solid var(--rule)", borderRadius:6, fontSize:13}}>
+            <span>{selezionate.length} cespiti selezionati</span>
+            <strong>{nNuovi} conti da creare</strong>
+          </div>
+
+          <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+            <button type="button" className="btn ghost" onClick={onClose}>Annulla</button>
+            <button type="button" className="btn accent" disabled={saving || !nNuovi} onClick={submit}>
+              {saving ? "Creo…" : `Crea ${nNuovi} conti`}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -10577,6 +10755,18 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     onToast(`${daAzzerare.size} importi azzerati: ora contano consuntivo + eventuale extra`);
   };
 
+  // ---- Voci "spuntate": il costo/ricavo si è verificato davvero ----
+  // v.realizzato = true e v.importoEffettivo = importo confermato (o corretto).
+  // Una voce spuntata non è più una previsione: il forecast usa l'importo effettivo
+  // e non ci si somma sopra il consuntivo nemmeno in modalità "somma consuntivo".
+  const isReal = (v) => v.realizzato === true;
+  const valEff = (v) => {
+    const e = v.importoEffettivo;
+    return (e === null || e === undefined || e === "" || isNaN(Number(e))) ? (Number(v.importo) || 0) : Number(e);
+  };
+  const budVoce = (v) => isReal(v) ? valEff(v) : (Number(v.importo) || 0);
+  const foreVoce = (v, addA, cons) => isReal(v) ? valEff(v) : (addA ? (Number(v.importo) || 0) + cons : (Number(v.importo) || 0));
+
   // Piano di cassa (cash flow plan): parte dal SALDO REALE attuale di ogni conto liquidità
   // (che già contiene tutti i movimenti passati) e proietta in avanti solo i flussi PREVISTI
   // (budget) associati a quel conto. Così i pagamenti già usciti non vengono contati due volte.
@@ -10599,8 +10789,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     let senzaCassa = 0;
     (attivo.voci || []).forEach(v => {
       if (v.natura === "patrimoniale") return;
-      const tot = Number(v.importo) || 0;
-      const { parti, assegnato } = ripartizioneCasse(v);
+      // Voce spuntata: in cassa resta da muovere solo la differenza non ancora contabilizzata
+      const tot = isReal(v) ? (valEff(v) - actualVoce(v, attivo.bu || "ALL")) : (Number(v.importo) || 0);
+      const { parti, assegnato } = ripartizioneCasse(v, tot);
       parti.forEach(({ conto, amount }) => {
         if (!perLiq[conto]) return;
         if (v.natura === "ricavo") perLiq[conto].inBud += amount; else perLiq[conto].outBud += amount;
@@ -10622,18 +10813,25 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     if (!attivo) return null;
     const bBU = attivo.bu || "ALL";
     let budRic = 0, budCos = 0, actRic = 0, actCos = 0, budFin = 0, actFin = 0;
+    // quota di consuntivo che si somma al budget in modalità "somma consuntivo":
+    // le voci spuntate ne restano fuori, altrimenti conterebbero due volte
+    let sumRic = 0, sumCos = 0, sumFin = 0;
+    let realRic = 0, realCos = 0, nReal = 0;
     (attivo.voci || []).forEach(v => {
       const act = actualVoce(v, bBU);
-      const bud = Number(v.importo) || 0;
-      if (v.natura === "ricavo") { budRic += bud; actRic += act; }
-      else if (v.natura === "costo") { budCos += bud; actCos += act; }
-      else { budFin += bud; actFin += act; } // patrimoniale/finanziario
+      const bud = budVoce(v);
+      const somma = isReal(v) ? 0 : act;
+      if (isReal(v)) nReal++;
+      if (v.natura === "ricavo") { budRic += bud; actRic += act; sumRic += somma; if (isReal(v)) realRic += bud; }
+      else if (v.natura === "costo") { budCos += bud; actCos += act; sumCos += somma; if (isReal(v)) realCos += bud; }
+      else { budFin += bud; actFin += act; sumFin += somma; } // patrimoniale/finanziario
     });
     return {
       budRic, budCos, budRis: budRic - budCos, budFin,
       actRic, actCos, actRis: actRic - actCos, actFin,
       // "budget effettivo" = importo inserito a mano + saldo già in contabilità (modalità senza confronto)
-      effRic: budRic + actRic, effCos: budCos + actCos, effRis: (budRic + actRic) - (budCos + actCos), effFin: budFin + actFin,
+      effRic: budRic + sumRic, effCos: budCos + sumCos, effRis: (budRic + sumRic) - (budCos + sumCos), effFin: budFin + sumFin,
+      realRic, realCos, realRis: realRic - realCos, nReal,
     };
   }, [attivo, consuntivo]);
 
@@ -10675,6 +10873,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         voci: (draft.voci || []).map(v => ({
           id: v.id, descrizione: v.descrizione || "", natura: v.natura || "costo",
           conti: (v.conti || []).map(Number), importo: Number(v.importo) || 0, note: v.note || "",
+          realizzato: v.realizzato === true,
+          importoEffettivo: v.realizzato === true ? (Number(v.importoEffettivo ?? v.importo) || 0) : null,
+          dataRealizzo: v.realizzato === true ? (v.dataRealizzo || new Date().toISOString().slice(0, 10)) : null,
           contoLiquidita: v.contoLiquidita ? Number(v.contoLiquidita) : null,
           casse: Array.isArray(v.casse) ? v.casse.filter(e => e && e.conto != null && e.conto !== "").map(e => ({ conto: Number(e.conto), importo: (e.importo === null || e.importo === "" || isNaN(Number(e.importo))) ? null : Number(e.importo) })) : [],
           contropartitaSP: v.contropartitaSP || null,
@@ -10704,6 +10905,23 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
   const addVoceTipo = (natura) => patch(d => { d.voci = d.voci || []; d.voci.push({ id: "v_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), descrizione: "", natura, conti: [], importo: 0, note: "" }); });
   const setVoce = (id, k, val) => patch(d => { const v = (d.voci || []).find(x => x.id === id); if (v) v[k] = val; });
   const delVoce = (id) => patch(d => { d.voci = (d.voci || []).filter(x => x.id !== id); });
+  // Spunta "si è verificato davvero": alla prima spunta l'importo effettivo parte
+  // da quello previsto (conferma), poi lo si può correggere.
+  const toggleRealizzato = (v, on) => patch(d => {
+    const x = (d.voci || []).find(z => z.id === v.id);
+    if (!x) return;
+    if (on) {
+      x.realizzato = true;
+      if (x.importoEffettivo === undefined || x.importoEffettivo === null || x.importoEffettivo === "") {
+        x.importoEffettivo = Number(x.importo) || 0;
+      }
+      x.dataRealizzo = new Date().toISOString().slice(0, 10);
+    } else {
+      x.realizzato = false;
+      x.importoEffettivo = null;
+      x.dataRealizzo = null;
+    }
+  });
   // Gestione multi-conto di liquidità con split
   const setCasseVoce = (id, arr) => patch(d => { const x = (d.voci || []).find(z => z.id === id); if (x) { x.casse = arr; x.contoLiquidita = ""; x.contropartitaSP = ""; } });
   const updCassa = (v, i, k, val) => { const arr = casseVoce(v).map(e => ({ ...e })); if (!arr[i]) return; arr[i][k] = k === "importo" ? (val === "" ? null : Number(val)) : Number(val); setCasseVoce(v.id, arr); };
@@ -10725,29 +10943,39 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const pctFrac = (dAbs, cons) => Math.abs(cons) > 0.005 ? dAbs / Math.abs(cons) : null;
     const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
 
-    const headers = ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Consuntivo", "Forecast", "Δ (forecast − cons.)", "Δ %"];
+    // Senza confronto col consuntivo l'export mostra solo il forecast
+    const withAct = attivo.confrontaConsuntivo !== false;
+    const headers = withAct
+      ? ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Consuntivo", "Forecast", "Δ (forecast − cons.)", "Δ %"]
+      : ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Forecast"];
+    const C_STATO = 5, C_CONS = withAct ? 6 : -1, C_FORE = withAct ? 7 : 6, C_D = withAct ? 8 : -1, C_DP = withAct ? 9 : -1;
+    const numCols = withAct ? [C_CONS, C_FORE, C_D, C_DP] : [C_FORE];
     const aoa = [
       [`Budget: ${attivo.nome}`],
-      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${addA ? " · Forecast = consuntivo + extra a mano" : " · Forecast = budget inserito"}`],
+      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${addA ? " · Forecast = consuntivo + extra a mano" : " · Forecast = budget inserito"}${withAct ? "" : " · solo forecast, senza confronto col consuntivo"}`],
       [],
       headers,
     ];
     const meta = [{}, {}, {}, { kind: "head" }]; // meta parallelo alle righe di aoa
 
     const voci = attivo.voci || [];
+    const statoLbl = (v) => isReal(v)
+      ? (Math.abs(valEff(v) - (Number(v.importo) || 0)) > 0.005 ? `effettivo (previsto ${fmt(Number(v.importo) || 0)})` : "effettivo")
+      : "previsto";
     const rigaVoce = (v) => {
       const cons = actualVoce(v);
-      const bud = Number(v.importo) || 0;
-      const forecast = addA ? (bud + cons) : bud;
+      const forecast = foreVoce(v, addA, cons);
       const dAbs = forecast - cons;
       const pf = pctFrac(dAbs, cons);
       const conti = (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", ");
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "";
-      return [v.descrizione || "", naturaLbl[v.natura] || v.natura, conti, cassa, v.note || "", cons, forecast, dAbs, pf === null ? "n/d" : pf];
+      const base = [v.descrizione || "", naturaLbl[v.natura] || v.natura, conti, cassa, v.note || "", statoLbl(v)];
+      return withAct ? [...base, cons, forecast, dAbs, pf === null ? "n/d" : pf] : [...base, forecast];
     };
     const mkTot = (label, cons, forecast) => {
       const dAbs = forecast - cons, pf = pctFrac(dAbs, cons);
-      return [label, "", "", "", "", cons, forecast, dAbs, pf === null ? "n/d" : pf];
+      const base = [label, "", "", "", "", ""];
+      return withAct ? [...base, cons, forecast, dAbs, pf === null ? "n/d" : pf] : [...base, forecast];
     };
     const push = (row, m) => { aoa.push(row); meta.push(m); };
 
@@ -10777,10 +11005,14 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       push(mkTot("TOTALE PATRIMONIALE", totali.actFin, addA ? totali.effFin : totali.budFin), { kind: "subtot", nat: "patrimoniale" });
     }
     push([], {});
-    push(["Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Le voci patrimoniali sono neutre (saldi, non flussi di risultato)."], { kind: "legend" });
+    push([withAct
+      ? "Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Le voci patrimoniali sono neutre (saldi, non flussi di risultato). Stato: 'effettivo' = voce spuntata, importo confermato."
+      : "Legenda: forecast senza confronto col consuntivo. Stato: 'effettivo' = voce spuntata, importo confermato; 'previsto' = ancora stimato."], { kind: "legend" });
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }];
+    ws["!cols"] = withAct
+      ? [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 20 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }]
+      : [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 20 }, { wch: 14 }];
     const money = "#,##0.00", pct = "+0.0%;-0.0%;0.0%";
     const border = { style: "thin", color: { rgb: "D9D6CE" } };
     const cell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: "s", v: "" }; return ws[ref]; };
@@ -10795,8 +11027,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     Object.assign(cell(0, 0), { s: { font: { bold: true, sz: 14 } } });
     Object.assign(cell(1, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
     for (let c = 0; c < headers.length; c++) {
-      const fill = c === 5 ? "6B6B6B" : c === 6 ? "3B4A5A" : "1A1A1A";
-      Object.assign(cell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 10 }, fill: { fgColor: { rgb: fill } }, alignment: { horizontal: c >= 5 ? "right" : "left", vertical: "center", wrapText: true } } });
+      const fill = c === C_CONS ? "6B6B6B" : c === C_FORE ? "3B4A5A" : "1A1A1A";
+      Object.assign(cell(3, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 10 }, fill: { fgColor: { rgb: fill } }, alignment: { horizontal: numCols.includes(c) ? "right" : "left", vertical: "center", wrapText: true } } });
     }
     meta.forEach((m, r) => {
       if (!m.kind || m.kind === "head") return;
@@ -10809,25 +11041,29 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         return;
       }
       if (m.kind === "legend") { cell(r, 0).s = { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } }; return; }
-      const dv = cell(r, 7).v;
+      const dv = C_D >= 0 ? cell(r, C_D).v : null;
       if (m.kind === "data") {
-        for (let c = 5; c <= 8; c++) cell(r, c).z = c === 8 ? pct : money;
+        numCols.forEach(c => { cell(r, c).z = c === C_DP ? pct : money; });
         cell(r, 1).s = { font: { bold: true, color: { rgb: natRgb(m.nat) } } };
         cell(r, 4).s = { alignment: { horizontal: "left", wrapText: true }, font: { italic: true, color: { rgb: "6B6B6B" } } };
-        cell(r, 5).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "F1F1EC" } } };
-        cell(r, 6).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } }, font: { bold: true } };
-        const col = typeof dv === "number" ? favRgb(m.nat, dv) : GREY;
-        cell(r, 7).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
-        cell(r, 8).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+        const eff = String(cell(r, C_STATO).v || "").startsWith("effettivo");
+        cell(r, C_STATO).s = { alignment: { horizontal: "left" }, font: { bold: eff, sz: 9.5, color: { rgb: eff ? GREEN : "8A8578" } } };
+        if (C_CONS >= 0) cell(r, C_CONS).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "F1F1EC" } } };
+        cell(r, C_FORE).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } }, font: { bold: true } };
+        if (C_D >= 0) {
+          const col = typeof dv === "number" ? favRgb(m.nat, dv) : GREY;
+          cell(r, C_D).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+          cell(r, C_DP).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+        }
         return;
       }
       // subtot | risultato
       const isRis = m.kind === "risultato";
       for (let c = 0; c < headers.length; c++) {
         const cc = cell(r, c);
-        cc.s = { font: { bold: true, color: { rgb: isRis ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: isRis ? "1A1A1A" : "F0EFEA" } }, border: { top: border, bottom: border }, alignment: { horizontal: c >= 5 ? "right" : "left" } };
-        if (c >= 5) cc.z = c === 8 ? pct : money;
-        if ((c === 7 || c === 8) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: isRis ? (dv > 0.005 ? "78DC96" : dv < -0.005 ? "F08C82" : "DCDCDC") : favRgb(m.nat, dv) } };
+        cc.s = { font: { bold: true, color: { rgb: isRis ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: isRis ? "1A1A1A" : "F0EFEA" } }, border: { top: border, bottom: border }, alignment: { horizontal: numCols.includes(c) ? "right" : "left" } };
+        if (numCols.includes(c)) cc.z = c === C_DP ? pct : money;
+        if ((c === C_D || c === C_DP) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: isRis ? (dv > 0.005 ? "78DC96" : dv < -0.005 ? "F08C82" : "DCDCDC") : favRgb(m.nat, dv) } };
       }
     });
     const wb = XLSX.utils.book_new();
@@ -10866,7 +11102,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.setFontSize(11); doc.setFont("helvetica", "normal");
     doc.text(`Budget · ${attivo.nome}`, W / 2, 20, { align: "center" });
     doc.setFontSize(9); doc.setTextColor(100);
-    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
+    const withAct = attivo.confrontaConsuntivo !== false;
+    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"}${withAct ? "" : " · solo forecast"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
     doc.setFontSize(7.5); doc.setTextColor(130);
     doc.text("Voci per prospetto: Conto Economico (Ricavi/Costi) e Stato Patrimoniale (Attivo/Passivo, passivo in valore positivo).  Δ: verde = favorevole, rosso = sfavorevole; voci patrimoniali neutre.", W / 2, 29.5, { align: "center" });
     doc.setTextColor(0);
@@ -10876,24 +11113,30 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const sign = (n) => { const r = Math.round(n); return (r > 0 ? "+" : "") + r.toLocaleString("it-IT"); };
     const pctTxt = (dAbs, cons) => { if (Math.abs(cons) <= 0.005) return "n/d"; const p = Math.round((dAbs / Math.abs(cons)) * 100); return (p > 0 ? "+" : "") + p + "%"; };
     const body = [], rowMeta = [];
+    const statoLbl = (v) => isReal(v)
+      ? (Math.abs(valEff(v) - (Number(v.importo) || 0)) > 0.005 ? `effettivo (prev. ${n0(Number(v.importo) || 0)})` : "effettivo")
+      : "previsto";
     const rigaVoce = (v) => {
       const cons = actualVoce(v);
-      const bud = Number(v.importo) || 0;
-      const forecast = addA ? (bud + cons) : bud;
+      const forecast = foreVoce(v, addA, cons);
       const dAbs = forecast - cons;
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—";
-      return [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", n0(cons), n0(forecast), sign(dAbs), pctTxt(dAbs, cons)];
+      const base = [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", statoLbl(v)];
+      return withAct ? [...base, n0(cons), n0(forecast), sign(dAbs), pctTxt(dAbs, cons)] : [...base, n0(forecast)];
     };
     const mkTot = (label, cons, forecast) => {
       const dAbs = forecast - cons;
-      return [
-        { content: label, colSpan: 4 },
+      const base = [{ content: label, colSpan: 5 }];
+      return withAct ? [
+        ...base,
         { content: n0(cons), styles: { halign: "right" } },
         { content: n0(forecast), styles: { halign: "right" } },
         { content: sign(dAbs), styles: { halign: "right" } },
         { content: pctTxt(dAbs, cons), styles: { halign: "right" } },
-      ];
+      ] : [...base, { content: n0(forecast), styles: { halign: "right" } }];
     };
+    const NC = withAct ? 9 : 6;          // numero colonne della tabella
+    const C_CONS = withAct ? 5 : -1, C_FORE = withAct ? 6 : 5, C_D = withAct ? 7 : -1, C_DP = withAct ? 8 : -1;
     const addRow = (row, m) => { body.push(row); rowMeta.push(m); };
     const voci = attivo.voci || [];
     const ricavi = voci.filter(v => v.natura === "ricavo");
@@ -10901,14 +11144,14 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const patr = voci.filter(v => v.natura === "patrimoniale");
 
     if (ricavi.length || costi.length) {
-      addRow([{ content: "CONTO ECONOMICO", colSpan: 8 }], { kind: "section" });
+      addRow([{ content: "CONTO ECONOMICO", colSpan: NC }], { kind: "section" });
       if (ricavi.length) {
-        addRow([{ content: "Ricavi", colSpan: 8 }], { kind: "sub" });
+        addRow([{ content: "Ricavi", colSpan: NC }], { kind: "sub" });
         ricavi.forEach(v => addRow(rigaVoce(v), { kind: "data", nat: "ricavo" }));
         addRow(mkTot("TOTALE RICAVI", totali.actRic, addA ? totali.effRic : totali.budRic), { kind: "subtot", nat: "ricavo" });
       }
       if (costi.length) {
-        addRow([{ content: "Costi", colSpan: 8 }], { kind: "sub" });
+        addRow([{ content: "Costi", colSpan: NC }], { kind: "sub" });
         costi.forEach(v => addRow(rigaVoce(v), { kind: "data", nat: "costo" }));
         addRow(mkTot("TOTALE COSTI", totali.actCos, addA ? totali.effCos : totali.budCos), { kind: "subtot", nat: "costo" });
       }
@@ -10939,7 +11182,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       const rigaSP = (p) => {
         const dAbs = p.forecast - p.cons;
         const note = [p.v.note || "", Math.abs(p.flusso) > 0.005 ? `flussi previsti ${sign(p.flusso)}` : ""].filter(Boolean).join(" · ");
-        return [p.v.descrizione || "—", naturaLbl[p.v.natura] || p.v.natura, "—", note, n0(p.cons), n0(p.forecast), sign(dAbs), pctTxt(dAbs, p.cons)];
+        const base = [p.v.descrizione || "—", naturaLbl[p.v.natura] || p.v.natura, "—", note, p.v.realizzato ? "effettivo" : "previsto"];
+        return withAct ? [...base, n0(p.cons), n0(p.forecast), sign(dAbs), pctTxt(dAbs, p.cons)] : [...base, n0(p.forecast)];
       };
       const att = prep.filter(p => p.sez === "attivo");
       const pas = prep.filter(p => p.sez === "passivo");
@@ -10961,14 +11205,14 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         (def.side === "attivo" ? att : pas).push(entry);
       });
       const somma = (arr, k) => arr.reduce((s, p) => s + p[k], 0);
-      addRow([{ content: "STATO PATRIMONIALE", colSpan: 8 }], { kind: "section" });
+      addRow([{ content: "STATO PATRIMONIALE", colSpan: NC }], { kind: "section" });
       if (att.length) {
-        addRow([{ content: "Attivo", colSpan: 8 }], { kind: "sub" });
+        addRow([{ content: "Attivo", colSpan: NC }], { kind: "sub" });
         att.forEach(p => addRow(rigaSP(p), { kind: "data", nat: "patrimoniale" }));
         addRow(mkTot("TOTALE ATTIVO", somma(att, "cons"), somma(att, "forecast")), { kind: "subtot", nat: "patrimoniale" });
       }
       if (pas.length) {
-        addRow([{ content: "Passivo", colSpan: 8 }], { kind: "sub" });
+        addRow([{ content: "Passivo", colSpan: NC }], { kind: "sub" });
         pas.forEach(p => addRow(rigaSP(p), { kind: "data", nat: "patrimoniale" }));
         addRow(mkTot("TOTALE PASSIVO", somma(pas, "cons"), somma(pas, "forecast")), { kind: "subtot", nat: "patrimoniale" });
       }
@@ -10980,15 +11224,18 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       const risFore = addA ? totali.effRis : totali.budRis;
       const gapC = nettoCons - risCons, gapF = nettoFore - risFore;
       const quadra = Math.abs(gapC) < 0.51 && Math.abs(gapF) < 0.51;
-      addRow([
-        { content: quadra ? "QUADRATURA ✓  netto patrimoniale = risultato economico" : "QUADRATURA ✗  scarto netto patrimoniale − risultato", colSpan: 4 },
+      addRow(withAct ? [
+        { content: quadra ? "QUADRATURA ✓  netto patrimoniale = risultato economico" : "QUADRATURA ✗  scarto netto patrimoniale − risultato", colSpan: 5 },
         { content: n0(gapC), styles: { halign: "right" } },
         { content: n0(gapF), styles: { halign: "right" } },
         { content: "", styles: { halign: "right" } },
         { content: "", styles: { halign: "right" } },
+      ] : [
+        { content: quadra ? "QUADRATURA ✓  netto patrimoniale = risultato economico" : "QUADRATURA ✗  scarto netto patrimoniale − risultato", colSpan: 5 },
+        { content: n0(gapF), styles: { halign: "right" } },
       ], { kind: "check", ok: quadra });
       if (!quadra && cashflow && cashflow.senzaCassa > 0.005) {
-        addRow([{ content: `Scarto dovuto a ${n0(cashflow.senzaCassa)} € di budget senza contropartita: assegna a quelle voci un conto di cassa oppure una macroarea patrimoniale per far quadrare.`, colSpan: 8 }], { kind: "warn" });
+        addRow([{ content: `Scarto dovuto a ${n0(cashflow.senzaCassa)} € di budget senza contropartita: assegna a quelle voci un conto di cassa oppure una macroarea patrimoniale per far quadrare.`, colSpan: NC }], { kind: "warn" });
       }
     }
     const favRgb = (natura, txt) => {
@@ -11001,19 +11248,24 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const natRgb = (natura) => natura === "ricavo" ? [30, 122, 70] : natura === "costo" ? [176, 58, 46] : [120, 120, 120];
     doc.autoTable({
       startY: 34,
-      head: [["Voce", "Natura", "Cassa", "Note", "Consuntivo", "Forecast", "Δ", "Δ %"]],
+      head: [withAct
+        ? ["Voce", "Natura", "Cassa", "Note", "Stato", "Consuntivo", "Forecast", "Δ", "Δ %"]
+        : ["Voce", "Natura", "Cassa", "Note", "Stato", "Forecast"]],
       body,
       styles: { fontSize: 8, cellPadding: 1.5 },
       headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
-      columnStyles: {
-        0: { cellWidth: 44 }, 1: { cellWidth: 18 }, 2: { cellWidth: 24 }, 3: { cellWidth: 48, textColor: [110, 110, 110], fontStyle: "italic" },
-        4: { cellWidth: 26, halign: "right" }, 5: { cellWidth: 26, halign: "right", fontStyle: "bold" }, 6: { cellWidth: 22, halign: "right" }, 7: { cellWidth: 18, halign: "right" },
+      columnStyles: withAct ? {
+        0: { cellWidth: 40 }, 1: { cellWidth: 17 }, 2: { cellWidth: 22 }, 3: { cellWidth: 40, textColor: [110, 110, 110], fontStyle: "italic" },
+        4: { cellWidth: 26 }, 5: { cellWidth: 24, halign: "right" }, 6: { cellWidth: 24, halign: "right", fontStyle: "bold" }, 7: { cellWidth: 20, halign: "right" }, 8: { cellWidth: 16, halign: "right" },
+      } : {
+        0: { cellWidth: 60 }, 1: { cellWidth: 22 }, 2: { cellWidth: 32 }, 3: { cellWidth: 70, textColor: [110, 110, 110], fontStyle: "italic" },
+        4: { cellWidth: 34 }, 5: { cellWidth: 30, halign: "right", fontStyle: "bold" },
       },
       didParseCell: (data) => {
         const ci = data.column.index;
         if (data.section === "head") {
-          if (ci === 4) data.cell.styles.fillColor = [107, 107, 107];
-          if (ci === 5) data.cell.styles.fillColor = [59, 74, 90];
+          if (ci === C_CONS) data.cell.styles.fillColor = [107, 107, 107];
+          if (ci === C_FORE) data.cell.styles.fillColor = [59, 74, 90];
           return;
         }
         if (data.section !== "body") return;
@@ -11041,7 +11293,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           data.cell.styles.textColor = [255, 255, 255];
           data.cell.styles.fontSize = 10;
           data.cell.styles.minCellHeight = 9;
-          if (ci === 6 || ci === 7) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
+          if (ci === C_D || ci === C_DP) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
           return;
         }
         if (m.kind === "check") {
@@ -11062,15 +11314,21 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           data.cell.styles.fontStyle = "bold";
           data.cell.styles.fillColor = [235, 234, 228];
           data.cell.styles.fontSize = 9;
-          if (ci === 6 || ci === 7) data.cell.styles.textColor = favRgb(m.nat, txt);
+          if (ci === C_D || ci === C_DP) data.cell.styles.textColor = favRgb(m.nat, txt);
           return;
         }
         // Righe normali
         const nat = m.nat;
-        if (ci === 4) data.cell.styles.fillColor = [241, 241, 236];
-        if (ci === 5) data.cell.styles.fillColor = [234, 240, 245];
+        if (ci === C_CONS) data.cell.styles.fillColor = [241, 241, 236];
+        if (ci === C_FORE) data.cell.styles.fillColor = [234, 240, 245];
         if (ci === 1) data.cell.styles.textColor = natRgb(nat);
-        if (ci === 6 || ci === 7) data.cell.styles.textColor = favRgb(nat, txt);
+        if (ci === 4) { // Stato
+          const eff = txt.startsWith("effettivo");
+          data.cell.styles.textColor = eff ? [30, 122, 70] : [140, 140, 140];
+          data.cell.styles.fontStyle = eff ? "bold" : "italic";
+          data.cell.styles.fontSize = 7.5;
+        }
+        if (ci === C_D || ci === C_DP) data.cell.styles.textColor = favRgb(nat, txt);
       },
     });
 
@@ -11340,6 +11598,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     <th style={{ minWidth: 200 }}>Conti collegati</th>
                     <th style={{ width: 130 }} title="Conto di liquidità impattato: serve per il piano di cassa">Cassa</th>
                     <th className="num" style={{ width: 150 }}>Budget</th>
+                    <th style={{ width: 130 }} title="Spunta quando il costo/ricavo si è verificato davvero: il forecast usa l'importo effettivo">✓ Fatto</th>
                     {showAct && <th className="num" style={{ width: 120 }}>Consuntivo</th>}
                     {showAct && <th className="num" style={{ width: 120 }} title="Scostamento favorevole: positivo = va bene (ricavo sopra target o costo sotto budget)">Scostam.</th>}
                     <th style={{ width: 40 }}></th>
@@ -11350,7 +11609,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     const voci = attivo.voci || [];
                     const eco = voci.filter(v => v.natura === "ricavo" || v.natura === "costo");
                     const pat = voci.filter(v => v.natura === "patrimoniale");
-                    const nCols = showAct ? 8 : 6;
+                    const nCols = showAct ? 9 : 7;
                     // Una voce è "consuntivo" se aggancia conti o ha un saldo reale; altrimenti è aggiunta a mano.
                     const isCons = (v) => (v.conti || []).length > 0 || Math.abs(actualVoce(v)) > 0.005;
                     const ricCons = eco.filter(v => v.natura === "ricavo" && isCons(v));
@@ -11377,11 +11636,12 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     );
                     const renderVoce = (v, isAgg) => {
                       const act = actualVoce(v);
-                      const bud = Number(v.importo) || 0;
+                      const real = isReal(v);
+                      const bud = budVoce(v);
                       const scost = v.natura === "costo" ? (bud - act) : (act - bud);
                       const hasAct = Math.abs(act) > 0.005;
                       const casse = casseVoce(v);
-                      const rip = ripartizioneCasse(v);
+                      const rip = ripartizioneCasse(v, real ? (valEff(v) - act) : undefined);
                       const cassaSummary = v.contropartitaSP
                         ? (MACRO_SP.find(m => m.key === v.contropartitaSP)?.label || v.contropartitaSP) + " (macro)"
                         : casse.length === 0 ? <span style={{ color: "var(--ink-3)" }}>— nessuna —</span>
@@ -11453,7 +11713,16 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                               </details>}
                         </td>
                         <td className="num">
-                          {addAct ? (
+                          {real ? (
+                            <div>
+                              <div style={{ fontWeight: 700, fontSize: 15 }}>{fmt(valEff(v))}</div>
+                              <div style={{ fontSize: 10.5, color: "var(--ink-3)", marginTop: 3 }}>
+                                {Math.abs(valEff(v) - (Number(v.importo) || 0)) > 0.005
+                                  ? `previsto ${fmt(Number(v.importo) || 0)}`
+                                  : "come da previsione"}
+                              </div>
+                            </div>
+                          ) : addAct ? (
                             <div>
                               <div style={{ fontWeight: 700, fontSize: 15 }}>{fmt(bud + act)}</div>
                               <div style={{ fontSize: 10.5, color: "var(--ink-3)", marginTop: 3, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4, whiteSpace: "nowrap" }}>
@@ -11464,6 +11733,25 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                             </div>
                           ) : (
                             <input type="number" step="0.01" value={v.importo} onChange={e => setVoce(v.id, "importo", e.target.value)} style={{ width: 100, textAlign: "right" }} />
+                          )}
+                        </td>
+                        <td>
+                          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, cursor: "pointer" }}>
+                            <input type="checkbox" checked={real}
+                              onChange={e => toggleRealizzato(v, e.target.checked)} />
+                            <span style={{ color: real ? "var(--ok)" : "var(--ink-3)", fontWeight: real ? 700 : 400 }}>
+                              {real ? "effettivo" : "previsto"}
+                            </span>
+                          </label>
+                          {real && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                              <input type="number" step="0.01" value={v.importoEffettivo ?? v.importo}
+                                title="Importo effettivo: conferma quello previsto o correggilo"
+                                onChange={e => setVoce(v.id, "importoEffettivo", e.target.value)}
+                                style={{ width: 86, textAlign: "right", fontSize: 12 }} />
+                              <button className="btn ghost sm" title="Riporta all'importo previsto"
+                                onClick={() => setVoce(v.id, "importoEffettivo", Number(v.importo) || 0)}>↺</button>
+                            </div>
                           )}
                         </td>
                         {showAct && <td className="num" style={{ fontWeight: 600 }}>{fmt(act)}</td>}
@@ -11494,6 +11782,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
                       <td colSpan={4} style={{ fontFamily: "'Fraunces',serif" }}>RISULTATO (ricavi − costi)</td>
                       <td className="num">{fmt(addAct ? totali.effRis : totali.budRis)}</td>
+                      <td style={{ fontSize: 11, color: "var(--ink-3)", fontWeight: 400 }}>
+                        {totali.nReal ? `${totali.nReal} spuntate` : ""}
+                      </td>
                       {showAct && <td className="num">{fmt(totali.actRis)}</td>}
                       {showAct && <td className={"num " + ((totali.actRis - totali.budRis) < 0 ? "neg" : "pos")}>{fmt(totali.actRis - totali.budRis)}</td>}
                       <td></td>
@@ -11570,6 +11861,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           )}
 
           <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 10, fontStyle: "italic" }}>
+            <b>Spunta “✓ Fatto”.</b> Quando un costo o un ricavo si verifica davvero, spuntalo nella colonna dedicata: l’importo effettivo parte da quello previsto (basta confermarlo) e puoi correggerlo se è cambiato. Da quel momento la voce non è più una stima — il forecast usa l’effettivo, non ci si somma sopra il consuntivo e il piano di cassa proietta solo la parte non ancora contabilizzata. Negli export la voce risulta “effettivo” con a fianco la previsione iniziale se diversa.
+            <br /><br />
             <b>Due interruttori indipendenti.</b> <b>Confronto consuntivo</b>: se Sì, accanto al Budget vedi le colonne Consuntivo e Scostamento (favorevole: positivo quando un ricavo supera il target o un costo resta sotto budget). <b>Somma consuntivo</b>: se Sì, il consuntivo congelato viene sommato all'importo che scrivi tu → <b>Budget = consuntivo + extra a mano</b> (utile a torneo finito: prendi i costi/ricavi già sostenuti e ci aggiungi quelli nuovi); in questa modalità l'importo parte da 0 ed è solo l'extra, e con “⇊ scorpora consuntivo” azzeri gli importi che coincidono col consuntivo (per non contarli due volte).
             {" "}Il Consuntivo è calcolato dal libro giornale in partita doppia sui conti agganciati{attivo.bu && attivo.bu !== "ALL" ? `; per i conti economici solo BU ${attivo.bu}, mentre i conti patrimoniali usano il saldo totale` : " (tutte le BU)"}.
           </div>
