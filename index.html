@@ -11696,6 +11696,94 @@ function App() {
           }
         }
 
+        // ============================================================
+        // Migration v3.16: correzione scritture Idea Verde del 17/05/2026
+        // Le tre "chiusura conti transitori" e le assicurazioni erano state
+        // salvate come movimenti singoli con i versi invertiti e contropartita
+        // "DA ASSEGNARE": il conto 81 cresceva invece di chiudersi e il conto 83
+        // finiva tutto in dare. Qui le elimino e le rifaccio come scritture
+        // composte quadrate, e sposto su IDEA VERDE i movimenti finiti in GENERAL.
+        // ============================================================
+        {
+          const tuttiMov = Object.entries(movsSnap.val() || {}).map(([k, m]) => ({ ...m, _k: k }));
+          const giaFatto = tuttiMov.some(m => String(m.scritturaId || "").startsWith("scr_iv_"));
+
+          const rotte = tuttiMov.filter(m =>
+            m.data === "2026-05-17" &&
+            m.contoLiquidita == null && m.tipo !== "giroconto" &&
+            !String(m.scritturaId || "").startsWith("scr_iv_") &&
+            /Chiusura conti transitori Idea Verde|Assicurazioni Idea Verde a Pro Loco/i.test(m.descrizione || "")
+          );
+
+          const giroDaSpostare = tuttiMov.filter(m =>
+            m.tipo === "giroconto" && /IDEA VERDE/i.test(m.descrizione || "") && (m.bu || "") !== "IDEA VERDE"
+          );
+
+          // Incassi lordi dell'evento (conto 81, monetari, BU IDEA VERDE)
+          const incassiIV = tuttiMov
+            .filter(m => Number(m.contoPdC) === 81 && m.tipo === "entrata" && m.contoLiquidita != null && (m.bu || "") === "IDEA VERDE")
+            .reduce((s, m) => s + (Number(m.importo) || 0), 0);
+          const QUOTE_PARTNER = 4350;   // Fabbrico Calcio 3.350 + Pro Loco 1.000
+          const ASSICURAZIONI = 130;    // a Pro Loco, costo dell'associazione
+          const ricavoCompetenza = Math.round((incassiIV - QUOTE_PARTNER) * 100) / 100;
+
+          if (!giaFatto && rotte.length > 0 && incassiIV > 0) {
+            const msg = [
+              "Rilevate scritture non quadrate su IDEA VERDE (17/05/2026).",
+              "",
+              `• Elimino ${rotte.length} movimenti sbagliati (chiusura transitori 4.350 / 3.350 / 1.000 e assicurazioni 130)`,
+              "• Rifaccio le scritture corrette:",
+              `   DARE 81 Eventi c/incassi anticipati ${fmt(QUOTE_PARTNER)} / AVERE 83 Debiti v/partner ${fmt(QUOTE_PARTNER)}`,
+              `   DARE 20 Spese diverse ${fmt(ASSICURAZIONI)} / AVERE 83 Debiti v/partner ${fmt(ASSICURAZIONI)}`,
+              `   DARE 81 Eventi c/incassi anticipati ${fmt(ricavoCompetenza)} / AVERE 28 Entrate da eventi ${fmt(ricavoCompetenza)}`,
+              giroDaSpostare.length ? `• Sposto ${giroDaSpostare.length} movimenti da GENERAL a IDEA VERDE` : "",
+              "",
+              `Risultato atteso: conto 81 a zero, conto 83 chiuso dai pagamenti del 18/05, margine IDEA VERDE ${fmt(ricavoCompetenza - ASSICURAZIONI - 614.5)} pari alla cassa.`,
+              "",
+              "Procedere?",
+            ].filter(Boolean).join("\n");
+
+            if (confirm(msg)) {
+              const now = new Date().toISOString();
+              const del = {};
+              rotte.forEach(m => { del[m._k] = null; });
+              await db.ref(`stagioni/${stagione}/movimenti`).update(del);
+
+              const nuove = [
+                { id: "scr_iv_quote", desc: "Giro quote partner Idea Verde (Fabbrico Calcio + Pro Loco)", dareConto: 81, avereConto: 83, importo: QUOTE_PARTNER },
+                { id: "scr_iv_assic", desc: "Assicurazioni Idea Verde da riconoscere a Pro Loco", dareConto: 20, avereConto: 83, importo: ASSICURAZIONI },
+                { id: "scr_iv_ricavo", desc: "Ricavo di competenza Idea Verde", dareConto: 81, avereConto: 28, importo: ricavoCompetenza },
+              ];
+              const add = {};
+              nuove.forEach(s => {
+                if (!(s.importo > 0)) return;
+                const comune = {
+                  data: "2026-05-17", contoLiquidita: null, contoLiquiditaDest: null,
+                  categoria: "SCRITTURA COMPOSTA", bu: "IDEA VERDE",
+                  descrizione: s.desc, mese: "maggio", nonMonetario: true,
+                  scritturaComposta: true, scritturaId: s.id, importo: s.importo,
+                  creatoIl: now, modificatoIl: now,
+                };
+                add[db.ref(`stagioni/${stagione}/movimenti`).push().key] = { ...comune, tipo: "uscita", contoPdC: s.dareConto, dare: s.importo, avere: 0 };
+                add[db.ref(`stagioni/${stagione}/movimenti`).push().key] = { ...comune, tipo: "entrata", contoPdC: s.avereConto, dare: 0, avere: s.importo };
+              });
+              giroDaSpostare.forEach(m => { add[m._k] = { ...m, bu: "IDEA VERDE", modificatoIl: now }; delete add[m._k]._k; });
+              await db.ref(`stagioni/${stagione}/movimenti`).update(add);
+
+              alert("Correzione Idea Verde completata.\n\nControlla il Bilancio di Verifica: dare e avere devono ora quadrare, il conto 81 deve essere a zero e il conto 83 chiuso.");
+            }
+          } else if (giroDaSpostare.length > 0) {
+            // Le scritture erano già a posto: resta solo da riassegnare la BU
+            if (confirm(`${giroDaSpostare.length} movimenti Idea Verde risultano su un'altra BU. Spostarli su IDEA VERDE?`)) {
+              const now = new Date().toISOString();
+              const upd = {};
+              giroDaSpostare.forEach(m => { const d = { ...m, bu: "IDEA VERDE", modificatoIl: now }; delete d._k; upd[m._k] = d; });
+              await db.ref(`stagioni/${stagione}/movimenti`).update(upd);
+              alert("Movimenti riassegnati a IDEA VERDE.");
+            }
+          }
+        }
+
         // Migration v3.13: aggiungi conto 80 + sistema cespiti + riclassifica rimborsi
         const contiSnapMig = await db.ref(`stagioni/${stagione}/conti`).once("value");
         const contiVal = contiSnapMig.val() || {};
