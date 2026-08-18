@@ -10943,16 +10943,38 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const pctFrac = (dAbs, cons) => Math.abs(cons) > 0.005 ? dAbs / Math.abs(cons) : null;
     const naturaLbl = { ricavo: "Ricavo", costo: "Costo", patrimoniale: "Patrim." };
 
-    // Senza confronto col consuntivo l'export mostra solo il forecast
-    const withAct = attivo.confrontaConsuntivo !== false;
-    const headers = withAct
-      ? ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Consuntivo", "Forecast", "Δ (forecast − cons.)", "Δ %"]
-      : ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Forecast"];
-    const C_STATO = 5, C_CONS = withAct ? 6 : -1, C_FORE = withAct ? 7 : 6, C_D = withAct ? 8 : -1, C_DP = withAct ? 9 : -1;
-    const numCols = withAct ? [C_CONS, C_FORE, C_D, C_DP] : [C_FORE];
+    // Tre casistiche diverse:
+    //  - "avanzamento" (somma consuntivo ON): il forecast CONTIENE già il consuntivo,
+    //    quindi il confronto utile non è budget vs actual ma la sua composizione:
+    //    quanto è già a bilancio e quanto resta ancora previsto.
+    //  - "confronto"  (somma OFF, confronto ON): budget vs consuntivo con scostamento.
+    //  - "solo"       (somma OFF, confronto OFF): solo la colonna forecast.
+    const modo = addA ? "avanzamento" : (attivo.confrontaConsuntivo !== false ? "confronto" : "solo");
+    const avanz = modo === "avanzamento";
+    const withAct = modo !== "solo";
+    const headers = avanz
+      ? ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Consuntivo (già a bilancio)", "Ancora previsto", "Forecast", "% realizzato"]
+      : withAct
+        ? ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Consuntivo", "Forecast", "Δ (forecast − cons.)", "Δ %"]
+        : ["Voce", "Natura", "Conti collegati", "Cassa", "Note", "Stato", "Forecast"];
+    const C_STATO = 5;
+    const C_CONS = withAct ? 6 : -1;
+    const C_MID = withAct ? 7 : -1;                       // "ancora previsto" oppure Δ
+    const C_FORE = avanz ? 8 : (withAct ? 7 : 6);
+    const C_DP = withAct ? 9 : -1;                        // "% realizzato" oppure Δ %
+    const numCols = withAct ? [C_CONS, C_MID, avanz ? 8 : 7, C_DP] : [C_FORE];
+    // celle numeriche nell'ordine delle colonne
+    const numCells = (cons, forecast) => {
+      if (avanz) {
+        const q = Math.abs(forecast) > 0.005 ? cons / forecast : null;
+        return [cons, forecast - cons, forecast, q === null ? "n/d" : q];
+      }
+      const dAbs = forecast - cons, pf = pctFrac(dAbs, cons);
+      return [cons, forecast, dAbs, pf === null ? "n/d" : pf];
+    };
     const aoa = [
       [`Budget: ${attivo.nome}`],
-      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${addA ? " · Forecast = consuntivo + extra a mano" : " · Forecast = budget inserito"}${withAct ? "" : " · solo forecast, senza confronto col consuntivo"}`],
+      [`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU}${avanz ? " · Forecast = consuntivo già a bilancio + quota ancora prevista" : modo === "confronto" ? " · Forecast = budget inserito, confronto col consuntivo" : " · Forecast = budget inserito, senza confronto col consuntivo"}`],
       [],
       headers,
     ];
@@ -10970,12 +10992,11 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       const conti = (v.conti || []).map(c => contiMap[c]?.nome?.trim() || c).join(", ");
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "";
       const base = [v.descrizione || "", naturaLbl[v.natura] || v.natura, conti, cassa, v.note || "", statoLbl(v)];
-      return withAct ? [...base, cons, forecast, dAbs, pf === null ? "n/d" : pf] : [...base, forecast];
+      return withAct ? [...base, ...numCells(cons, forecast)] : [...base, forecast];
     };
     const mkTot = (label, cons, forecast) => {
-      const dAbs = forecast - cons, pf = pctFrac(dAbs, cons);
       const base = [label, "", "", "", "", ""];
-      return withAct ? [...base, cons, forecast, dAbs, pf === null ? "n/d" : pf] : [...base, forecast];
+      return withAct ? [...base, ...numCells(cons, forecast)] : [...base, forecast];
     };
     const push = (row, m) => { aoa.push(row); meta.push(m); };
 
@@ -11005,15 +11026,17 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       push(mkTot("TOTALE PATRIMONIALE", totali.actFin, addA ? totali.effFin : totali.budFin), { kind: "subtot", nat: "patrimoniale" });
     }
     push([], {});
-    push([withAct
-      ? "Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Le voci patrimoniali sono neutre (saldi, non flussi di risultato). Stato: 'effettivo' = voce spuntata, importo confermato."
-      : "Legenda: forecast senza confronto col consuntivo. Stato: 'effettivo' = voce spuntata, importo confermato; 'previsto' = ancora stimato."], { kind: "legend" });
+    push([avanz
+      ? "Legenda: il Forecast è la somma di quanto è già a bilancio (Consuntivo) e di quanto resta previsto (Ancora previsto); la % dice quanta parte del forecast si è già realizzata. Stato: 'effettivo' = voce spuntata, importo confermato; 'previsto' = ancora stimato."
+      : withAct
+        ? "Legenda: verde = variazione favorevole (ricavo in aumento, costo in calo) · rosso = sfavorevole. Le voci patrimoniali sono neutre (saldi, non flussi di risultato). Stato: 'effettivo' = voce spuntata, importo confermato."
+        : "Legenda: forecast senza confronto col consuntivo. Stato: 'effettivo' = voce spuntata, importo confermato; 'previsto' = ancora stimato."], { kind: "legend" });
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws["!cols"] = withAct
-      ? [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 20 }, { wch: 13 }, { wch: 13 }, { wch: 17 }, { wch: 9 }]
+      ? [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 20 }, { wch: avanz ? 20 : 13 }, { wch: avanz ? 15 : 13 }, { wch: avanz ? 13 : 17 }, { wch: avanz ? 12 : 9 }]
       : [{ wch: 30 }, { wch: 10 }, { wch: 28 }, { wch: 13 }, { wch: 26 }, { wch: 20 }, { wch: 14 }];
-    const money = "#,##0.00", pct = "+0.0%;-0.0%;0.0%";
+    const money = "#,##0.00", pct = "+0.0%;-0.0%;0.0%", pctPlain = "0.0%";
     const border = { style: "thin", color: { rgb: "D9D6CE" } };
     const cell = (r, c) => { const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: "s", v: "" }; return ws[ref]; };
     const GREEN = "1E7A46", RED = "B03A2E", GREY = "777777";
@@ -11041,18 +11064,19 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         return;
       }
       if (m.kind === "legend") { cell(r, 0).s = { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } }; return; }
-      const dv = C_D >= 0 ? cell(r, C_D).v : null;
+      const dv = C_MID >= 0 ? cell(r, C_MID).v : null;
       if (m.kind === "data") {
-        numCols.forEach(c => { cell(r, c).z = c === C_DP ? pct : money; });
+        numCols.forEach(c => { cell(r, c).z = c === C_DP ? (avanz ? pctPlain : pct) : money; });
         cell(r, 1).s = { font: { bold: true, color: { rgb: natRgb(m.nat) } } };
         cell(r, 4).s = { alignment: { horizontal: "left", wrapText: true }, font: { italic: true, color: { rgb: "6B6B6B" } } };
         const eff = String(cell(r, C_STATO).v || "").startsWith("effettivo");
         cell(r, C_STATO).s = { alignment: { horizontal: "left" }, font: { bold: eff, sz: 9.5, color: { rgb: eff ? GREEN : "8A8578" } } };
         if (C_CONS >= 0) cell(r, C_CONS).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "F1F1EC" } } };
         cell(r, C_FORE).s = { alignment: { horizontal: "right" }, fill: { fgColor: { rgb: "EAF0F5" } }, font: { bold: true } };
-        if (C_D >= 0) {
-          const col = typeof dv === "number" ? favRgb(m.nat, dv) : GREY;
-          cell(r, C_D).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
+        if (C_MID >= 0) {
+          // in avanzamento la colonna centrale è "ancora previsto": neutra, non è uno scostamento
+          const col = avanz ? GREY : (typeof dv === "number" ? favRgb(m.nat, dv) : GREY);
+          cell(r, C_MID).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
           cell(r, C_DP).s = { alignment: { horizontal: "right" }, font: { color: { rgb: col } } };
         }
         return;
@@ -11062,8 +11086,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       for (let c = 0; c < headers.length; c++) {
         const cc = cell(r, c);
         cc.s = { font: { bold: true, color: { rgb: isRis ? "FFFFFF" : "1A1A1A" } }, fill: { fgColor: { rgb: isRis ? "1A1A1A" : "F0EFEA" } }, border: { top: border, bottom: border }, alignment: { horizontal: numCols.includes(c) ? "right" : "left" } };
-        if (numCols.includes(c)) cc.z = c === C_DP ? pct : money;
-        if ((c === C_D || c === C_DP) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: isRis ? (dv > 0.005 ? "78DC96" : dv < -0.005 ? "F08C82" : "DCDCDC") : favRgb(m.nat, dv) } };
+        if (numCols.includes(c)) cc.z = c === C_DP ? (avanz ? pctPlain : pct) : money;
+        if (!avanz && (c === C_MID || c === C_DP) && typeof dv === "number") cc.s.font = { bold: true, color: { rgb: isRis ? (dv > 0.005 ? "78DC96" : dv < -0.005 ? "F08C82" : "DCDCDC") : favRgb(m.nat, dv) } };
       }
     });
     const wb = XLSX.utils.book_new();
@@ -11102,8 +11126,11 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     doc.setFontSize(11); doc.setFont("helvetica", "normal");
     doc.text(`Budget · ${attivo.nome}`, W / 2, 20, { align: "center" });
     doc.setFontSize(9); doc.setTextColor(100);
-    const withAct = attivo.confrontaConsuntivo !== false;
-    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · Forecast = ${addA ? "consuntivo + extra a mano" : "budget inserito"}${withAct ? "" : " · solo forecast"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
+    // vedi exportExcel: tre casistiche (avanzamento / confronto / solo forecast)
+    const modo = addA ? "avanzamento" : (attivo.confrontaConsuntivo !== false ? "confronto" : "solo");
+    const avanz = modo === "avanzamento";
+    const withAct = modo !== "solo";
+    doc.text(`Stagione ${stagione} · BU: ${bBU === "ALL" ? "Tutte" : bBU} · ${avanz ? "Forecast = consuntivo già a bilancio + quota ancora prevista" : modo === "confronto" ? "Forecast = budget inserito, confronto col consuntivo" : "Forecast = budget inserito, solo forecast"} · ${new Date().toLocaleDateString("it-IT")}`, W / 2, 25, { align: "center" });
     doc.setFontSize(7.5); doc.setTextColor(130);
     doc.text("Voci per prospetto: Conto Economico (Ricavi/Costi) e Stato Patrimoniale (Attivo/Passivo, passivo in valore positivo).  Δ: verde = favorevole, rosso = sfavorevole; voci patrimoniali neutre.", W / 2, 29.5, { align: "center" });
     doc.setTextColor(0);
@@ -11116,27 +11143,29 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const statoLbl = (v) => isReal(v)
       ? (Math.abs(valEff(v) - (Number(v.importo) || 0)) > 0.005 ? `effettivo (prev. ${n0(Number(v.importo) || 0)})` : "effettivo")
       : "previsto";
+    const quotaTxt = (cons, forecast) => Math.abs(forecast) <= 0.005 ? "n/d" : Math.round((cons / forecast) * 100) + "%";
+    // celle numeriche, nell'ordine delle colonne della casistica attiva
+    const numTxt = (cons, forecast) => avanz
+      ? [n0(cons), n0(forecast - cons), n0(forecast), quotaTxt(cons, forecast)]
+      : [n0(cons), n0(forecast), sign(forecast - cons), pctTxt(forecast - cons, cons)];
     const rigaVoce = (v) => {
       const cons = actualVoce(v);
       const forecast = foreVoce(v, addA, cons);
-      const dAbs = forecast - cons;
       const cassa = v.contoLiquidita && v.natura !== "patrimoniale" ? (contiMap[Number(v.contoLiquidita)]?.nome?.trim() || "") : "—";
       const base = [v.descrizione || "—", naturaLbl[v.natura] || v.natura, cassa, v.note || "", statoLbl(v)];
-      return withAct ? [...base, n0(cons), n0(forecast), sign(dAbs), pctTxt(dAbs, cons)] : [...base, n0(forecast)];
+      return withAct ? [...base, ...numTxt(cons, forecast)] : [...base, n0(forecast)];
     };
     const mkTot = (label, cons, forecast) => {
-      const dAbs = forecast - cons;
       const base = [{ content: label, colSpan: 5 }];
-      return withAct ? [
-        ...base,
-        { content: n0(cons), styles: { halign: "right" } },
-        { content: n0(forecast), styles: { halign: "right" } },
-        { content: sign(dAbs), styles: { halign: "right" } },
-        { content: pctTxt(dAbs, cons), styles: { halign: "right" } },
-      ] : [...base, { content: n0(forecast), styles: { halign: "right" } }];
+      return withAct
+        ? [...base, ...numTxt(cons, forecast).map(x => ({ content: x, styles: { halign: "right" } }))]
+        : [...base, { content: n0(forecast), styles: { halign: "right" } }];
     };
     const NC = withAct ? 9 : 6;          // numero colonne della tabella
-    const C_CONS = withAct ? 5 : -1, C_FORE = withAct ? 6 : 5, C_D = withAct ? 7 : -1, C_DP = withAct ? 8 : -1;
+    const C_CONS = withAct ? 5 : -1;
+    const C_MID = withAct ? 6 : -1;      // "ancora previsto" oppure Δ
+    const C_FORE = avanz ? 7 : (withAct ? 6 : 5);
+    const C_DP = withAct ? 8 : -1;
     const addRow = (row, m) => { body.push(row); rowMeta.push(m); };
     const voci = attivo.voci || [];
     const ricavi = voci.filter(v => v.natura === "ricavo");
@@ -11180,10 +11209,9 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
         return { v, sez, flusso, cons: cons * seg, forecast: forecast * seg };
       });
       const rigaSP = (p) => {
-        const dAbs = p.forecast - p.cons;
         const note = [p.v.note || "", Math.abs(p.flusso) > 0.005 ? `flussi previsti ${sign(p.flusso)}` : ""].filter(Boolean).join(" · ");
         const base = [p.v.descrizione || "—", naturaLbl[p.v.natura] || p.v.natura, "—", note, p.v.realizzato ? "effettivo" : "previsto"];
-        return withAct ? [...base, n0(p.cons), n0(p.forecast), sign(dAbs), pctTxt(dAbs, p.cons)] : [...base, n0(p.forecast)];
+        return withAct ? [...base, ...numTxt(p.cons, p.forecast)] : [...base, n0(p.forecast)];
       };
       const att = prep.filter(p => p.sez === "attivo");
       const pas = prep.filter(p => p.sez === "passivo");
@@ -11224,7 +11252,13 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
       const risFore = addA ? totali.effRis : totali.budRis;
       const gapC = nettoCons - risCons, gapF = nettoFore - risFore;
       const quadra = Math.abs(gapC) < 0.51 && Math.abs(gapF) < 0.51;
-      addRow(withAct ? [
+      addRow(avanz ? [
+        { content: quadra ? "QUADRATURA ✓  netto patrimoniale = risultato economico" : "QUADRATURA ✗  scarto netto patrimoniale − risultato", colSpan: 5 },
+        { content: n0(gapC), styles: { halign: "right" } },
+        { content: "", styles: { halign: "right" } },
+        { content: n0(gapF), styles: { halign: "right" } },
+        { content: "", styles: { halign: "right" } },
+      ] : withAct ? [
         { content: quadra ? "QUADRATURA ✓  netto patrimoniale = risultato economico" : "QUADRATURA ✗  scarto netto patrimoniale − risultato", colSpan: 5 },
         { content: n0(gapC), styles: { halign: "right" } },
         { content: n0(gapF), styles: { halign: "right" } },
@@ -11248,9 +11282,11 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
     const natRgb = (natura) => natura === "ricavo" ? [30, 122, 70] : natura === "costo" ? [176, 58, 46] : [120, 120, 120];
     doc.autoTable({
       startY: 34,
-      head: [withAct
-        ? ["Voce", "Natura", "Cassa", "Note", "Stato", "Consuntivo", "Forecast", "Δ", "Δ %"]
-        : ["Voce", "Natura", "Cassa", "Note", "Stato", "Forecast"]],
+      head: [avanz
+        ? ["Voce", "Natura", "Cassa", "Note", "Stato", "Consuntivo", "Ancora previsto", "Forecast", "% realizz."]
+        : withAct
+          ? ["Voce", "Natura", "Cassa", "Note", "Stato", "Consuntivo", "Forecast", "Δ", "Δ %"]
+          : ["Voce", "Natura", "Cassa", "Note", "Stato", "Forecast"]],
       body,
       styles: { fontSize: 8, cellPadding: 1.5 },
       headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
@@ -11293,7 +11329,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           data.cell.styles.textColor = [255, 255, 255];
           data.cell.styles.fontSize = 10;
           data.cell.styles.minCellHeight = 9;
-          if (ci === C_D || ci === C_DP) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
+          if (!avanz && (ci === C_MID || ci === C_DP)) data.cell.styles.textColor = txt.startsWith("+") ? [120, 220, 150] : txt.startsWith("-") ? [240, 140, 130] : [220, 220, 220];
           return;
         }
         if (m.kind === "check") {
@@ -11314,7 +11350,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           data.cell.styles.fontStyle = "bold";
           data.cell.styles.fillColor = [235, 234, 228];
           data.cell.styles.fontSize = 9;
-          if (ci === C_D || ci === C_DP) data.cell.styles.textColor = favRgb(m.nat, txt);
+          if (!avanz && (ci === C_MID || ci === C_DP)) data.cell.styles.textColor = favRgb(m.nat, txt);
           return;
         }
         // Righe normali
@@ -11328,7 +11364,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
           data.cell.styles.fontStyle = eff ? "bold" : "italic";
           data.cell.styles.fontSize = 7.5;
         }
-        if (ci === C_D || ci === C_DP) data.cell.styles.textColor = favRgb(nat, txt);
+        if (!avanz && (ci === C_MID || ci === C_DP)) data.cell.styles.textColor = favRgb(nat, txt);
       },
     });
 
@@ -11599,7 +11635,8 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     <th style={{ width: 130 }} title="Conto di liquidità impattato: serve per il piano di cassa">Cassa</th>
                     <th className="num" style={{ width: 150 }}>Budget</th>
                     <th style={{ width: 130 }} title="Spunta quando il costo/ricavo si è verificato davvero: il forecast usa l'importo effettivo">✓ Fatto</th>
-                    {showAct && <th className="num" style={{ width: 120 }}>Consuntivo</th>}
+                    {(showAct || addAct) && <th className="num" style={{ width: 120 }} title={addAct && !showAct ? "Quota del forecast già a bilancio" : undefined}>Consuntivo</th>}
+                    {addAct && !showAct && <th className="num" style={{ width: 100 }} title="Quanta parte del forecast si è già realizzata">% realizz.</th>}
                     {showAct && <th className="num" style={{ width: 120 }} title="Scostamento favorevole: positivo = va bene (ricavo sopra target o costo sotto budget)">Scostam.</th>}
                     <th style={{ width: 40 }}></th>
                   </tr>
@@ -11609,7 +11646,7 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                     const voci = attivo.voci || [];
                     const eco = voci.filter(v => v.natura === "ricavo" || v.natura === "costo");
                     const pat = voci.filter(v => v.natura === "patrimoniale");
-                    const nCols = showAct ? 9 : 7;
+                    const nCols = showAct ? 9 : (addAct ? 9 : 7);
                     // Una voce è "consuntivo" se aggancia conti o ha un saldo reale; altrimenti è aggiunta a mano.
                     const isCons = (v) => (v.conti || []).length > 0 || Math.abs(actualVoce(v)) > 0.005;
                     const ricCons = eco.filter(v => v.natura === "ricavo" && isCons(v));
@@ -11754,7 +11791,12 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                             </div>
                           )}
                         </td>
-                        {showAct && <td className="num" style={{ fontWeight: 600 }}>{fmt(act)}</td>}
+                        {(showAct || addAct) && <td className="num" style={{ fontWeight: 600 }}>{fmt(act)}</td>}
+                        {addAct && !showAct && (() => {
+                          const fore = foreVoce(v, addAct, act);
+                          const q = Math.abs(fore) > 0.005 ? act / fore : null;
+                          return <td className="num" style={{ fontSize: 12, color: "var(--ink-3)" }}>{q === null ? "—" : Math.round(q * 100) + "%"}</td>;
+                        })()}
                         {showAct && <td className={"num " + (!hasAct ? "" : scost < -0.005 ? "neg" : scost > 0.005 ? "pos" : "")}>{hasAct ? fmt(scost) : "—"}</td>}
                         <td><button className="btn ghost sm" onClick={() => delVoce(v.id)}>✕</button></td>
                       </tr>
@@ -11785,7 +11827,10 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
                       <td style={{ fontSize: 11, color: "var(--ink-3)", fontWeight: 400 }}>
                         {totali.nReal ? `${totali.nReal} spuntate` : ""}
                       </td>
-                      {showAct && <td className="num">{fmt(totali.actRis)}</td>}
+                      {(showAct || addAct) && <td className="num">{fmt(totali.actRis)}</td>}
+                      {addAct && !showAct && <td className="num" style={{ fontSize: 12, color: "var(--ink-3)" }}>
+                        {Math.abs(totali.effRis) > 0.005 ? Math.round((totali.actRis / totali.effRis) * 100) + "%" : "—"}
+                      </td>}
                       {showAct && <td className={"num " + ((totali.actRis - totali.budRis) < 0 ? "neg" : "pos")}>{fmt(totali.actRis - totali.budRis)}</td>}
                       <td></td>
                     </tr>
