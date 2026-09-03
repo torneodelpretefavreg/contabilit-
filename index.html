@@ -11921,13 +11921,23 @@ function PageBudget({ conti, movimenti, saldiIniziali, bu, stagione, onToast }) 
 // PAGINA: SCHEMA DI BILANCIO (prospetti civilistici)
 // Separa il piano dei conti GESTIONALE (per registrare) dallo
 // SCHEMA DI BILANCIO (per esporre). Ogni voce di schema raccoglie
-// uno o piu' conti, ciascuno con segno +1 (somma) o -1 (rettifica,
-// es. fondi ammortamento portati a diretta deduzione del cespite).
+// uno o piu' conti, ciascuno con segno +1 (naturale) o -1 (invertito).
+// Comprende Stato Patrimoniale, Conto Economico e Rendiconto
+// Finanziario a tre aree (metodo diretto e indiretto).
 // Salvataggio: stagioni/{stagione}/schemaBilancio/json (stringa JSON,
 // per evitare le conversioni array->oggetto di Realtime Database).
 // ============================================================
 
 const SB_PATH = (stag) => `stagioni/${stag}/schemaBilancio`;
+
+const SB_NATURE = [
+  ["liquidita",        "Disponibilita' liquide"],
+  ["circolante",       "Capitale circolante (crediti/debiti)"],
+  ["immobilizzazioni", "Immobilizzazioni (costo storico)"],
+  ["fondo",            "Fondi ammortamento (non monetari)"],
+  ["patrimonio",       "Patrimonio netto e finanziamenti"],
+  ["economico",        "Conto economico"],
+];
 
 // --- schema civilistico di default (art. 2424 / 2425 in forma abbreviata) ---
 function schemaDefault() {
@@ -11982,12 +11992,41 @@ function schemaDefault() {
         v("", "Imposte correnti"),
       ]},
     ],
+    rf: {
+      aree: [
+        { id: uid(), codice: "A", nome: "Flusso della gestione operativa", categorie: [] },
+        { id: uid(), codice: "B", nome: "Flusso dell'attivita' di investimento", categorie: [] },
+        { id: uid(), codice: "C", nome: "Flusso dell'attivita' di finanziamento", categorie: [] },
+      ],
+      natura: {},   // { codiceConto: "liquidita" | "circolante" | ... }
+    },
   };
+}
+
+// Garantisce che uno schema caricato da Firebase abbia tutte le sezioni.
+function normalizzaSchema(s) {
+  const d = schemaDefault();
+  const out = { sp: s.sp || d.sp, ce: s.ce || d.ce, rf: s.rf || d.rf };
+  out.rf.aree = out.rf.aree || d.rf.aree;
+  out.rf.natura = out.rf.natura || {};
+  return out;
+}
+
+// Natura di default di un conto, dedotta dalla categoria del piano dei conti.
+function naturaAuto(conto) {
+  const cat = ((conto && conto.categoria) || "").toUpperCase();
+  if (cat === "DISP. LIQUIDE") return "liquidita";
+  if (cat === "IMM. MATERIALI" || cat === "IMM. IMMATERIALI") return "immobilizzazioni";
+  if (cat === "RETTIFICA ATTIVO") return "fondo";
+  if (cat === "PN") return "patrimonio";
+  if (cat === "CREDITI" || cat === "DEBITI" || cat === "CONTO TRANSITORIO") return "circolante";
+  if (cat === "RICAVI" || cat === "COSTI" || cat === "COSTI/RICAVI") return "economico";
+  return "circolante";
 }
 
 // Proposta di mappatura automatica: assegna i conti alle voci in base
 // alla categoria del piano dei conti. I fondi ammortamento vanno alla
-// stessa voce del cespite che rettificano, con segno -1.
+// stessa voce del cespite che rettificano.
 function proponiMappatura(schema, conti) {
   const s = JSON.parse(JSON.stringify(schema));
   const trova = (prosp, nomeVoce) => {
@@ -12057,51 +12096,39 @@ function proponiMappatura(schema, conti) {
 
 // Calcola i valori dei prospetti a partire dallo schema e dai mastrini.
 // Convenzione: saldo = dare - avere.
-//  - classi orientate DARE (attivo, costi)  -> valore = +saldo * segnoConto
+//  - classi orientate DARE (attivo, costi)   -> valore = +saldo * segnoConto
 //  - classi orientate AVERE (passivo, ricavi) -> valore = -saldo * segnoConto
 function calcolaProspetti(schema, mastrini) {
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
-  const saldi = {};
-  (mastrini || []).forEach(m => { saldi[Number(m.codice)] = m.saldo; });
-  const nomiConto = {};
-  (mastrini || []).forEach(m => { nomiConto[Number(m.codice)] = (m.nome || "").trim(); });
+  const saldi = {}, nomiConto = {};
+  (mastrini || []).forEach(m => {
+    saldi[Number(m.codice)] = m.saldo;
+    nomiConto[Number(m.codice)] = (m.nome || "").trim();
+  });
 
-  const valoreVoce = (voce, orient) => {
-    let tot = 0;
-    (voce.conti || []).forEach(x => {
-      const s = saldi[Number(x.c)] || 0;
-      tot += (orient === "dare" ? s : -s) * (Number(x.s) || 1);
-    });
-    return r2(tot);
-  };
+  const dettaglioDi = (voce, orient) => (voce.conti || []).map(x => ({
+    c: Number(x.c), s: Number(x.s) || 1, nome: nomiConto[Number(x.c)] || `Conto ${x.c}`,
+    valore: r2(((orient === "dare" ? 1 : -1) * (saldi[Number(x.c)] || 0)) * (Number(x.s) || 1)),
+  }));
+  const valoreVoce = (voce, orient) =>
+    r2(dettaglioDi(voce, orient).reduce((s, d) => s + d.valore, 0));
 
-  // --- CE ---
   const ce = (schema.ce || []).map(cl => {
     const orient = cl.segno >= 0 ? "avere" : "dare";
     const voci = (cl.voci || []).map(v => ({
-      ...v, valore: valoreVoce(v, orient),
-      dettaglio: (v.conti || []).map(x => ({
-        c: Number(x.c), s: Number(x.s) || 1, nome: nomiConto[Number(x.c)] || `Conto ${x.c}`,
-        valore: r2(((orient === "dare" ? 1 : -1) * (saldi[Number(x.c)] || 0)) * (Number(x.s) || 1)),
-      })),
+      ...v, valore: valoreVoce(v, orient), dettaglio: dettaglioDi(v, orient),
     }));
     return { ...cl, voci, totale: r2(voci.reduce((s, v) => s + v.valore, 0)) };
   });
   const risultato = r2(ce.reduce((s, cl) => s + (cl.segno >= 0 ? cl.totale : -cl.totale), 0));
 
-  // --- SP ---
   const sp = (schema.sp || []).map(cl => {
     const orient = cl.lato === "attivo" ? "dare" : "avere";
-    const voci = (cl.voci || []).map(v => {
-      const val = v.speciale === "risultato" ? risultato : valoreVoce(v, orient);
-      return {
-        ...v, valore: val,
-        dettaglio: v.speciale === "risultato" ? [] : (v.conti || []).map(x => ({
-          c: Number(x.c), s: Number(x.s) || 1, nome: nomiConto[Number(x.c)] || `Conto ${x.c}`,
-          valore: r2(((orient === "dare" ? 1 : -1) * (saldi[Number(x.c)] || 0)) * (Number(x.s) || 1)),
-        })),
-      };
-    });
+    const voci = (cl.voci || []).map(v => ({
+      ...v,
+      valore: v.speciale === "risultato" ? risultato : valoreVoce(v, orient),
+      dettaglio: v.speciale === "risultato" ? [] : dettaglioDi(v, orient),
+    }));
     return { ...cl, voci, totale: r2(voci.reduce((s, v) => s + v.valore, 0)) };
   });
   const totAttivo  = r2(sp.filter(c => c.lato === "attivo").reduce((s, c) => s + c.totale, 0));
@@ -12110,7 +12137,7 @@ function calcolaProspetti(schema, mastrini) {
   return { sp, ce, risultato, totAttivo, totPassivo, sbilancio: r2(totAttivo - totPassivo) };
 }
 
-// Controlli: conti movimentati non assegnati, conti assegnati piu' volte, quadrature.
+// Controlli: conti movimentati non assegnati, conti assegnati piu' volte.
 function controlliSchema(schema, mastrini, esclusi) {
   const assegnati = {};
   ["sp","ce"].forEach(p => (schema[p] || []).forEach(cl => (cl.voci || []).forEach(v =>
@@ -12130,13 +12157,254 @@ function controlliSchema(schema, mastrini, esclusi) {
   return { mancanti, doppi, assegnati };
 }
 
+// ---------- RENDICONTO FINANZIARIO ----------
+
+// Metodo DIRETTO: raggruppa i flussi monetari per categoria di movimento
+// e li porta nell'area a cui la categoria e' assegnata.
+function rendicontoDiretto(schema, movimenti, saldiIniziali) {
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const aree = (schema.rf?.aree || []).map(a => ({ ...a, categorie: a.categorie || [], voci: {}, totale: 0 }));
+  const mappaCat = {};
+  aree.forEach(a => (a.categorie || []).forEach(c => { mappaCat[c] = a.id; }));
+  const primaArea = aree[0];
+  const nonAssegnate = new Set();
+
+  (movimenti || []).forEach(m => {
+    if (isAperturaMov(m)) return;      // le aperture non sono flussi del periodo
+    if (m.nonMonetario) return;        // ammortamenti e rettifiche: nessun effetto di cassa
+    if (m.tipo !== "entrata" && m.tipo !== "uscita") return;   // i giroconti si compensano
+    const cat = m.categoria || "(senza categoria)";
+    const areaId = mappaCat[cat];
+    if (!areaId) nonAssegnate.add(cat);
+    const area = aree.find(a => a.id === areaId) || primaArea;
+    if (!area) return;
+    const v = (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
+    area.voci[cat] = (area.voci[cat] || 0) + v;
+  });
+
+  aree.forEach(a => {
+    a.righe = Object.entries(a.voci)
+      .map(([cat, val]) => ({ cat, val: r2(val) }))
+      .sort((x, y) => x.cat.localeCompare(y.cat));
+    a.totale = r2(a.righe.reduce((s, r) => s + r.val, 0));
+  });
+
+  // disponibilita' iniziali = saldi iniziali dei conti di liquidita' + aperture monetarie
+  const liqSet = new Set(CONTI_LIQUIDITA.map(c => c.codice));
+  let apertura = CONTI_LIQUIDITA.reduce((s, c) => s + (Number(saldiIniziali && saldiIniziali[c.codice]) || 0), 0);
+  (movimenti || []).forEach(m => {
+    if (!isAperturaMov(m) || m.contoLiquidita == null || !liqSet.has(Number(m.contoLiquidita))) return;
+    apertura += (m.tipo === "entrata" ? 1 : m.tipo === "uscita" ? -1 : 0) * (Number(m.importo) || 0);
+  });
+
+  const variazione = r2(aree.reduce((s, a) => s + a.totale, 0));
+  return {
+    aree, apertura: r2(apertura), variazione, chiusura: r2(apertura + variazione),
+    nonAssegnate: [...nonAssegnate].sort(),
+  };
+}
+
+// Metodo INDIRETTO: ricostruito dalle variazioni dei saldi patrimoniali.
+// Vale l'identita' contabile: la somma delle variazioni di TUTTI i conti e' zero,
+// quindi la variazione di liquidita' e' l'opposto della somma delle variazioni
+// di tutti i conti non liquidi. La scomposizione per natura da' le tre aree.
+function rendicontoIndiretto(schema, mastriniFin, mastriniIni, contiMap) {
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const ini = {};
+  (mastriniIni || []).forEach(m => { ini[Number(m.codice)] = m.saldo; });
+  const natMap = (schema.rf && schema.rf.natura) || {};
+  const nat = (cod) => natMap[String(cod)] || naturaAuto(contiMap[cod]);
+
+  const b = { liquidita: 0, circolante: 0, immobilizzazioni: 0, fondo: 0, patrimonio: 0, economico: 0 };
+  const dettagli = { circolante: [], immobilizzazioni: [], fondo: [], patrimonio: [] };
+
+  (mastriniFin || []).forEach(m => {
+    const cod = Number(m.codice);
+    const delta = (m.saldo || 0) - (ini[cod] || 0);
+    if (Math.abs(delta) < 0.005) return;
+    const n = nat(cod);
+    if (b[n] === undefined) return;
+    b[n] += delta;
+    if (dettagli[n]) dettagli[n].push({ codice: cod, nome: (m.nome || "").trim(), val: r2(-delta) });
+  });
+
+  const risultato   = r2(-b.economico);
+  const ammortamenti = r2(-b.fondo);
+  const varCircolante = r2(-b.circolante);
+  const operativo   = r2(risultato + ammortamenti + varCircolante);
+  const investimenti = r2(-b.immobilizzazioni);
+  const finanziamenti = r2(-b.patrimonio);
+  const variazione  = r2(operativo + investimenti + finanziamenti);
+
+  Object.values(dettagli).forEach(l => l.sort((a, c) => Math.abs(c.val) - Math.abs(a.val)));
+
+  return {
+    risultato, ammortamenti, varCircolante, operativo, investimenti, finanziamenti,
+    variazione, variazioneLiquidita: r2(b.liquidita), dettagli,
+  };
+}
+
+// ---------- EDITOR (componenti a livello di modulo: NON ricrearli dentro il
+// render della pagina, altrimenti React rimonta gli input a ogni carattere) ----------
+
+function SBPillConto({ x, nome, onSegno, onRimuovi }) {
+  const neg = Number(x.s) < 0;
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12,
+      background: neg ? "#fbecec" : "var(--bg)", border: "1px solid var(--rule-2)",
+      borderRadius: 20, padding: "3px 8px",
+    }}>
+      <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>{String(x.c).padStart(2, "0")}</b>
+      <span>{nome}</span>
+      <button className="icon-btn" onClick={onSegno} style={{ fontWeight: 700, color: neg ? "var(--danger)" : "var(--accent)" }}
+              title={neg ? "Segno invertito: clicca per tornare al naturale" : "Segno naturale: clicca per invertire"}>
+        {neg ? "−" : "+"}
+      </button>
+      <button className="icon-btn" onClick={onRimuovi} title="Rimuovi">✕</button>
+    </span>
+  );
+}
+
+function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati }) {
+  return (
+    <div style={{ borderLeft: "2px solid var(--rule-2)", paddingLeft: 10, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <input value={v.codice || ""} onChange={e => api.updVoce(p, cl.id, v.id, { codice: e.target.value })}
+               style={{ width: 42, textAlign: "center" }} placeholder="I" />
+        <input value={v.nome || ""} onChange={e => api.updVoce(p, cl.id, v.id, { nome: e.target.value })}
+               style={{ flex: 1, minWidth: 150 }} />
+        <button className="btn ghost sm" onClick={() => api.moveVoce(p, cl.id, v.id, -1)}>↑</button>
+        <button className="btn ghost sm" onClick={() => api.moveVoce(p, cl.id, v.id, 1)}>↓</button>
+        <button className="btn danger sm" onClick={() => api.delVoce(p, cl.id, v.id)}>✕</button>
+      </div>
+
+      {v.speciale === "risultato" ? (
+        <div style={{ fontSize: 12, color: "var(--accent)", margin: "6px 0 0 4px", fontStyle: "italic" }}>
+          Voce calcolata: riporta il risultato del Conto Economico. Non assegnare conti.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "6px 0 0 4px" }}>
+            {(v.conti || []).map(x => (
+              <SBPillConto key={x.c} x={x}
+                nome={(contiMap[x.c]?.nome || "").trim() || `Conto ${x.c}`}
+                onSegno={() => api.updConto(p, cl.id, v.id, x.c, Number(x.s) < 0 ? 1 : -1)}
+                onRimuovi={() => api.delConto(p, cl.id, v.id, x.c)} />
+            ))}
+          </div>
+          <div style={{ marginTop: 6, marginLeft: 4 }}>
+            <select value="" onChange={e => { api.addConto(p, cl.id, v.id, e.target.value, 1); e.target.value = ""; }}
+                    style={{ fontSize: 12, maxWidth: 340 }}>
+              <option value="">+ aggiungi conto…</option>
+              {contiOrdinati.map(m => (
+                <option key={m.codice} value={m.codice}>
+                  {String(m.codice).padStart(2, "0")} · {(m.nome || "").trim()} · {fmt(m.saldo)}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati }) {
+  return (
+    <div style={{ border: "1px solid var(--rule)", borderRadius: 8, marginBottom: 12, background: "var(--panel)" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px",
+                    background: "var(--panel-2)", borderBottom: "1px solid var(--rule)", flexWrap: "wrap" }}>
+        <input value={cl.codice || ""} onChange={e => api.updClasse(p, cl.id, { codice: e.target.value })}
+               style={{ width: 46, textAlign: "center", fontWeight: 700 }} placeholder="A" />
+        <input value={cl.nome || ""} onChange={e => api.updClasse(p, cl.id, { nome: e.target.value })}
+               style={{ flex: 1, minWidth: 160, fontWeight: 600 }} />
+        {p === "sp" ? (
+          <select value={cl.lato} onChange={e => api.updClasse(p, cl.id, { lato: e.target.value })} style={{ width: 118 }}>
+            <option value="attivo">Attivo</option>
+            <option value="passivo">Passivo/PN</option>
+          </select>
+        ) : (
+          <select value={cl.segno} onChange={e => api.updClasse(p, cl.id, { segno: Number(e.target.value) })} style={{ width: 132 }}>
+            <option value={1}>Positiva (+)</option>
+            <option value={-1}>Negativa (−)</option>
+          </select>
+        )}
+        <button className="btn ghost sm" onClick={() => api.moveClasse(p, cl.id, -1)} title="Sposta su">↑</button>
+        <button className="btn ghost sm" onClick={() => api.moveClasse(p, cl.id, 1)} title="Sposta giù">↓</button>
+        <button className="btn danger sm" onClick={() => api.delClasse(p, cl.id)} title="Elimina">✕</button>
+      </div>
+      <div style={{ padding: "8px 12px 12px" }}>
+        {(cl.voci || []).length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--ink-3)", padding: "6px 0" }}>Nessuna voce.</div>
+        )}
+        {(cl.voci || []).map(v => (
+          <SBEditorVoce key={v.id} p={p} cl={cl} v={v} api={api}
+                        contiMap={contiMap} contiOrdinati={contiOrdinati} />
+        ))}
+        <button className="btn ghost sm" onClick={() => api.addVoce(p, cl.id)}>+ Voce</button>
+      </div>
+    </div>
+  );
+}
+
+function SBEditorArea({ area, api, categorieTutte, assegnateAltrove }) {
+  return (
+    <div style={{ border: "1px solid var(--rule)", borderRadius: 8, marginBottom: 12, background: "var(--panel)" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px",
+                    background: "var(--panel-2)", borderBottom: "1px solid var(--rule)", flexWrap: "wrap" }}>
+        <input value={area.codice || ""} onChange={e => api.updArea(area.id, { codice: e.target.value })}
+               style={{ width: 46, textAlign: "center", fontWeight: 700 }} />
+        <input value={area.nome || ""} onChange={e => api.updArea(area.id, { nome: e.target.value })}
+               style={{ flex: 1, minWidth: 200, fontWeight: 600 }} />
+        <button className="btn ghost sm" onClick={() => api.moveArea(area.id, -1)}>↑</button>
+        <button className="btn ghost sm" onClick={() => api.moveArea(area.id, 1)}>↓</button>
+        <button className="btn danger sm" onClick={() => api.delArea(area.id)}>✕</button>
+      </div>
+      <div style={{ padding: "8px 12px 12px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {(area.categorie || []).map(c => (
+            <span key={c} style={{
+              display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12,
+              background: "var(--bg)", border: "1px solid var(--rule-2)", borderRadius: 20, padding: "3px 8px",
+            }}>
+              {c}
+              <button className="icon-btn" onClick={() => api.delCatArea(area.id, c)}>✕</button>
+            </span>
+          ))}
+          {(area.categorie || []).length === 0 && (
+            <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Nessuna categoria assegnata.</span>
+          )}
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <select value="" onChange={e => { api.addCatArea(area.id, e.target.value); e.target.value = ""; }}
+                  style={{ fontSize: 12, maxWidth: 340 }}>
+            <option value="">+ assegna categoria…</option>
+            {categorieTutte.filter(c => !assegnateAltrove.has(c)).map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- PAGINA ----------
+
 function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast }) {
-  const [tab, setTab] = useState("sp");        // sp | ce | prospetti | controlli
+  const [tab, setTab] = useState("sp");   // sp | ce | rf | prospetti | controlli
   const [schema, setSchema] = useState(null);
   const [esclusi, setEsclusi] = useState([]);
   const [caricato, setCaricato] = useState(false);
   const [salvando, setSalvando] = useState(false);
-  const [espansi, setEspansi] = useState({});   // dettaglio conti in anteprima
+  const [espansi, setEspansi] = useState({});
+
+  const statoRef = useRef({ schema: null, esclusi: [] });
+  const timerRef = useRef(null);
+  const pendingRef = useRef(false);
+  const scrittoRef = useRef(null);
+  statoRef.current = { schema, esclusi };
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -12154,16 +12422,35 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     })).sort((a, b) => a.codice - b.codice);
   }, [movimenti, saldiIniziali, contiMap]);
 
-  // --- caricamento da Firebase ---
+  // saldi di apertura: solo le scritture di riapertura + i saldi iniziali
+  const mastriniIniziali = useMemo(() => {
+    const soloAperture = (movimenti || []).filter(isAperturaMov);
+    return calcolaMastrini(generaLibroGiornale(soloAperture, saldiIniziali, contiMap));
+  }, [movimenti, saldiIniziali, contiMap]);
+
+  const categorieTutte = useMemo(() => {
+    const s = new Set();
+    (movimenti || []).forEach(m => {
+      if (isAperturaMov(m) || m.nonMonetario) return;
+      if (m.tipo !== "entrata" && m.tipo !== "uscita") return;
+      s.add(m.categoria || "(senza categoria)");
+    });
+    return [...s].sort();
+  }, [movimenti]);
+
+  // --- caricamento ---
   useEffect(() => {
     if (!firebaseReady || !stagione) { setSchema(schemaDefault()); setCaricato(true); return; }
     const ref = db.ref(SB_PATH(stagione));
     const cb = ref.on("value", snap => {
       const v = snap.val();
+      // non sovrascrivo mentre l'utente sta scrivendo, ne' sull'eco delle mie scritture
+      if (pendingRef.current) return;
+      if (v && v.json && v.json === scrittoRef.current) { setCaricato(true); return; }
       if (v && v.json) {
         try {
           const parsed = JSON.parse(v.json);
-          setSchema(parsed.schema || parsed);
+          setSchema(normalizzaSchema(parsed.schema || parsed));
           setEsclusi(parsed.esclusi || []);
         } catch (e) { setSchema(schemaDefault()); }
       } else {
@@ -12171,283 +12458,252 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       }
       setCaricato(true);
     });
-    return () => ref.off("value", cb);
+    return () => { ref.off("value", cb); clearTimeout(timerRef.current); };
   }, [stagione]);
 
-  const salva = async (nuovoSchema, nuoviEsclusi) => {
-    const sc = nuovoSchema || schema;
-    const es = nuoviEsclusi !== undefined ? nuoviEsclusi : esclusi;
-    setSchema(sc); if (nuoviEsclusi !== undefined) setEsclusi(es);
-    if (!firebaseReady || !stagione) return;
+  const scriviOra = useCallback(async () => {
+    clearTimeout(timerRef.current);
+    const { schema: sc, esclusi: es } = statoRef.current;
+    if (!sc) { pendingRef.current = false; return; }
+    if (!firebaseReady || !stagione) { pendingRef.current = false; return; }
+    const json = JSON.stringify({ schema: sc, esclusi: es });
     setSalvando(true);
     try {
-      await db.ref(SB_PATH(stagione)).set({
-        json: JSON.stringify({ schema: sc, esclusi: es }),
-        aggiornatoIl: new Date().toISOString(),
-      });
+      scrittoRef.current = json;
+      await db.ref(SB_PATH(stagione)).set({ json, aggiornatoIl: new Date().toISOString() });
     } catch (e) {
       onToast && onToast("Errore nel salvataggio dello schema");
     }
+    pendingRef.current = false;
     setSalvando(false);
-  };
+  }, [stagione, onToast]);
 
-  const prospetti = useMemo(
-    () => schema ? calcolaProspetti(schema, mastrini) : null,
-    [schema, mastrini]
-  );
-  const controlli = useMemo(
-    () => schema ? controlliSchema(schema, mastrini, esclusi) : null,
-    [schema, mastrini, esclusi]
-  );
+  // aggiorna lo stato locale subito (l'input resta reattivo) e salva in differita
+  const aggiorna = useCallback((sc, es) => {
+    setSchema(sc);
+    if (es !== undefined) setEsclusi(es);
+    statoRef.current = { schema: sc, esclusi: es !== undefined ? es : statoRef.current.esclusi };
+    pendingRef.current = true;
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => scriviOra(), 800);
+  }, [scriviOra]);
+
+  const prospetti = useMemo(() => schema ? calcolaProspetti(schema, mastrini) : null, [schema, mastrini]);
+  const controlli = useMemo(() => schema ? controlliSchema(schema, mastrini, esclusi) : null, [schema, mastrini, esclusi]);
+  const rfDir = useMemo(() => schema ? rendicontoDiretto(schema, movimenti, saldiIniziali) : null, [schema, movimenti, saldiIniziali]);
+  const rfInd = useMemo(() => schema ? rendicontoIndiretto(schema, mastrini, mastriniIniziali, contiMap) : null,
+    [schema, mastrini, mastriniIniziali, contiMap]);
 
   if (!caricato || !schema) return <div className="empty-state">Caricamento schema…</div>;
 
   // ---------- mutatori ----------
-  const clone = () => JSON.parse(JSON.stringify(schema));
+  const clone = () => JSON.parse(JSON.stringify(statoRef.current.schema));
+  const api = {
+    updClasse: (p, id, patch) => { const s = clone(); const cl = s[p].find(c => c.id === id); if (cl) { Object.assign(cl, patch); aggiorna(s); } },
+    delClasse: (p, id) => {
+      const s0 = statoRef.current.schema;
+      const cl = s0[p].find(c => c.id === id);
+      const n = (cl?.voci || []).reduce((a, v) => a + (v.conti || []).length, 0);
+      if (!confirm(`Eliminare la macroclasse "${cl?.nome}"?${n ? ` ${n} conti torneranno non assegnati.` : ""}`)) return;
+      const s = clone(); s[p] = s[p].filter(c => c.id !== id); aggiorna(s);
+    },
+    moveClasse: (p, id, dir) => {
+      const s = clone(); const i = s[p].findIndex(c => c.id === id); const j = i + dir;
+      if (i < 0 || j < 0 || j >= s[p].length) return;
+      [s[p][i], s[p][j]] = [s[p][j], s[p][i]]; aggiorna(s);
+    },
+    addVoce: (p, clId) => { const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      cl.voci = cl.voci || []; cl.voci.push({ id: uid(), codice: "", nome: "Nuova voce", conti: [] }); aggiorna(s); },
+    updVoce: (p, clId, vId, patch) => { const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      const v = (cl.voci || []).find(x => x.id === vId); if (!v) return; Object.assign(v, patch); aggiorna(s); },
+    delVoce: (p, clId, vId) => { const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      cl.voci = (cl.voci || []).filter(x => x.id !== vId); aggiorna(s); },
+    moveVoce: (p, clId, vId, dir) => { const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      const i = cl.voci.findIndex(x => x.id === vId); const j = i + dir;
+      if (i < 0 || j < 0 || j >= cl.voci.length) return;
+      [cl.voci[i], cl.voci[j]] = [cl.voci[j], cl.voci[i]]; aggiorna(s); },
+    addConto: (p, clId, vId, codice, segno) => { if (!codice) return;
+      const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
+      v.conti = v.conti || [];
+      if (v.conti.some(x => Number(x.c) === Number(codice))) return;
+      v.conti.push({ c: Number(codice), s: Number(segno) || 1 }); aggiorna(s); },
+    updConto: (p, clId, vId, codice, segno) => { const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
+      const x = (v.conti || []).find(y => Number(y.c) === Number(codice)); if (!x) return;
+      x.s = Number(segno); aggiorna(s); },
+    delConto: (p, clId, vId, codice) => { const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
+      const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
+      v.conti = (v.conti || []).filter(y => Number(y.c) !== Number(codice)); aggiorna(s); },
+    updArea: (id, patch) => { const s = clone(); const a = s.rf.aree.find(x => x.id === id); if (a) { Object.assign(a, patch); aggiorna(s); } },
+    delArea: (id) => { if (!confirm("Eliminare l'area?")) return;
+      const s = clone(); s.rf.aree = s.rf.aree.filter(x => x.id !== id); aggiorna(s); },
+    moveArea: (id, dir) => { const s = clone(); const i = s.rf.aree.findIndex(x => x.id === id); const j = i + dir;
+      if (i < 0 || j < 0 || j >= s.rf.aree.length) return;
+      [s.rf.aree[i], s.rf.aree[j]] = [s.rf.aree[j], s.rf.aree[i]]; aggiorna(s); },
+    addCatArea: (id, cat) => { if (!cat) return; const s = clone();
+      s.rf.aree.forEach(a => { a.categorie = (a.categorie || []).filter(c => c !== cat); });
+      const a = s.rf.aree.find(x => x.id === id); if (!a) return;
+      a.categorie = [...(a.categorie || []), cat].sort(); aggiorna(s); },
+    delCatArea: (id, cat) => { const s = clone(); const a = s.rf.aree.find(x => x.id === id); if (!a) return;
+      a.categorie = (a.categorie || []).filter(c => c !== cat); aggiorna(s); },
+    setNatura: (cod, n) => { const s = clone(); s.rf.natura = s.rf.natura || {}; s.rf.natura[String(cod)] = n; aggiorna(s); },
+  };
 
-  const addClasse = (p) => {
-    const s = clone();
-    s[p].push(p === "sp"
-      ? { id: uid(), codice: "", nome: "Nuova macroclasse", lato: "attivo", voci: [] }
-      : { id: uid(), codice: "", nome: "Nuova macroclasse", segno: 1, voci: [] });
-    salva(s);
-  };
-  const updClasse = (p, id, patch) => {
-    const s = clone();
-    const cl = s[p].find(c => c.id === id); if (!cl) return;
-    Object.assign(cl, patch); salva(s);
-  };
-  const delClasse = (p, id) => {
-    const cl = schema[p].find(c => c.id === id);
-    const n = (cl?.voci || []).reduce((a, v) => a + (v.conti || []).length, 0);
-    if (!confirm(`Eliminare la macroclasse "${cl?.nome}"?${n ? ` ${n} conti torneranno non assegnati.` : ""}`)) return;
-    const s = clone(); s[p] = s[p].filter(c => c.id !== id); salva(s);
-  };
-  const moveClasse = (p, id, dir) => {
-    const s = clone(); const i = s[p].findIndex(c => c.id === id);
-    const j = i + dir; if (i < 0 || j < 0 || j >= s[p].length) return;
-    [s[p][i], s[p][j]] = [s[p][j], s[p][i]]; salva(s);
-  };
-  const addVoce = (p, clId) => {
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    cl.voci = cl.voci || []; cl.voci.push({ id: uid(), codice: "", nome: "Nuova voce", conti: [] }); salva(s);
-  };
-  const updVoce = (p, clId, vId, patch) => {
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
-    Object.assign(v, patch); salva(s);
-  };
-  const delVoce = (p, clId, vId) => {
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    cl.voci = (cl.voci || []).filter(x => x.id !== vId); salva(s);
-  };
-  const moveVoce = (p, clId, vId, dir) => {
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    const i = cl.voci.findIndex(x => x.id === vId); const j = i + dir;
-    if (i < 0 || j < 0 || j >= cl.voci.length) return;
-    [cl.voci[i], cl.voci[j]] = [cl.voci[j], cl.voci[i]]; salva(s);
-  };
-  const addConto = (p, clId, vId, codice, segno) => {
-    if (!codice) return;
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
-    v.conti = v.conti || [];
-    if (v.conti.some(x => Number(x.c) === Number(codice))) return;
-    v.conti.push({ c: Number(codice), s: Number(segno) || 1 }); salva(s);
-  };
-  const updConto = (p, clId, vId, codice, segno) => {
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
-    const x = (v.conti || []).find(y => Number(y.c) === Number(codice)); if (!x) return;
-    x.s = Number(segno); salva(s);
-  };
-  const delConto = (p, clId, vId, codice) => {
-    const s = clone(); const cl = s[p].find(c => c.id === clId); if (!cl) return;
-    const v = (cl.voci || []).find(x => x.id === vId); if (!v) return;
-    v.conti = (v.conti || []).filter(y => Number(y.c) !== Number(codice)); salva(s);
-  };
+  const contiOrdinati = [...mastrini].sort((a, b) => a.codice - b.codice);
+  const assegnateAltrove = new Set();
+  (schema.rf?.aree || []).forEach(a => (a.categorie || []).forEach(c => assegnateAltrove.add(c)));
 
   const resetSchema = () => {
-    if (!confirm("Ripristinare lo schema civilistico di default? Tutte le assegnazioni verranno perse.")) return;
-    salva(schemaDefault(), []);
+    if (!confirm("Ripristinare lo schema di default? Tutte le assegnazioni verranno perse.")) return;
+    aggiorna(schemaDefault(), []);
     onToast && onToast("Schema reimpostato");
   };
   const autoMappa = () => {
-    const s = proponiMappatura(schema, conti);
-    salva(s);
-    onToast && onToast("Conti non ancora assegnati proposti automaticamente");
+    const s = proponiMappatura(statoRef.current.schema, conti);
+    // proposta anche per le aree del rendiconto: investimenti riconosciuti per nome
+    s.rf = s.rf || schemaDefault().rf;
+    const gia = new Set();
+    (s.rf.aree || []).forEach(a => (a.categorie || []).forEach(c => gia.add(c)));
+    const op = s.rf.aree[0], inv = s.rf.aree[1], fin = s.rf.aree[2];
+    categorieTutte.forEach(c => {
+      if (gia.has(c)) return;
+      const u = c.toUpperCase();
+      let dest = op;
+      if (u.includes("INVESTIMENT") || u.includes("CESPIT") || u.includes("IMMOBILIZZ")) dest = inv;
+      else if (u.includes("DIVIDEND") || u.includes("SOCI") || u.includes("FINANZIAMENT") || u.includes("CAPITALE")) dest = fin;
+      if (dest) dest.categorie = [...(dest.categorie || []), c].sort();
+    });
+    aggiorna(s);
+    onToast && onToast("Mappatura proposta per i conti e le categorie non ancora assegnati");
   };
-  const escludiConto = (cod) => salva(schema, [...new Set([...esclusi, Number(cod)])]);
-  const reincludiConto = (cod) => salva(schema, esclusi.filter(x => Number(x) !== Number(cod)));
+  const escludiConto = (cod) => aggiorna(statoRef.current.schema, [...new Set([...esclusi, Number(cod)])]);
+  const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
-  // ---------- export PDF dei prospetti ----------
+  // ---------- export PDF ----------
   const esportaPDF = () => {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const money = n => Number(n).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-    doc.setFont("helvetica", "bold"); doc.setFontSize(15);
-    doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
-    doc.setFont("helvetica", "normal"); doc.setFontSize(11);
-    doc.text(`Stato Patrimoniale - Esercizio ${stagione}`, 105, 25, { align: "center" });
-
-    const sezione = (lato, titolo, startY) => {
-      const body = [];
-      prospetti.sp.filter(c => c.lato === lato).forEach(cl => {
-        body.push([{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, colSpan: 1, styles: { fontStyle: "bold" } },
-                   { content: money(cl.totale), styles: { fontStyle: "bold", halign: "right" } }]);
-        (cl.voci || []).forEach(v => {
-          body.push([`      ${v.codice ? v.codice + ". " : ""}${v.nome}`, { content: money(v.valore), styles: { halign: "right" } }]);
-        });
-      });
-      doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-      doc.text(titolo, 14, startY);
+    const intestazione = (titolo) => {
+      doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+      doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
+      doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+      doc.text(`${titolo} - Esercizio ${stagione}`, 105, 25, { align: "center" });
+    };
+    const tabella = (body, startY) => {
       doc.autoTable({
-        startY: startY + 3, body,
+        startY, body, theme: "plain",
         styles: { fontSize: 9, cellPadding: 1.8 },
         columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
-        theme: "plain",
-        didParseCell: (d) => { if (d.row.index === 0) d.cell.styles.fillColor = [245, 244, 240]; },
       });
       return doc.lastAutoTable.finalY;
     };
 
+    // --- Stato Patrimoniale ---
+    intestazione("Stato Patrimoniale");
+    const sezione = (lato, titolo, startY) => {
+      const body = [];
+      prospetti.sp.filter(c => c.lato === lato).forEach(cl => {
+        body.push([{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
+                   { content: money(cl.totale), styles: { fontStyle: "bold", halign: "right" } }]);
+        (cl.voci || []).forEach(v => body.push([`      ${v.codice ? v.codice + ". " : ""}${v.nome}`,
+                   { content: money(v.valore), styles: { halign: "right" } }]));
+      });
+      doc.setFont("helvetica", "bold"); doc.setFontSize(11);
+      doc.text(titolo, 14, startY);
+      return tabella(body, startY + 3);
+    };
     let y = sezione("attivo", "ATTIVO", 36);
     doc.setFont("helvetica", "bold"); doc.setFontSize(10);
     doc.text("TOTALE ATTIVO", 14, y + 6);
     doc.text(money(prospetti.totAttivo), 196, y + 6, { align: "right" });
-
     y = sezione("passivo", "PASSIVO E PATRIMONIO NETTO", y + 16);
     doc.setFont("helvetica", "bold"); doc.setFontSize(10);
     doc.text("TOTALE PASSIVO E PATRIMONIO NETTO", 14, y + 6);
     doc.text(money(prospetti.totPassivo), 196, y + 6, { align: "right" });
     doc.setFont("helvetica", "normal"); doc.setFontSize(8);
-    doc.text(Math.abs(prospetti.sbilancio) < 0.01 ? "Quadratura: OK"
-      : `Sbilancio: ${money(prospetti.sbilancio)}`, 14, y + 12);
+    doc.text(Math.abs(prospetti.sbilancio) < 0.01 ? "Quadratura: OK" : `Sbilancio: ${money(prospetti.sbilancio)}`, 14, y + 12);
 
     // --- Conto Economico ---
-    doc.addPage();
-    doc.setFont("helvetica", "bold"); doc.setFontSize(15);
-    doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
-    doc.setFont("helvetica", "normal"); doc.setFontSize(11);
-    doc.text(`Conto Economico - Esercizio ${stagione}`, 105, 25, { align: "center" });
-
+    doc.addPage(); intestazione("Conto Economico");
     const bodyCE = [];
     prospetti.ce.forEach(cl => {
       bodyCE.push([{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
                    { content: money(cl.totale), styles: { fontStyle: "bold", halign: "right" } }]);
-      (cl.voci || []).forEach(v => {
-        bodyCE.push([`      ${v.codice ? v.codice + ") " : ""}${v.nome}`, { content: money(v.valore), styles: { halign: "right" } }]);
-      });
+      (cl.voci || []).forEach(v => bodyCE.push([`      ${v.codice ? v.codice + ") " : ""}${v.nome}`,
+                   { content: money(v.valore), styles: { halign: "right" } }]));
     });
-    doc.autoTable({
-      startY: 34, body: bodyCE,
-      styles: { fontSize: 9, cellPadding: 1.8 },
-      columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
-      theme: "plain",
-    });
-    const y2 = doc.lastAutoTable.finalY;
+    let y2 = tabella(bodyCE, 34);
     doc.setFillColor(26, 26, 26); doc.rect(14, y2 + 2, 182, 10, "F");
     doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(11);
     doc.text("RISULTATO D'ESERCIZIO", 16, y2 + 9);
     doc.text(`${money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, 194, y2 + 9, { align: "right" });
     doc.setTextColor(0);
 
+    // --- Rendiconto: metodo diretto ---
+    doc.addPage(); intestazione("Rendiconto Finanziario - Metodo diretto");
+    const bodyD = [];
+    rfDir.aree.forEach(a => {
+      bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold" } },
+                  { content: money(a.totale), styles: { fontStyle: "bold", halign: "right" } }]);
+      a.righe.forEach(r => bodyD.push([`      ${r.cat}`, { content: money(r.val), styles: { halign: "right" } }]));
+    });
+    bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
+                { content: money(rfDir.variazione), styles: { fontStyle: "bold", halign: "right" } }]);
+    bodyD.push(["Disponibilita' liquide iniziali", { content: money(rfDir.apertura), styles: { halign: "right" } }]);
+    bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
+                { content: money(rfDir.chiusura), styles: { fontStyle: "bold", halign: "right" } }]);
+    tabella(bodyD, 34);
+
+    // --- Rendiconto: metodo indiretto ---
+    doc.addPage(); intestazione("Rendiconto Finanziario - Metodo indiretto");
+    const bodyI = [
+      ["Risultato d'esercizio", { content: money(rfInd.risultato), styles: { halign: "right" } }],
+      ["Ammortamenti e rettifiche non monetarie", { content: money(rfInd.ammortamenti), styles: { halign: "right" } }],
+      ["Variazione del capitale circolante", { content: money(rfInd.varCircolante), styles: { halign: "right" } }],
+      [{ content: "A) Flusso della gestione operativa", styles: { fontStyle: "bold" } },
+       { content: money(rfInd.operativo), styles: { fontStyle: "bold", halign: "right" } }],
+      [{ content: "B) Flusso dell'attivita' di investimento", styles: { fontStyle: "bold" } },
+       { content: money(rfInd.investimenti), styles: { fontStyle: "bold", halign: "right" } }],
+      [{ content: "C) Flusso dell'attivita' di finanziamento", styles: { fontStyle: "bold" } },
+       { content: money(rfInd.finanziamenti), styles: { fontStyle: "bold", halign: "right" } }],
+      [{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE (A+B+C)", styles: { fontStyle: "bold" } },
+       { content: money(rfInd.variazione), styles: { fontStyle: "bold", halign: "right" } }],
+    ];
+    const y3 = tabella(bodyI, 34);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+    doc.text(`Riscontro con il metodo diretto: ${money(rfDir.variazione)} - differenza ${money(rfInd.variazione - rfDir.variazione)}`, 14, y3 + 8);
+
     doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
   };
 
-  // ---------- render helper: editor di una macroclasse ----------
-  const contiOrdinati = [...mastrini].sort((a, b) => a.codice - b.codice);
-
-  const EditorClasse = ({ p, cl }) => (
-    <div style={{ border: "1px solid var(--rule)", borderRadius: 8, marginBottom: 12, background: "var(--panel)" }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px",
-                    background: "var(--panel-2)", borderBottom: "1px solid var(--rule)", flexWrap: "wrap" }}>
-        <input value={cl.codice} onChange={e => updClasse(p, cl.id, { codice: e.target.value })}
-               style={{ width: 46, textAlign: "center", fontWeight: 700 }} placeholder="A" />
-        <input value={cl.nome} onChange={e => updClasse(p, cl.id, { nome: e.target.value })}
-               style={{ flex: 1, minWidth: 160, fontWeight: 600 }} />
-        {p === "sp" ? (
-          <select value={cl.lato} onChange={e => updClasse(p, cl.id, { lato: e.target.value })} style={{ width: 110 }}>
-            <option value="attivo">Attivo</option>
-            <option value="passivo">Passivo/PN</option>
-          </select>
-        ) : (
-          <select value={cl.segno} onChange={e => updClasse(p, cl.id, { segno: Number(e.target.value) })} style={{ width: 130 }}>
-            <option value={1}>Positiva (+)</option>
-            <option value={-1}>Negativa (−)</option>
-          </select>
-        )}
-        <button className="btn ghost sm" onClick={() => moveClasse(p, cl.id, -1)} title="Sposta su">↑</button>
-        <button className="btn ghost sm" onClick={() => moveClasse(p, cl.id, 1)} title="Sposta giù">↓</button>
-        <button className="btn danger sm" onClick={() => delClasse(p, cl.id)} title="Elimina">✕</button>
-      </div>
-
-      <div style={{ padding: "8px 12px 12px" }}>
-        {(cl.voci || []).length === 0 && (
-          <div style={{ fontSize: 12, color: "var(--ink-3)", padding: "6px 0" }}>Nessuna voce.</div>
-        )}
-        {(cl.voci || []).map(v => (
-          <div key={v.id} style={{ borderLeft: "2px solid var(--rule-2)", paddingLeft: 10, marginBottom: 10 }}>
-            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              <input value={v.codice} onChange={e => updVoce(p, cl.id, v.id, { codice: e.target.value })}
-                     style={{ width: 42, textAlign: "center" }} placeholder="I" />
-              <input value={v.nome} onChange={e => updVoce(p, cl.id, v.id, { nome: e.target.value })}
-                     style={{ flex: 1, minWidth: 150 }} />
-              <button className="btn ghost sm" onClick={() => moveVoce(p, cl.id, v.id, -1)}>↑</button>
-              <button className="btn ghost sm" onClick={() => moveVoce(p, cl.id, v.id, 1)}>↓</button>
-              <button className="btn danger sm" onClick={() => delVoce(p, cl.id, v.id)}>✕</button>
-            </div>
-
-            {v.speciale === "risultato" ? (
-              <div style={{ fontSize: 12, color: "var(--accent)", margin: "6px 0 0 4px", fontStyle: "italic" }}>
-                Voce calcolata: riporta automaticamente il risultato del Conto Economico. Non assegnare conti.
-              </div>
-            ) : (
-              <>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "6px 0 0 4px" }}>
-                  {(v.conti || []).map(x => {
-                    const nome = (contiMap[x.c]?.nome || "").trim() || `Conto ${x.c}`;
-                    const neg = Number(x.s) < 0;
-                    return (
-                      <span key={x.c} className="pill" style={{
-                        display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12,
-                        background: neg ? "var(--danger-soft, #fbecec)" : "var(--bg)",
-                        border: "1px solid var(--rule-2)", borderRadius: 20, padding: "3px 8px",
-                      }}>
-                        <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>{String(x.c).padStart(2, "0")}</b>
-                        <span>{nome}</span>
-                        <button className="icon-btn" title={neg ? "In rettifica (−): clicca per sommare" : "In somma (+): clicca per portare in rettifica"}
-                                onClick={() => updConto(p, cl.id, v.id, x.c, neg ? 1 : -1)}
-                                style={{ fontWeight: 700, color: neg ? "var(--danger)" : "var(--accent)" }}>
-                          {neg ? "−" : "+"}
-                        </button>
-                        <button className="icon-btn" onClick={() => delConto(p, cl.id, v.id, x.c)} title="Rimuovi">✕</button>
-                      </span>
-                    );
-                  })}
-                </div>
-                <div style={{ marginTop: 6, marginLeft: 4 }}>
-                  <select value="" onChange={e => { addConto(p, cl.id, v.id, e.target.value, 1); e.target.value = ""; }}
-                          style={{ fontSize: 12, maxWidth: 320 }}>
-                    <option value="">+ aggiungi conto…</option>
-                    {contiOrdinati.map(m => (
-                      <option key={m.codice} value={m.codice}>
-                        {String(m.codice).padStart(2, "0")} · {(m.nome || "").trim()} · {fmt(m.saldo)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </>
-            )}
-          </div>
-        ))}
-        <button className="btn ghost sm" onClick={() => addVoce(p, cl.id)}>+ Voce</button>
-      </div>
-    </div>
+  // ---------- render dei prospetti ----------
+  const rigaVoce = (v) => (
+    <React.Fragment key={v.id}>
+      <tr>
+        <td style={{ paddingLeft: 26, cursor: v.dettaglio.length ? "pointer" : "default" }}
+            onClick={() => v.dettaglio.length && setEspansi(p => ({ ...p, [v.id]: !p[v.id] }))}>
+          {v.dettaglio.length > 0 && <span style={{ color: "var(--ink-3)", marginRight: 6 }}>{espansi[v.id] ? "▾" : "▸"}</span>}
+          {v.codice ? v.codice + ". " : ""}{v.nome}
+          {v.speciale === "risultato" && <span style={{ color: "var(--ink-3)", fontSize: 11 }}> (da CE)</span>}
+        </td>
+        <td className="num">{fmt(v.valore)}</td>
+      </tr>
+      {espansi[v.id] && v.dettaglio.map(d => (
+        <tr key={d.c} style={{ fontSize: 12, color: "var(--ink-2)" }}>
+          <td style={{ paddingLeft: 52 }}>
+            <span className="mono">{String(d.c).padStart(2, "0")}</span> {d.nome}
+            {d.valore < 0 && <span style={{ color: "var(--danger)" }}> (in rettifica)</span>}
+          </td>
+          <td className="num">{fmt(d.valore)}</td>
+        </tr>
+      ))}
+    </React.Fragment>
   );
 
-  // ---------- render ----------
+  const diffRF = Math.round((rfInd.variazione - rfDir.variazione) * 100) / 100;
+
   return (
     <div>
       <div className="page-head">
@@ -12465,7 +12721,6 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         </div>
       </div>
 
-      {/* barra di stato quadrature */}
       <div className="kpi-grid" style={{ marginBottom: 16 }}>
         <div className="kpi">
           <div className="label">Totale Attivo</div>
@@ -12496,7 +12751,8 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       </div>
 
       <div className="filters" style={{ marginBottom: 14, display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {[["sp", "Struttura SP"], ["ce", "Struttura CE"], ["prospetti", "Anteprima prospetti"],
+        {[["sp", "Struttura SP"], ["ce", "Struttura CE"], ["rf", "Struttura RF"],
+          ["prospetti", "Anteprima prospetti"],
           ["controlli", `Controlli${controlli.mancanti.length + controlli.doppi.length > 0 ? " ⚠" : ""}`]]
           .map(([k, label]) => (
             <button key={k} className={"btn " + (tab === k ? "" : "ghost")} onClick={() => setTab(k)}>{label}</button>
@@ -12507,16 +12763,88 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         <div>
           <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12, lineHeight: 1.55 }}>
             Ogni voce raccoglie uno o più conti. Il pulsante <b>+ / −</b> su ciascun conto decide se il saldo
-            viene <b>sommato</b> alla voce o portato <b>in rettifica</b>: è così che i fondi ammortamento si
-            agganciano alla stessa voce del cespite e il prospetto espone il valore netto.
+            entra col <b>segno naturale</b> o <b>invertito</b>: i fondi ammortamento vanno agganciati alla stessa
+            voce del cespite col segno naturale, perché avendo saldo avere si deducono da soli e la voce espone il netto.
           </div>
-          {schema[tab].map(cl => <EditorClasse key={cl.id} p={tab} cl={cl} />)}
-          <button className="btn" onClick={() => addClasse(tab)}>+ Macroclasse</button>
+          {schema[tab].map(cl => (
+            <SBEditorClasse key={cl.id} p={tab} cl={cl} api={api}
+                            contiMap={contiMap} contiOrdinati={contiOrdinati} />
+          ))}
+          <button className="btn" onClick={() => {
+            const s = clone();
+            s[tab].push(tab === "sp"
+              ? { id: uid(), codice: "", nome: "Nuova macroclasse", lato: "attivo", voci: [] }
+              : { id: uid(), codice: "", nome: "Nuova macroclasse", segno: 1, voci: [] });
+            aggiorna(s);
+          }}>+ Macroclasse</button>
+        </div>
+      )}
+
+      {tab === "rf" && (
+        <div>
+          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12, lineHeight: 1.55 }}>
+            Il <b>metodo diretto</b> classifica i flussi di cassa per categoria di movimento: assegna ogni
+            categoria a un'area. Il <b>metodo indiretto</b> parte dal risultato e usa le variazioni dei saldi
+            patrimoniali, per cui ha bisogno di sapere la <b>natura</b> di ciascun conto. Le due strade
+            arrivano alla stessa variazione di liquidità: se non coincidono per area, una categoria è
+            classificata male.
+          </div>
+
+          {(schema.rf?.aree || []).map(a => (
+            <SBEditorArea key={a.id} area={a} api={api}
+                          categorieTutte={categorieTutte}
+                          assegnateAltrove={new Set([...assegnateAltrove].filter(c => !(a.categorie || []).includes(c)))} />
+          ))}
+          <button className="btn" onClick={() => {
+            const s = clone(); s.rf.aree.push({ id: uid(), codice: "", nome: "Nuova area", categorie: [] }); aggiorna(s);
+          }}>+ Area</button>
+
+          {rfDir.nonAssegnate.length > 0 && (
+            <div className="card" style={{ marginTop: 16, borderLeft: "3px solid var(--danger)" }}>
+              <div className="card-title">Categorie non assegnate ({rfDir.nonAssegnate.length})</div>
+              <div style={{ fontSize: 12, color: "var(--ink-2)", margin: "8px 0" }}>
+                Confluiscono per default nella prima area. Assegnale esplicitamente per un rendiconto corretto.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {rfDir.nonAssegnate.map(c => (
+                  <span key={c} style={{ fontSize: 12, background: "#fbecec", border: "1px solid var(--rule-2)",
+                                         borderRadius: 20, padding: "3px 8px" }}>{c}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-title">Natura dei conti (metodo indiretto)</div>
+            <div style={{ fontSize: 12, color: "var(--ink-2)", margin: "8px 0" }}>
+              Serve a separare il costo storico delle immobilizzazioni (flusso di investimento) dai fondi
+              ammortamento (rettifica non monetaria che torna nella gestione operativa).
+            </div>
+            <table style={{ width: "100%" }}>
+              <thead><tr><th>Cod.</th><th>Conto</th><th className="num">Saldo</th><th>Natura</th></tr></thead>
+              <tbody>
+                {contiOrdinati.filter(m => Math.abs(m.saldo) > 0.005).map(m => (
+                  <tr key={m.codice}>
+                    <td className="mono">{String(m.codice).padStart(2, "0")}</td>
+                    <td>{(m.nome || "").trim()}</td>
+                    <td className="num">{fmt(m.saldo)}</td>
+                    <td>
+                      <select value={(schema.rf?.natura || {})[String(m.codice)] || naturaAuto(contiMap[m.codice])}
+                              onChange={e => api.setNatura(m.codice, e.target.value)}
+                              style={{ fontSize: 12, width: "100%", maxWidth: 240 }}>
+                        {SB_NATURE.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
       {tab === "prospetti" && (
-        <div className="card-grid" style={{ display: "grid", gap: 18 }}>
+        <div style={{ display: "grid", gap: 18 }}>
           <div className="card">
             <div className="card-title">Stato Patrimoniale</div>
             {["attivo", "passivo"].map(lato => (
@@ -12532,28 +12860,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                           <td style={{ fontWeight: 700 }}>{cl.codice ? cl.codice + ") " : ""}{cl.nome}</td>
                           <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale)}</td>
                         </tr>
-                        {(cl.voci || []).map(v => (
-                          <React.Fragment key={v.id}>
-                            <tr>
-                              <td style={{ paddingLeft: 26, cursor: v.dettaglio.length ? "pointer" : "default" }}
-                                  onClick={() => v.dettaglio.length && setEspansi(p => ({ ...p, [v.id]: !p[v.id] }))}>
-                                {v.dettaglio.length > 0 && <span style={{ color: "var(--ink-3)", marginRight: 6 }}>{espansi[v.id] ? "▾" : "▸"}</span>}
-                                {v.codice ? v.codice + ". " : ""}{v.nome}
-                                {v.speciale === "risultato" && <span style={{ color: "var(--ink-3)", fontSize: 11 }}> (da CE)</span>}
-                              </td>
-                              <td className="num">{fmt(v.valore)}</td>
-                            </tr>
-                            {espansi[v.id] && v.dettaglio.map(d => (
-                              <tr key={d.c} style={{ fontSize: 12, color: "var(--ink-2)" }}>
-                                <td style={{ paddingLeft: 52 }}>
-                                  <span className="mono">{String(d.c).padStart(2, "0")}</span> {d.nome}
-                                  {d.valore < 0 && <span style={{ color: "var(--danger)" }}> (in rettifica)</span>}
-                                </td>
-                                <td className="num">{fmt(d.valore)}</td>
-                              </tr>
-                            ))}
-                          </React.Fragment>
-                        ))}
+                        {(cl.voci || []).map(rigaVoce)}
                       </React.Fragment>
                     ))}
                     <tr style={{ borderTop: "2px solid var(--ink)" }}>
@@ -12588,27 +12895,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       </td>
                       <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale)}</td>
                     </tr>
-                    {(cl.voci || []).map(v => (
-                      <React.Fragment key={v.id}>
-                        <tr>
-                          <td style={{ paddingLeft: 26, cursor: v.dettaglio.length ? "pointer" : "default" }}
-                              onClick={() => v.dettaglio.length && setEspansi(p => ({ ...p, [v.id]: !p[v.id] }))}>
-                            {v.dettaglio.length > 0 && <span style={{ color: "var(--ink-3)", marginRight: 6 }}>{espansi[v.id] ? "▾" : "▸"}</span>}
-                            {v.codice ? v.codice + ") " : ""}{v.nome}
-                          </td>
-                          <td className="num">{fmt(v.valore)}</td>
-                        </tr>
-                        {espansi[v.id] && v.dettaglio.map(d => (
-                          <tr key={d.c} style={{ fontSize: 12, color: "var(--ink-2)" }}>
-                            <td style={{ paddingLeft: 52 }}>
-                              <span className="mono">{String(d.c).padStart(2, "0")}</span> {d.nome}
-                              {d.valore < 0 && <span style={{ color: "var(--danger)" }}> (in rettifica)</span>}
-                            </td>
-                            <td className="num">{fmt(d.valore)}</td>
-                          </tr>
-                        ))}
-                      </React.Fragment>
-                    ))}
+                    {(cl.voci || []).map(rigaVoce)}
                   </React.Fragment>
                 ))}
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
@@ -12620,13 +12907,76 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
               </tbody>
             </table>
           </div>
+
+          <div className="card">
+            <div className="card-title">Rendiconto Finanziario · metodo diretto</div>
+            <table style={{ width: "100%", marginTop: 10 }}>
+              <tbody>
+                {rfDir.aree.map(a => (
+                  <React.Fragment key={a.id}>
+                    <tr style={{ background: "var(--panel-2)" }}>
+                      <td style={{ fontWeight: 700 }}>{a.codice ? a.codice + ") " : ""}{a.nome}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{fmt(a.totale)}</td>
+                    </tr>
+                    {a.righe.map(r => (
+                      <tr key={r.cat}>
+                        <td style={{ paddingLeft: 26 }}>{r.cat}</td>
+                        <td className="num" style={{ color: r.val < 0 ? "var(--danger)" : "inherit" }}>{fmt(r.val)}</td>
+                      </tr>
+                    ))}
+                    {a.righe.length === 0 && (
+                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessun flusso</td><td className="num">—</td></tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                <tr style={{ borderTop: "2px solid var(--ink)" }}>
+                  <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE</td>
+                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfDir.variazione)}</td>
+                </tr>
+                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmt(rfDir.apertura)}</td></tr>
+                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmt(rfDir.chiusura)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Rendiconto Finanziario · metodo indiretto</div>
+            <table style={{ width: "100%", marginTop: 10 }}>
+              <tbody>
+                <tr><td>Risultato d'esercizio</td><td className="num">{fmt(rfInd.risultato)}</td></tr>
+                <tr><td>Ammortamenti e rettifiche non monetarie</td><td className="num">{fmt(rfInd.ammortamenti)}</td></tr>
+                <tr><td>Variazione del capitale circolante</td><td className="num">{fmt(rfInd.varCircolante)}</td></tr>
+                <tr style={{ background: "var(--panel-2)" }}>
+                  <td style={{ fontWeight: 700 }}>A) Flusso della gestione operativa</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.operativo)}</td>
+                </tr>
+                <tr style={{ background: "var(--panel-2)" }}>
+                  <td style={{ fontWeight: 700 }}>B) Flusso dell'attività di investimento</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.investimenti)}</td>
+                </tr>
+                <tr style={{ background: "var(--panel-2)" }}>
+                  <td style={{ fontWeight: 700 }}>C) Flusso dell'attività di finanziamento</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.finanziamenti)}</td>
+                </tr>
+                <tr style={{ borderTop: "2px solid var(--ink)" }}>
+                  <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE (A+B+C)</td>
+                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfInd.variazione)}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div style={{ fontSize: 12, marginTop: 10, color: Math.abs(diffRF) < 0.01 ? "var(--accent)" : "var(--danger)" }}>
+              {Math.abs(diffRF) < 0.01
+                ? `Riscontro col metodo diretto: coincidono entrambi a ${fmtEuro(rfDir.variazione)}.`
+                : `⚠ Il metodo indiretto dà ${fmtEuro(rfInd.variazione)}, il diretto ${fmtEuro(rfDir.variazione)}: differenza ${fmtEuro(diffRF)}.`}
+            </div>
+          </div>
         </div>
       )}
 
       {tab === "controlli" && (
         <div style={{ display: "grid", gap: 16 }}>
           <div className="card">
-            <div className="card-title">Quadratura</div>
+            <div className="card-title">Quadratura patrimoniale</div>
             <table style={{ width: "100%", marginTop: 8 }}>
               <tbody>
                 <tr><td>Totale Attivo</td><td className="num">{fmt(prospetti.totAttivo)}</td></tr>
@@ -12640,9 +12990,41 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
               </tbody>
             </table>
             <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 10, lineHeight: 1.5 }}>
-              Il risultato d'esercizio del Conto Economico ({fmtEuro(prospetti.risultato)}) confluisce
-              automaticamente nella voce di Patrimonio Netto contrassegnata come calcolata. Se la differenza
-              non è zero, ci sono conti fuori schema o assegnati con segno sbagliato.
+              Il risultato del Conto Economico ({fmtEuro(prospetti.risultato)}) confluisce automaticamente
+              nella voce di Patrimonio Netto contrassegnata come calcolata.
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Rendiconto: diretto contro indiretto</div>
+            <table style={{ width: "100%", marginTop: 8 }}>
+              <thead><tr><th>Area</th><th className="num">Diretto</th><th className="num">Indiretto</th><th className="num">Differenza</th></tr></thead>
+              <tbody>
+                {[["Gestione operativa", rfDir.aree[0]?.totale || 0, rfInd.operativo],
+                  ["Investimento", rfDir.aree[1]?.totale || 0, rfInd.investimenti],
+                  ["Finanziamento", rfDir.aree[2]?.totale || 0, rfInd.finanziamenti]].map(([lab, d, i]) => {
+                  const diff = Math.round((i - d) * 100) / 100;
+                  return (
+                    <tr key={lab}>
+                      <td>{lab}</td>
+                      <td className="num">{fmt(d)}</td>
+                      <td className="num">{fmt(i)}</td>
+                      <td className="num" style={{ color: Math.abs(diff) < 0.01 ? "var(--accent)" : "var(--danger)", fontWeight: 600 }}>{fmt(diff)}</td>
+                    </tr>
+                  );
+                })}
+                <tr style={{ borderTop: "1px solid var(--rule)" }}>
+                  <td style={{ fontWeight: 700 }}>Totale</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfDir.variazione)}</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.variazione)}</td>
+                  <td className="num" style={{ fontWeight: 700, color: Math.abs(diffRF) < 0.01 ? "var(--accent)" : "var(--danger)" }}>{fmt(diffRF)}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 10, lineHeight: 1.5 }}>
+              Il totale coincide sempre: è un'identità contabile. Le differenze <b>per area</b> sono invece
+              il controllo utile, perché segnalano categorie di movimento classificate nell'area sbagliata
+              (per esempio acquisti di cespiti finiti tra le uscite operative).
             </div>
           </div>
 
@@ -12680,8 +13062,8 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             <div className="card">
               <div className="card-title" style={{ color: "var(--danger)" }}>Conti assegnati più volte ({controlli.doppi.length})</div>
               <div style={{ fontSize: 12, color: "var(--ink-2)", margin: "8px 0" }}>
-                Lo stesso saldo viene conteggiato in più voci. È esattamente il tipo di doppio conteggio
-                che ha generato lo sbilancio nel bilancio 2025-26.
+                Lo stesso saldo viene conteggiato in più voci: è il tipo di doppio conteggio che ha generato
+                lo sbilancio nel bilancio 2025-26.
               </div>
               <table style={{ width: "100%" }}>
                 <thead><tr><th>Cod.</th><th>Conto</th><th>Assegnato a</th></tr></thead>
@@ -12701,10 +13083,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           {esclusi.length > 0 && (
             <div className="card">
               <div className="card-title">Conti esclusi volontariamente ({esclusi.length})</div>
-              <div style={{ fontSize: 12, color: "var(--ink-2)", margin: "8px 0" }}>
-                Non compaiono nei prospetti e non vengono segnalati come mancanti. Tipicamente i transitori.
-              </div>
-              <table style={{ width: "100%" }}>
+              <table style={{ width: "100%", marginTop: 8 }}>
                 <tbody>
                   {esclusi.map(c => (
                     <tr key={c}>
