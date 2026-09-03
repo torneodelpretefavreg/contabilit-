@@ -13112,6 +13112,8 @@ function App() {
   const STAGIONE_SALVATA = (() => { try { return localStorage.getItem("stagioneAttiva") || null; } catch (e) { return null; } })();
   const [stagione, setStagione] = useState(STAGIONE_SALVATA || STAGIONE_DEFAULT);
   const [stagioniDisponibili, setStagioniDisponibili] = useState([STAGIONE_DEFAULT]);
+  const [stagioniInfo, setStagioniInfo] = useState([]);
+  const [pannelloStagioni, setPannelloStagioni] = useState(false);
   const sceltaManualeRef = useRef(!!STAGIONE_SALVATA);
   const cambiaStagione = useCallback((s) => {
     if (!s) return;
@@ -13135,6 +13137,18 @@ function App() {
       const keys = v ? Object.keys(v) : [];
       const all = [...new Set([STAGIONE_DEFAULT, ...keys])].sort().reverse();
       setStagioniDisponibili(all);
+      // dettaglio reale di cio' che c'e' su Firebase, per il pannello diagnostico
+      setStagioniInfo(keys.map(k => {
+        const movs = (v[k] && v[k].movimenti) ? Object.values(v[k].movimenti) : [];
+        const date = movs.map(m => m && m.data).filter(Boolean).sort();
+        return {
+          key: k,
+          nMov: movs.length,
+          nConti: (v[k] && v[k].conti) ? Object.keys(v[k].conti).length : 0,
+          prima: date[0] || null,
+          ultima: date[date.length - 1] || null,
+        };
+      }).sort((a, b) => b.key.localeCompare(a.key)));
       // se la stagione selezionata non esiste ancora (es. il calendario e' passato
       // a settembre ma il nuovo esercizio non e' stato aperto), resto sull'ultima reale
       if (!sceltaManualeRef.current && keys.length) {
@@ -13577,6 +13591,7 @@ function App() {
           {stagioniDisponibili.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
         <span className="desktop-only" style={{ fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{diagStagione}</span>
+        <button className="icon-btn" onClick={() => setPannelloStagioni(true)} title="Mostra tutte le stagioni presenti su Firebase">Stagioni</button>
         <button className="icon-btn desktop-only" onClick={newStagione}>+ Nuova stagione</button>
         <button className="icon-btn" onClick={() => { sessionStorage.removeItem(SESSION_KEY); setLogged(false); }}>Esci</button>
       </div>
@@ -13649,6 +13664,71 @@ function App() {
           )}
         </main>
       </div>
+
+      {pannelloStagioni && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", zIndex: 9999,
+                      display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+             onClick={() => setPannelloStagioni(false)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--panel)", borderRadius: 10,
+                 maxWidth: 720, width: "100%", maxHeight: "85vh", overflow: "auto", padding: 20 }}>
+            <div style={{ fontFamily: "'Fraunces',serif", fontSize: 20, marginBottom: 4 }}>Stagioni presenti su Firebase</div>
+            <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 16 }}>
+              Questo è l'elenco grezzo dei nodi sotto <span className="mono">stagioni/</span>, con quello che
+              contengono davvero. Clicca una riga per aprirla.
+            </div>
+
+            {stagioniInfo.length === 0 ? (
+              <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 16 }}>
+                Nessuna stagione letta da Firebase. O la lettura non è ancora arrivata, o le regole del
+                database stanno bloccando l'accesso: in questo caso i dati ci sono comunque, è la app che non li vede.
+              </div>
+            ) : (
+              <table style={{ width: "100%", marginBottom: 16 }}>
+                <thead><tr><th>Stagione</th><th className="num">Movimenti</th><th className="num">Conti</th><th>Periodo</th><th></th></tr></thead>
+                <tbody>
+                  {stagioniInfo.map(s => (
+                    <tr key={s.key} style={{ background: s.key === stagione ? "var(--panel-2)" : "transparent" }}>
+                      <td className="mono" style={{ fontWeight: 700 }}>{s.key}</td>
+                      <td className="num" style={{ color: s.nMov ? "inherit" : "var(--ink-3)" }}>{s.nMov}</td>
+                      <td className="num">{s.nConti}</td>
+                      <td style={{ fontSize: 12 }}>{s.prima ? `${s.prima} → ${s.ultima}` : "—"}</td>
+                      <td>
+                        <button className="btn ghost sm"
+                                onClick={() => { cambiaStagione(s.key); setPannelloStagioni(false); }}>
+                          {s.key === stagione ? "attiva" : "Apri"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <div style={{ borderTop: "1px solid var(--rule)", paddingTop: 14 }}>
+              <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 8 }}>
+                Apri una stagione scrivendone il nome esatto (utile se il nodo si chiama in modo diverso da quello atteso):
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input id="sb-stag-manuale" placeholder="es. 2025-26" style={{ flex: 1 }} />
+                <button className="btn" onClick={() => {
+                  const el = document.getElementById("sb-stag-manuale");
+                  const val = (el && el.value || "").trim();
+                  if (!val) return;
+                  cambiaStagione(val);
+                  setPannelloStagioni(false);
+                }}>Apri</button>
+              </div>
+              <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="btn ghost sm" onClick={() => {
+                  try { localStorage.removeItem("stagioneAttiva"); } catch (e) {}
+                  location.reload();
+                }}>Dimentica la stagione salvata e ricarica</button>
+                <button className="btn ghost sm" onClick={() => setPannelloStagioni(false)}>Chiudi</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && <div className={"toast " + (toast.type || "")}>{toast.msg}</div>}
     </div>
