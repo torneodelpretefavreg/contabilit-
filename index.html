@@ -13162,6 +13162,33 @@ function App() {
     return () => ref.off("value", cb);
   }, []);
 
+  // Fallback: se l'elenco dal nodo radice resta vuoto o parziale, sondo le singole
+  // stagioni una per una. Serve quando le regole di Firebase permettono di leggere
+  // stagioni/2025-26 ma non di elencare l'intero nodo stagioni.
+  useEffect(() => {
+    if (!firebaseReady) return;
+    (async () => {
+      const yNow = new Date().getFullYear();
+      const candidate = [];
+      for (let y = yNow - 6; y <= yNow + 1; y++) candidate.push(`${y}-${String(y + 1).slice(2)}`);
+      const trovate = [];
+      for (const k of candidate) {
+        try {
+          const sn = await db.ref(`stagioni/${k}/conti`).once("value");
+          if (sn.exists()) trovate.push(k);
+        } catch (e) { /* accesso negato o inesistente: ignoro */ }
+      }
+      if (!trovate.length) return;
+      setStagioniDisponibili(prev => [...new Set([...prev, ...trovate])].sort().reverse());
+      setStagioniInfo(prev => {
+        const noti = new Set(prev.map(x => x.key));
+        const extra = trovate.filter(k => !noti.has(k))
+          .map(k => ({ key: k, nMov: null, nConti: null, prima: null, ultima: null }));
+        return [...prev, ...extra].sort((a, b) => b.key.localeCompare(a.key));
+      });
+    })();
+  }, []);
+
   // Auto-seed quando si seleziona una stagione vuota
   // O auto-reset se trova la vecchia struttura
   useEffect(() => {
@@ -13689,8 +13716,8 @@ function App() {
                   {stagioniInfo.map(s => (
                     <tr key={s.key} style={{ background: s.key === stagione ? "var(--panel-2)" : "transparent" }}>
                       <td className="mono" style={{ fontWeight: 700 }}>{s.key}</td>
-                      <td className="num" style={{ color: s.nMov ? "inherit" : "var(--ink-3)" }}>{s.nMov}</td>
-                      <td className="num">{s.nConti}</td>
+                      <td className="num" style={{ color: s.nMov ? "inherit" : "var(--ink-3)" }}>{s.nMov === null ? "?" : s.nMov}</td>
+                      <td className="num">{s.nConti === null ? "?" : s.nConti}</td>
                       <td style={{ fontSize: 12 }}>{s.prima ? `${s.prima} → ${s.ultima}` : "—"}</td>
                       <td>
                         <button className="btn ghost sm"
