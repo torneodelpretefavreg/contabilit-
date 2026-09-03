@@ -13105,8 +13105,20 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
 function App() {
   const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
-  const [stagione, setStagione] = useState(STAGIONE_DEFAULT);
+  // La stagione attiva viene ricordata sul dispositivo. Se non c'e' una scelta
+  // salvata, si parte da quella suggerita dalla data, ma NON si salta mai da soli
+  // a una stagione che su Firebase non esiste ancora: al 1 settembre la stagione
+  // di lavoro resta quella in corso finche' non la si apre esplicitamente.
+  const STAGIONE_SALVATA = (() => { try { return localStorage.getItem("stagioneAttiva") || null; } catch (e) { return null; } })();
+  const [stagione, setStagione] = useState(STAGIONE_SALVATA || STAGIONE_DEFAULT);
   const [stagioniDisponibili, setStagioniDisponibili] = useState([STAGIONE_DEFAULT]);
+  const sceltaManualeRef = useRef(!!STAGIONE_SALVATA);
+  const cambiaStagione = useCallback((s) => {
+    if (!s) return;
+    sceltaManualeRef.current = true;
+    try { localStorage.setItem("stagioneAttiva", s); } catch (e) {}
+    setStagione(s);
+  }, []);
   const [page, setPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -13123,6 +13135,11 @@ function App() {
       const keys = v ? Object.keys(v) : [];
       const all = [...new Set([STAGIONE_DEFAULT, ...keys])].sort().reverse();
       setStagioniDisponibili(all);
+      // se la stagione selezionata non esiste ancora (es. il calendario e' passato
+      // a settembre ma il nuovo esercizio non e' stato aperto), resto sull'ultima reale
+      if (!sceltaManualeRef.current && keys.length) {
+        setStagione(prev => keys.includes(prev) ? prev : [...keys].sort().reverse()[0]);
+      }
     });
     return () => ref.off("value", cb);
   }, []);
@@ -13457,11 +13474,45 @@ function App() {
         return;
       }
       const contiSnap = await db.ref(`stagioni/${stagione}/conti`).once("value");
-      if (!contiSnap.exists() && stagione === STAGIONE_DEFAULT) {
-        await seedStagione();
+      if (!contiSnap.exists()) {
+        // Il seed carica i movimenti storici dello sheet: puo' partire SOLO al
+        // primissimo avvio, quando su Firebase non esiste nessun'altra stagione.
+        // Altrimenti una stagione nuova e vuota si riempirebbe dello storico.
+        const rootSnap = await db.ref("stagioni").once("value");
+        const altre = rootSnap.exists() ? Object.keys(rootSnap.val()).filter(k => k !== stagione) : [];
+        if (altre.length === 0) await seedStagione();
       }
     })();
   }, [stagione]);
+
+  // Predispone la stagione suggerita dal calendario (es. 2026-27 da settembre)
+  // come contenitore VUOTO: piano dei conti e business unit, nessun movimento.
+  // Serve solo a vederla nel selettore; l'apertura vera si fa con la riapertura.
+  const predisposteRef = useRef({});
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const prossima = STAGIONE_DEFAULT;
+    if (!prossima || prossima === stagione) return;
+    if (!conti || conti.length === 0) return;
+    if (predisposteRef.current[prossima]) return;
+    predisposteRef.current[prossima] = true;
+    (async () => {
+      try {
+        const snap = await db.ref(`stagioni/${prossima}/meta`).once("value");
+        if (snap.exists()) return;
+        const contiObj = {}; conti.forEach(c => { contiObj[`c${c.codice}`] = c; });
+        const buObj = (bu && bu.length ? bu : BUSINESS_UNITS_DEFAULT)
+          .reduce((acc, b, i) => { acc[`bu_${i}`] = { nome: b, ordine: i }; return acc; }, {});
+        await db.ref(`stagioni/${prossima}`).update({
+          meta: { stagione: prossima, creataIl: new Date().toISOString(), version: APP_VERSION,
+                  vuota: true, predispostaDa: stagione },
+          conti: contiObj,
+          businessUnits: buObj,
+          saldiIniziali: { 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 },
+        });
+      } catch (e) { /* silenzioso: e' solo una predisposizione */ }
+    })();
+  }, [stagione, conti, bu]);
 
   const showToast = (msg, type="success") => {
     setToast({ msg, type });
@@ -13476,8 +13527,14 @@ function App() {
     try {
       const esiste = await db.ref(`stagioni/${key}/meta`).once("value");
       if (esiste.exists()) {
-        if (confirm(`La stagione ${key} esiste già. Vuoi solo aprirla (senza modificarla)?`)) setStagione(key);
-        return;
+        // Se e' solo il contenitore predisposto (nessun movimento) la riapertura puo' procedere.
+        const movEsistenti = await db.ref(`stagioni/${key}/movimenti`).once("value");
+        const vuota = !movEsistenti.exists() || Object.keys(movEsistenti.val() || {}).length === 0;
+        if (!vuota) {
+          if (confirm(`La stagione ${key} contiene già dei movimenti. Vuoi solo aprirla (senza modificarla)?`)) cambiaStagione(key);
+          return;
+        }
+        if (!confirm(`La stagione ${key} esiste ma è vuota. Procedo con la riapertura dei saldi da ${stagione}?`)) return;
       }
       // Calcola la riapertura dai saldi finali della stagione corrente
       const { aperture, utile, totAttivo, totPassivo, nConti, residuo60 } = generaRiapertura(movimenti, saldiIniziali, conti, annoY1);
@@ -13505,7 +13562,7 @@ function App() {
       };
       if (categorieRF && Object.keys(categorieRF).length) upd.categorieRF = categorieRF;
       await db.ref(`stagioni/${key}`).update(upd);
-      setStagione(key);
+      cambiaStagione(key);
       showToast(`Stagione ${key} riaperta da ${stagione} · utile a riserva ${fmtEuro(utile)}`);
     } catch(e) { alert("Errore: " + e.message); }
   };
@@ -13532,7 +13589,7 @@ function App() {
         <button className="menu-btn" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Menu">☰</button>
         <h1>Futsal Fabbrico ASD <span className="sub">— Contabilità</span></h1>
         <span className="badge desktop-only">Stagione</span>
-        <select value={stagione} onChange={e => setStagione(e.target.value)}>
+        <select value={stagione} onChange={e => cambiaStagione(e.target.value)}>
           {stagioniDisponibili.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
         <button className="icon-btn desktop-only" onClick={newStagione}>+ Nuova stagione</button>
