@@ -13138,7 +13138,11 @@ function App() {
       // se la stagione selezionata non esiste ancora (es. il calendario e' passato
       // a settembre ma il nuovo esercizio non e' stato aperto), resto sull'ultima reale
       if (!sceltaManualeRef.current && keys.length) {
-        setStagione(prev => keys.includes(prev) ? prev : [...keys].sort().reverse()[0]);
+        // mi posiziono sulla stagione piu' recente che contiene davvero dei movimenti,
+        // mai su un contenitore vuoto
+        const conMovimenti = keys.filter(k => v[k] && v[k].movimenti && Object.keys(v[k].movimenti).length > 0);
+        const candidate = (conMovimenti.length ? conMovimenti : keys).sort().reverse();
+        setStagione(prev => (v[prev] && v[prev].movimenti && Object.keys(v[prev].movimenti).length > 0) ? prev : candidate[0]);
       }
     });
     return () => ref.off("value", cb);
@@ -13485,34 +13489,14 @@ function App() {
     })();
   }, [stagione]);
 
-  // Predispone la stagione suggerita dal calendario (es. 2026-27 da settembre)
-  // come contenitore VUOTO: piano dei conti e business unit, nessun movimento.
-  // Serve solo a vederla nel selettore; l'apertura vera si fa con la riapertura.
-  const predisposteRef = useRef({});
-  useEffect(() => {
-    if (!firebaseReady) return;
-    const prossima = STAGIONE_DEFAULT;
-    if (!prossima || prossima === stagione) return;
-    if (!conti || conti.length === 0) return;
-    if (predisposteRef.current[prossima]) return;
-    predisposteRef.current[prossima] = true;
-    (async () => {
-      try {
-        const snap = await db.ref(`stagioni/${prossima}/meta`).once("value");
-        if (snap.exists()) return;
-        const contiObj = {}; conti.forEach(c => { contiObj[`c${c.codice}`] = c; });
-        const buObj = (bu && bu.length ? bu : BUSINESS_UNITS_DEFAULT)
-          .reduce((acc, b, i) => { acc[`bu_${i}`] = { nome: b, ordine: i }; return acc; }, {});
-        await db.ref(`stagioni/${prossima}`).update({
-          meta: { stagione: prossima, creataIl: new Date().toISOString(), version: APP_VERSION,
-                  vuota: true, predispostaDa: stagione },
-          conti: contiObj,
-          businessUnits: buObj,
-          saldiIniziali: { 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 },
-        });
-      } catch (e) { /* silenzioso: e' solo una predisposizione */ }
-    })();
-  }, [stagione, conti, bu]);
+  // Riepilogo di controllo della stagione attiva: quanti movimenti e in che periodo.
+  // Serve a capire a colpo d'occhio se si sta guardando la stagione giusta.
+  const diagStagione = useMemo(() => {
+    const n = (movimenti || []).length;
+    if (!n) return `${stagione}: nessun movimento`;
+    const date = movimenti.map(m => m.data).filter(Boolean).sort();
+    return `${stagione}: ${n} movimenti, dal ${date[0]} al ${date[date.length - 1]}`;
+  }, [movimenti, stagione]);
 
   const showToast = (msg, type="success") => {
     setToast({ msg, type });
@@ -13589,9 +13573,10 @@ function App() {
         <button className="menu-btn" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Menu">☰</button>
         <h1>Futsal Fabbrico ASD <span className="sub">— Contabilità</span></h1>
         <span className="badge desktop-only">Stagione</span>
-        <select value={stagione} onChange={e => cambiaStagione(e.target.value)}>
+        <select value={stagione} onChange={e => cambiaStagione(e.target.value)} title={diagStagione}>
           {stagioniDisponibili.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
+        <span className="desktop-only" style={{ fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{diagStagione}</span>
         <button className="icon-btn desktop-only" onClick={newStagione}>+ Nuova stagione</button>
         <button className="icon-btn" onClick={() => { sessionStorage.removeItem(SESSION_KEY); setLogged(false); }}>Esci</button>
       </div>
