@@ -13103,6 +13103,36 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   );
 }
 
+// Saldi finali dei conti di liquidita' di una stagione, calcolati dai suoi movimenti.
+// Serve per far ereditare alla stagione nuova le disponibilita' di chiusura della
+// precedente SENZA scrivere nessun movimento: il calcolo e' sempre dal vivo, quindi
+// se si corregge qualcosa nell'anno vecchio la stagione nuova si aggiorna da sola.
+function saldiFinaliLiquidita(movimenti, saldiIniziali) {
+  const out = {};
+  CONTI_LIQUIDITA.forEach(c => { out[c.codice] = Number((saldiIniziali || {})[c.codice]) || 0; });
+  (movimenti || []).forEach(m => {
+    const c = m.contoLiquidita;
+    if (c != null && out[c] !== undefined) {
+      if (m.tipo === "entrata") out[c] += Number(m.importo) || 0;
+      else if (m.tipo === "uscita" || m.tipo === "giroconto") out[c] -= Number(m.importo) || 0;
+    }
+    if (m.tipo === "giroconto" && m.contoLiquiditaDest != null && out[m.contoLiquiditaDest] !== undefined) {
+      out[m.contoLiquiditaDest] += Number(m.importo) || 0;
+    }
+    const eff = effettoLiquiditaNascosto(m);
+    if (eff && out[eff.codice] !== undefined) out[eff.codice] += eff.delta;
+  });
+  Object.keys(out).forEach(k => { out[k] = Math.round(out[k] * 100) / 100; });
+  return out;
+}
+
+function stagionePrecedenteDi(key) {
+  const m = String(key || "").match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]) - 1;
+  return `${y}-${String(y + 1).slice(2)}`;
+}
+
 function App() {
   const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
   // La stagione attiva viene ricordata sul dispositivo. Se non c'e' una scelta
@@ -13532,6 +13562,39 @@ function App() {
 
   // Riepilogo di controllo della stagione attiva: quanti movimenti e in che periodo.
   // Serve a capire a colpo d'occhio se si sta guardando la stagione giusta.
+  // Se la stagione attiva non ha ancora movimenti, eredita dal vivo le disponibilita'
+  // di chiusura della stagione precedente: nessuna scrittura, solo lettura.
+  const [saldiEreditati, setSaldiEreditati] = useState(null);
+  useEffect(() => {
+    setSaldiEreditati(null);
+    if (!firebaseReady || !stagione) return;
+    if (movimenti && movimenti.length > 0) return;   // stagione gia' avviata: non eredita
+    const prec = stagionePrecedenteDi(stagione);
+    if (!prec) return;
+    let vivo = true;
+    (async () => {
+      try {
+        const [mv, si] = await Promise.all([
+          db.ref(`stagioni/${prec}/movimenti`).once("value"),
+          db.ref(`stagioni/${prec}/saldiIniziali`).once("value"),
+        ]);
+        if (!vivo || !mv.exists()) return;
+        const movsPrec = Object.values(mv.val() || {});
+        setSaldiEreditati({ da: prec, saldi: saldiFinaliLiquidita(movsPrec, si.val() || {}) });
+      } catch (e) { /* permessi o stagione assente: nessuna eredita' */ }
+    })();
+    return () => { vivo = false; };
+  }, [stagione, movimenti]);
+
+  const saldiInizialiEff = useMemo(
+    () => saldiEreditati ? saldiEreditati.saldi : saldiIniziali,
+    [saldiEreditati, saldiIniziali]
+  );
+
+  const bannerEredita = saldiEreditati
+    ? `Stagione senza movimenti: le disponibilità mostrate sono i saldi di chiusura di ${saldiEreditati.da}, calcolati dal vivo.`
+    : null;
+
   const diagStagione = useMemo(() => {
     const n = (movimenti || []).length;
     if (!n) return `${stagione}: nessun movimento`;
@@ -13666,26 +13729,33 @@ function App() {
             <div className="empty-state">Caricamento dati…</div>
           ) : (
             <>
-              {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} />}
+              {bannerEredita && (
+                <div style={{ background: "var(--panel-2)", border: "1px solid var(--rule)",
+                              borderLeft: "3px solid var(--accent)", borderRadius: 6,
+                              padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: "var(--ink-2)" }}>
+                  {bannerEredita}
+                </div>
+              )}
+              {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} />}
               {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
-              {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} categorieRF={categorieRF} stagione={stagione} onToast={showToast} />}
-              {page === "crediti" && <PageCrediti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} onToast={showToast} />}
-              {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
-              {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
-              {page === "schema" && <PageSchemaBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
-              {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
-              {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
-              {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} />}
-              {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
-              {page === "budget" && <PageBudget conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} bu={bu} stagione={stagione} onToast={showToast} />}
-              {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
-              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiIniziali} stagione={stagione} categorieRF={categorieRF} />}
+              {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} categorieRF={categorieRF} stagione={stagione} onToast={showToast} />}
+              {page === "crediti" && <PageCrediti conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} bu={bu} onToast={showToast} />}
+              {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} />}
+              {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} />}
+              {page === "schema" && <PageSchemaBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
+              {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
+              {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
+              {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} />}
+              {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
+              {page === "budget" && <PageBudget conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} bu={bu} stagione={stagione} onToast={showToast} />}
+              {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
+              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
-              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiIniziali} stagione={stagione} onToast={showToast} />}
-              {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiIniziali} onToast={showToast} />}
+              {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
+              {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
             </>
           )}
@@ -13751,6 +13821,34 @@ function App() {
                   location.reload();
                 }}>Dimentica la stagione salvata e ricarica</button>
                 <button className="btn ghost sm" onClick={() => setPannelloStagioni(false)}>Chiudi</button>
+              </div>
+
+              <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
+                <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 8 }}>
+                  <b>Svuota una stagione.</b> Cancella movimenti e cespiti della stagione indicata,
+                  lasciando piano dei conti e business unit. Serve a ripulire una stagione riempita per errore.
+                  Scrivi il nome esatto per confermare.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input id="sb-stag-svuota" placeholder="es. 2026-27" style={{ flex: 1 }} />
+                  <button className="btn danger" onClick={async () => {
+                    const el = document.getElementById("sb-stag-svuota");
+                    const val = (el && el.value || "").trim();
+                    if (!val) return;
+                    const info = stagioniInfo.find(x => x.key === val);
+                    const quanti = info && info.nMov !== null ? `${info.nMov} movimenti` : "i movimenti";
+                    if (!confirm(`Cancello ${quanti} e i cespiti della stagione ${val}?\n\nL'operazione non è reversibile.`)) return;
+                    try {
+                      await db.ref(`stagioni/${val}/movimenti`).remove();
+                      await db.ref(`stagioni/${val}/cespiti`).remove();
+                      await db.ref(`stagioni/${val}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
+                      showToast(`Stagione ${val} svuotata`);
+                      setPannelloStagioni(false);
+                    } catch (e) {
+                      showToast("Errore: " + (e && e.message || e), "error");
+                    }
+                  }}>Svuota</button>
+                </div>
               </div>
             </div>
           </div>
