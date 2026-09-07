@@ -829,6 +829,62 @@ try {
 } catch(e) { console.warn("Firebase non inizializzato:", e); }
 
 // ============================================================
+// PROTEZIONE DELLE SCRITTURE SULLE STAGIONI
+// I movimenti vengono salvati da una decina di punti diversi dell'app.
+// Invece di controllarli uno per uno, avvolgo db.ref() una volta sola:
+// ogni scrittura sotto stagioni/<stag>/movimenti passa di qui.
+// Due regole:
+//  1) una stagione marcata come chiusa non accetta piu' scritture;
+//  2) un movimento deve avere data compresa nell'esercizio della stagione
+//     (1 settembre - 31 agosto), altrimenti va registrato nella stagione giusta.
+// ============================================================
+const STAGIONI_BLOCCATE = {};   // popolato da App leggendo meta.bloccata
+
+function _intervalloStag(key) {
+  const m = String(key || "").match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  return { da: `${y}-09-01`, a: `${y + 1}-08-31` };
+}
+
+function _verificaScrittura(stag, valore) {
+  if (STAGIONI_BLOCCATE[stag]) {
+    throw new Error(`La stagione ${stag} è chiusa: non accetta nuove scritture. Riaprila dal pannello Stagioni per modificarla.`);
+  }
+  const r = _intervalloStag(stag);
+  if (!r || valore == null || typeof valore !== "object") return;
+  // un singolo movimento, oppure una mappa { chiave: movimento }
+  const candidati = valore.data !== undefined ? [valore] : Object.values(valore);
+  for (const m of candidati) {
+    if (!m || typeof m !== "object" || !m.data) continue;
+    if (m.data < r.da || m.data > r.a) {
+      throw new Error(`Data ${m.data} fuori dall'esercizio ${stag} (${r.da} – ${r.a}).\n\nRegistra il movimento nella stagione di competenza.`);
+    }
+  }
+}
+
+if (db) {
+  const _ref = db.ref.bind(db);
+  const avvolgi = (ref, stag) => {
+    const set0 = ref.set.bind(ref), upd0 = ref.update.bind(ref), push0 = ref.push.bind(ref), child0 = ref.child.bind(ref);
+    ref.set = (v, ...a) => { _verificaScrittura(stag, v); return set0(v, ...a); };
+    ref.update = (v, ...a) => { _verificaScrittura(stag, v); return upd0(v, ...a); };
+    ref.push = (v, ...a) => {
+      if (v !== undefined) _verificaScrittura(stag, v);
+      const p = push0(v, ...a);
+      return (p && typeof p.set === "function") ? avvolgi(p, stag) : p;
+    };
+    ref.child = (p, ...a) => avvolgi(child0(p, ...a), stag);
+    return ref;
+  };
+  db.ref = function (path) {
+    const r = _ref(path);
+    const m = typeof path === "string" && path.match(/^stagioni\/([^/]+)\/movimenti(\/|$)/);
+    return m ? avvolgi(r, m[1]) : r;
+  };
+}
+
+// ============================================================
 // COSTANTI DI DOMINIO
 // ============================================================
 const CONTI_LIQUIDITA = [
@@ -13613,6 +13669,33 @@ function App() {
     [saldiEreditati, saldiIniziali]
   );
 
+  // Stato "stagione chiusa": salvato su meta.bloccata, tenuto in sincrono con la
+  // guardia globale che protegge tutte le scritture sui movimenti.
+  const [stagioneChiusa, setStagioneChiusa] = useState(false);
+  useEffect(() => {
+    if (!firebaseReady || !stagione) return;
+    const ref = db.ref(`stagioni/${stagione}/meta/bloccata`);
+    const cb = ref.on("value", snap => {
+      const v = !!snap.val();
+      STAGIONI_BLOCCATE[stagione] = v;
+      setStagioneChiusa(v);
+    });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  const cambiaChiusura = async (chiudi) => {
+    const msg = chiudi
+      ? `Chiudo la stagione ${stagione}?\n\nNon accetterà più nuove scritture finché non la riapri.`
+      : `Riapro la stagione ${stagione} alle scritture?`;
+    if (!confirm(msg)) return;
+    try {
+      await db.ref(`stagioni/${stagione}/meta/bloccata`).set(chiudi);
+      showToast(chiudi ? `Stagione ${stagione} chiusa` : `Stagione ${stagione} riaperta`);
+    } catch (e) {
+      showToast("Errore: " + (e && e.message || e), "error");
+    }
+  };
+
   const bannerFuoriStagione = (movimentiFuoriStagione && movimentiFuoriStagione.length)
     ? movimentiFuoriStagione.length : 0;
   const rimuoviFuoriStagione = async () => {
@@ -13766,6 +13849,13 @@ function App() {
             <div className="empty-state">Caricamento dati…</div>
           ) : (
             <>
+              {stagioneChiusa && (
+                <div style={{ background: "var(--panel-2)", border: "1px solid var(--rule)",
+                              borderLeft: "3px solid var(--danger)", borderRadius: 6,
+                              padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: "var(--ink-2)" }}>
+                  Esercizio {stagione} chiuso: la stagione è in sola lettura. Per modificarla, riaprila dal pannello Stagioni.
+                </div>
+              )}
               {bannerFuoriStagione > 0 && (
                 <div style={{ background: "#fbecec", border: "1px solid var(--rule)",
                               borderLeft: "3px solid var(--danger)", borderRadius: 6,
@@ -13871,6 +13961,26 @@ function App() {
                   location.reload();
                 }}>Dimentica la stagione salvata e ricarica</button>
                 <button className="btn ghost sm" onClick={() => setPannelloStagioni(false)}>Chiudi</button>
+              </div>
+
+              <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
+                <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 8 }}>
+                  <b>Chiusura dell'esercizio.</b> Una stagione chiusa resta consultabile ma non accetta
+                  più scritture, così un bilancio già approvato non si muove più.
+                  Indipendentemente da questo, ogni movimento deve comunque avere data compresa
+                  nell'esercizio della stagione in cui lo registri.
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 13 }}>
+                    Stagione {stagione}: <b style={{ color: stagioneChiusa ? "var(--danger)" : "var(--accent)" }}>
+                      {stagioneChiusa ? "chiusa" : "aperta"}
+                    </b>
+                  </span>
+                  <button className={"btn sm " + (stagioneChiusa ? "" : "ghost")}
+                          onClick={() => cambiaChiusura(!stagioneChiusa)}>
+                    {stagioneChiusa ? "Riapri" : "Chiudi"}
+                  </button>
+                </div>
               </div>
 
               <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--rule)" }}>
