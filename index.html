@@ -892,6 +892,14 @@ let BUSINESS_UNITS = [...BUSINESS_UNITS_DEFAULT];
 const MESI = ["settembre","ottobre","novembre","dicembre","gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto"];
 
 // Stagione corrente di default
+// Intervallo di competenza di una stagione: 1 settembre -> 31 agosto.
+function intervalloStagione(key) {
+  const m = String(key || "").match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  return { da: `${y}-09-01`, a: `${y + 1}-08-31` };
+}
+
 function stagioneDaData(d) {
   const date = new Date(d);
   const y = date.getFullYear();
@@ -948,6 +956,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7
 function useFirebaseData(stagione) {
   const [conti, setConti] = useState([]);
   const [movimenti, setMovimenti] = useState([]);
+  const [movimentiFuoriStagione, setMovimentiFuoriStagione] = useState([]);
   const [cespiti, setCespiti] = useState([]);
   const [saldiIniziali, setSaldiIniziali] = useState({});
   const [categorieRF, setCategorieRF] = useState({ entrate: [], uscite: [], investimenti: [] });
@@ -970,7 +979,20 @@ function useFirebaseData(stagione) {
       refs[0].on("value", snap => setConti(snap.val() ? Object.values(snap.val()) : [])),
       refs[1].on("value", snap => {
         const v = snap.val();
-        setMovimenti(v ? Object.entries(v).map(([k,m]) => ({...m, _id: k})) : []);
+        // Un movimento appartiene alla stagione solo se la sua data cade
+        // nell'intervallo 1 settembre - 31 agosto di quella stagione. Quelli fuori
+        // intervallo non vengono considerati: la stagione nuova resta vuota finche'
+        // non ci si registra dentro qualcosa con la data giusta.
+        const tutti = v ? Object.entries(v).map(([k, m]) => ({ ...m, _id: k })) : [];
+        const range = intervalloStagione(stagione);
+        if (range) {
+          const dentro = tutti.filter(m => !m.data || (m.data >= range.da && m.data <= range.a));
+          setMovimentiFuoriStagione(tutti.filter(m => m.data && (m.data < range.da || m.data > range.a)));
+          setMovimenti(dentro);
+        } else {
+          setMovimentiFuoriStagione([]);
+          setMovimenti(tutti);
+        }
       }),
       refs[2].on("value", snap => setCespiti(snap.val() ? Object.values(snap.val()) : [])),
       refs[3].on("value", snap => {
@@ -1035,7 +1057,7 @@ function useFirebaseData(stagione) {
     setSeedingDone(true);
   }, [stagione]);
 
-  return { conti, movimenti, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione };
+  return { conti, movimenti, movimentiFuoriStagione, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione };
 }
 
 // ============================================================
@@ -13155,7 +13177,7 @@ function App() {
   const [toast, setToast] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const { conti, movimenti, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione } = useFirebaseData(stagione);
+  const { conti, movimenti, movimentiFuoriStagione, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione } = useFirebaseData(stagione);
   const categorieOpzioni = useMemo(() => mergeCategorie(categorieRF, movimenti), [categorieRF, movimenti]);
 
   // Carica lista stagioni esistenti su Firebase
@@ -13591,6 +13613,21 @@ function App() {
     [saldiEreditati, saldiIniziali]
   );
 
+  const bannerFuoriStagione = (movimentiFuoriStagione && movimentiFuoriStagione.length)
+    ? movimentiFuoriStagione.length : 0;
+  const rimuoviFuoriStagione = async () => {
+    const r = intervalloStagione(stagione);
+    if (!confirm(`Nella stagione ${stagione} ci sono ${bannerFuoriStagione} movimenti con data fuori dall'intervallo ${r.da} - ${r.a}.\n\nLi cancello definitivamente?`)) return;
+    try {
+      const agg = {};
+      movimentiFuoriStagione.forEach(m => { agg[m._id] = null; });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(agg);
+      showToast(`${bannerFuoriStagione} movimenti rimossi`);
+    } catch (e) {
+      showToast("Errore: " + (e && e.message || e), "error");
+    }
+  };
+
   const bannerEredita = saldiEreditati
     ? `Stagione senza movimenti: le disponibilità mostrate sono i saldi di chiusura di ${saldiEreditati.da}, calcolati dal vivo.`
     : null;
@@ -13729,6 +13766,19 @@ function App() {
             <div className="empty-state">Caricamento dati…</div>
           ) : (
             <>
+              {bannerFuoriStagione > 0 && (
+                <div style={{ background: "#fbecec", border: "1px solid var(--rule)",
+                              borderLeft: "3px solid var(--danger)", borderRadius: 6,
+                              padding: "10px 14px", marginBottom: 16, fontSize: 12.5,
+                              display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <span style={{ flex: 1 }}>
+                    {bannerFuoriStagione} movimenti presenti in questa stagione hanno una data fuori
+                    dall'intervallo {intervalloStagione(stagione)?.da} – {intervalloStagione(stagione)?.a}.
+                    Sono esclusi da tutti i calcoli.
+                  </span>
+                  <button className="btn danger sm" onClick={rimuoviFuoriStagione}>Rimuovili</button>
+                </div>
+              )}
               {bannerEredita && (
                 <div style={{ background: "var(--panel-2)", border: "1px solid var(--rule)",
                               borderLeft: "3px solid var(--accent)", borderRadius: 6,
