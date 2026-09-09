@@ -12247,6 +12247,46 @@ function controlliSchema(schema, mastrini, esclusi) {
 
 // Metodo DIRETTO: raggruppa i flussi monetari per categoria di movimento
 // e li porta nell'area a cui la categoria e' assegnata.
+// Disponibilita' liquide per singolo conto di cassa/banca (apertura e chiusura del periodo).
+function disponibilitaLiquidePerConto(movimenti, saldiIniziali) {
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const byCod = {};
+  CONTI_LIQUIDITA.forEach(c => { byCod[c.codice] = { codice: c.codice, nome: c.nome, apertura: Number(saldiIniziali && saldiIniziali[c.codice]) || 0, flusso: 0 }; });
+  (movimenti || []).forEach(m => {
+    if (isAperturaMov(m)) {
+      if (m.contoLiquidita != null && byCod[m.contoLiquidita]) {
+        byCod[m.contoLiquidita].apertura += (m.tipo === "entrata" ? 1 : m.tipo === "uscita" ? -1 : 0) * (Number(m.importo) || 0);
+      }
+      return;
+    }
+    if (m.tipo === "giroconto") {
+      if (m.contoLiquidita != null && byCod[m.contoLiquidita]) byCod[m.contoLiquidita].flusso -= Number(m.importo) || 0;
+      if (m.contoLiquiditaDest != null && byCod[m.contoLiquiditaDest]) byCod[m.contoLiquiditaDest].flusso += Number(m.importo) || 0;
+      return;
+    }
+    if ((m.tipo !== "entrata" && m.tipo !== "uscita") || m.contoLiquidita == null || !byCod[m.contoLiquidita]) return;
+    byCod[m.contoLiquidita].flusso += (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
+  });
+  return Object.values(byCod).map(o => ({
+    codice: o.codice, nome: o.nome, apertura: r2(o.apertura), chiusura: r2(o.apertura + o.flusso),
+  }));
+}
+
+// Raggruppa i conti di liquidita' nelle 4 righe di dettaglio richieste per il rendiconto:
+// Futsal C/C, Pos C/C, Cassa e tutte le altre disponibilita' liquide accorpate.
+function raggruppaDisponibilitaLiquide(perConto) {
+  const trova = cod => perConto.find(p => p.codice === cod) || { apertura: 0, chiusura: 0 };
+  const principali = new Set([1, 3, 5]);
+  const altre = perConto.filter(p => !principali.has(p.codice))
+    .reduce((s, p) => ({ apertura: s.apertura + p.apertura, chiusura: s.chiusura + p.chiusura }), { apertura: 0, chiusura: 0 });
+  return [
+    { nome: "Futsal c/c", apertura: trova(1).apertura, chiusura: trova(1).chiusura },
+    { nome: "Pos c/c", apertura: trova(5).apertura, chiusura: trova(5).chiusura },
+    { nome: "Cassa", apertura: trova(3).apertura, chiusura: trova(3).chiusura },
+    { nome: "Altre disponibilita' liquide", apertura: altre.apertura, chiusura: altre.chiusura },
+  ];
+}
+
 function rendicontoDiretto(schema, movimenti, saldiIniziali) {
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
   const aree = (schema.rf?.aree || []).map(a => ({
@@ -12304,9 +12344,10 @@ function rendicontoDiretto(schema, movimenti, saldiIniziali) {
   });
 
   const variazione = r2(aree.reduce((s, a) => s + a.totale, 0));
+  const dettaglioLiquidita = raggruppaDisponibilitaLiquide(disponibilitaLiquidePerConto(movimenti, saldiIniziali));
   return {
     aree, apertura: r2(apertura), variazione, chiusura: r2(apertura + variazione),
-    nonAssegnate: [...nonAssegnate].sort(),
+    nonAssegnate: [...nonAssegnate].sort(), dettaglioLiquidita,
   };
 }
 
@@ -12743,6 +12784,30 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     aggiorna(s);
     onToast && onToast("Mappatura proposta per i conti e le categorie non ancora assegnati");
   };
+  const caricaVociConsigliateRF = () => {
+    const s = clone();
+    const struttura = [
+      { codice: "A", voci: ["Incassi da sponsor", "Incassi da eventi esterni", "Incassi da eventi propri",
+                             "Incassi da contributi pubblici", "Incassi diversi", "Pagamenti ai fornitori",
+                             "Contributi a terzi", "Imposte/ritenute pagate", "Pagamenti per cartellini", "Altri pagamenti"] },
+      { codice: "B", voci: ["Immobilizzazioni materiali - Investimenti", "Immobilizzazioni materiali - Disinvestimenti",
+                             "Immobilizzazioni immateriali - Investimenti", "Immobilizzazioni immateriali - Disinvestimenti",
+                             "Immobilizzazioni finanziarie - Investimenti", "Immobilizzazioni finanziarie - Disinvestimenti"] },
+      { codice: "C", voci: ["Mezzi di terzi - Accensione finanziamenti", "Mezzi di terzi - Rimborso finanziamenti",
+                             "Mezzi propri - Dividendi"] },
+    ];
+    s.rf.aree = s.rf.aree || [];
+    struttura.forEach((def, i) => {
+      let area = s.rf.aree.find(a => a.codice === def.codice) || s.rf.aree[i];
+      if (!area) { area = { id: uid(), codice: def.codice, nome: "", voci: [] }; s.rf.aree.push(area); }
+      area.voci = area.voci || [];
+      def.voci.forEach(nome => {
+        if (!area.voci.some(v => v.nome === nome)) area.voci.push({ id: uid(), codice: "", nome, categorie: [] });
+      });
+    });
+    aggiorna(s);
+    onToast && onToast("Sottovoci consigliate aggiunte: assegna ora le categorie a ciascuna");
+  };
   const escludiConto = (cod) => aggiorna(statoRef.current.schema, [...new Set([...esclusi, Number(cod)])]);
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
@@ -12847,8 +12912,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
                 { content: money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
     bodyD.push(["Disponibilita' liquide iniziali", money(rfDir.apertura)]);
+    rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.apertura)]));
     bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
                 { content: money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
+    rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.chiusura)]));
     doc.autoTable({
       startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
       styles: { fontSize: 9, cellPadding: 2 },
@@ -13005,9 +13072,14 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             <SBEditorArea key={a.id} area={a} api={api}
                           categorieTutte={categorieTutte} assegnateAltrove={assegnateAltrove} />
           ))}
-          <button className="btn" onClick={() => {
-            const s = clone(); s.rf.aree.push({ id: uid(), codice: "", nome: "Nuova area", voci: [] }); aggiorna(s);
-          }}>+ Area</button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" onClick={() => {
+              const s = clone(); s.rf.aree.push({ id: uid(), codice: "", nome: "Nuova area", voci: [] }); aggiorna(s);
+            }}>+ Area</button>
+            <button className="btn ghost" onClick={caricaVociConsigliateRF} title="Aggiunge le sottovoci standard di FUTSAL FABBRICO ASD alle 3 aree, senza toccare quelle già presenti">
+              + Carica sottovoci consigliate
+            </button>
+          </div>
 
           {rfDir.nonAssegnate.length > 0 && (
             <div className="card" style={{ marginTop: 16, borderLeft: "3px solid var(--danger)" }}>
@@ -13155,7 +13227,19 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                   <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfDir.variazione)}</td>
                 </tr>
                 <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmt(rfDir.apertura)}</td></tr>
+                {rfDir.dettaglioLiquidita.map(d => (
+                  <tr key={"ini-" + d.nome}>
+                    <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
+                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.apertura)}</td>
+                  </tr>
+                ))}
                 <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmt(rfDir.chiusura)}</td></tr>
+                {rfDir.dettaglioLiquidita.map(d => (
+                  <tr key={"fin-" + d.nome}>
+                    <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
+                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.chiusura)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
