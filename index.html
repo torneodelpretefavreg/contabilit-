@@ -12072,9 +12072,9 @@ function schemaDefault() {
     ],
     rf: {
       aree: [
-        { id: uid(), codice: "A", nome: "Flusso della gestione operativa", categorie: [] },
-        { id: uid(), codice: "B", nome: "Flusso dell'attivita' di investimento", categorie: [] },
-        { id: uid(), codice: "C", nome: "Flusso dell'attivita' di finanziamento", categorie: [] },
+        { id: uid(), codice: "A", nome: "Flusso della gestione operativa", voci: [] },
+        { id: uid(), codice: "B", nome: "Flusso dell'attivita' di investimento", voci: [] },
+        { id: uid(), codice: "C", nome: "Flusso dell'attivita' di finanziamento", voci: [] },
       ],
       natura: {},   // { codiceConto: "liquidita" | "circolante" | ... }
     },
@@ -12082,10 +12082,18 @@ function schemaDefault() {
 }
 
 // Garantisce che uno schema caricato da Firebase abbia tutte le sezioni.
+// Migra anche il vecchio formato del rendiconto (categorie assegnate direttamente
+// all'area, senza sottovoci) verso il nuovo formato area -> voci -> categorie.
 function normalizzaSchema(s) {
   const d = schemaDefault();
   const out = { sp: s.sp || d.sp, ce: s.ce || d.ce, rf: s.rf || d.rf };
-  out.rf.aree = out.rf.aree || d.rf.aree;
+  out.rf.aree = (out.rf.aree || d.rf.aree).map(a => {
+    if (a.voci) return { ...a, voci: (a.voci || []).map(v => ({ ...v, categorie: v.categorie || [] })) };
+    const voci = (a.categorie && a.categorie.length)
+      ? [{ id: uid(), codice: "", nome: "Categorie", categorie: a.categorie }]
+      : [];
+    return { id: a.id, codice: a.codice, nome: a.nome, voci };
+  });
   out.rf.natura = out.rf.natura || {};
   return out;
 }
@@ -12241,31 +12249,51 @@ function controlliSchema(schema, mastrini, esclusi) {
 // e li porta nell'area a cui la categoria e' assegnata.
 function rendicontoDiretto(schema, movimenti, saldiIniziali) {
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
-  const aree = (schema.rf?.aree || []).map(a => ({ ...a, categorie: a.categorie || [], voci: {}, totale: 0 }));
-  const mappaCat = {};
-  aree.forEach(a => (a.categorie || []).forEach(c => { mappaCat[c] = a.id; }));
+  const aree = (schema.rf?.aree || []).map(a => ({
+    ...a,
+    voci: (a.voci || []).map(v => ({ ...v, categorie: v.categorie || [] })),
+  }));
+  const mappaCat = {};   // categoria -> { areaId, voceId }
+  aree.forEach(a => a.voci.forEach(v => (v.categorie || []).forEach(c => { mappaCat[c] = { areaId: a.id, voceId: v.id }; })));
   const primaArea = aree[0];
   const nonAssegnate = new Set();
+  const flussiCat = {};   // categoria -> importo del periodo
 
   (movimenti || []).forEach(m => {
     if (isAperturaMov(m)) return;      // le aperture non sono flussi del periodo
     if (m.nonMonetario) return;        // ammortamenti e rettifiche: nessun effetto di cassa
     if (m.tipo !== "entrata" && m.tipo !== "uscita") return;   // i giroconti si compensano
     const cat = m.categoria || "(senza categoria)";
-    const areaId = mappaCat[cat];
-    if (!areaId) nonAssegnate.add(cat);
-    const area = aree.find(a => a.id === areaId) || primaArea;
-    if (!area) return;
+    if (!mappaCat[cat]) nonAssegnate.add(cat);
     const v = (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
-    area.voci[cat] = (area.voci[cat] || 0) + v;
+    flussiCat[cat] = (flussiCat[cat] || 0) + v;
   });
 
   aree.forEach(a => {
-    a.righe = Object.entries(a.voci)
-      .map(([cat, val]) => ({ cat, val: r2(val) }))
-      .sort((x, y) => x.cat.localeCompare(y.cat));
-    a.totale = r2(a.righe.reduce((s, r) => s + r.val, 0));
+    a.voci.forEach(v => {
+      v.righe = (v.categorie || [])
+        .map(cat => ({ cat, val: r2(flussiCat[cat] || 0) }))
+        .sort((x, y) => x.cat.localeCompare(y.cat));
+      v.totale = r2(v.righe.reduce((s, r) => s + r.val, 0));
+    });
+    a.totale = r2(a.voci.reduce((s, v) => s + v.totale, 0));
   });
+
+  // le categorie non assegnate ad alcuna voce confluiscono, per garantire comunque
+  // la quadratura del rendiconto, in una sottovoce "virtuale" della prima area:
+  // non fa parte dello schema salvato, e' solo per non nascondere lo sbilancio.
+  if (primaArea) {
+    const righeNC = [...nonAssegnate]
+      .map(cat => ({ cat, val: r2(flussiCat[cat] || 0) }))
+      .filter(r => Math.abs(r.val) > 0.005)
+      .sort((x, y) => x.cat.localeCompare(y.cat));
+    if (righeNC.length) {
+      const totNC = r2(righeNC.reduce((s, r) => s + r.val, 0));
+      primaArea.voci = [...primaArea.voci,
+        { id: "_nc", codice: "", nome: "Categorie non classificate", categorie: [], righe: righeNC, totale: totNC, virtuale: true }];
+      primaArea.totale = r2(primaArea.totale + totNC);
+    }
+  }
 
   // disponibilita' iniziali = saldi iniziali dei conti di liquidita' + aperture monetarie
   const liqSet = new Set(CONTI_LIQUIDITA.map(c => c.codice));
@@ -12444,6 +12472,44 @@ function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati, assegnati }) {
   );
 }
 
+function SBEditorVoceArea({ area, v, api, categorieTutte, assegnateAltrove }) {
+  const disponibili = categorieTutte.filter(c => !assegnateAltrove.has(c));
+  return (
+    <div style={{ borderLeft: "2px solid var(--rule-2)", paddingLeft: 10, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <input value={v.codice || ""} onChange={e => api.updVoceArea(area.id, v.id, { codice: e.target.value })}
+               style={{ width: 42, textAlign: "center" }} placeholder="1" />
+        <input value={v.nome || ""} onChange={e => api.updVoceArea(area.id, v.id, { nome: e.target.value })}
+               style={{ flex: 1, minWidth: 150 }} />
+        <button className="btn ghost sm" onClick={() => api.moveVoceArea(area.id, v.id, -1)}>↑</button>
+        <button className="btn ghost sm" onClick={() => api.moveVoceArea(area.id, v.id, 1)}>↓</button>
+        <button className="btn danger sm" onClick={() => api.delVoceArea(area.id, v.id)}>✕</button>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "6px 0 0 4px" }}>
+        {(v.categorie || []).map(c => (
+          <span key={c} style={{
+            display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12,
+            background: "var(--bg)", border: "1px solid var(--rule-2)", borderRadius: 20, padding: "3px 8px",
+          }}>
+            {c}
+            <button className="icon-btn" onClick={() => api.delCatVoce(area.id, v.id, c)}>✕</button>
+          </span>
+        ))}
+        {(v.categorie || []).length === 0 && (
+          <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Nessuna categoria assegnata.</span>
+        )}
+      </div>
+      <div style={{ marginTop: 6, marginLeft: 4 }}>
+        <select value="" onChange={e => { api.addCatVoce(area.id, v.id, e.target.value); e.target.value = ""; }}
+                style={{ fontSize: 12, maxWidth: 340 }}>
+          <option value="">+ assegna categoria…</option>
+          {disponibili.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function SBEditorArea({ area, api, categorieTutte, assegnateAltrove }) {
   return (
     <div style={{ border: "1px solid var(--rule)", borderRadius: 8, marginBottom: 12, background: "var(--panel)" }}>
@@ -12458,29 +12524,14 @@ function SBEditorArea({ area, api, categorieTutte, assegnateAltrove }) {
         <button className="btn danger sm" onClick={() => api.delArea(area.id)}>✕</button>
       </div>
       <div style={{ padding: "8px 12px 12px" }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {(area.categorie || []).map(c => (
-            <span key={c} style={{
-              display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12,
-              background: "var(--bg)", border: "1px solid var(--rule-2)", borderRadius: 20, padding: "3px 8px",
-            }}>
-              {c}
-              <button className="icon-btn" onClick={() => api.delCatArea(area.id, c)}>✕</button>
-            </span>
-          ))}
-          {(area.categorie || []).length === 0 && (
-            <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Nessuna categoria assegnata.</span>
-          )}
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <select value="" onChange={e => { api.addCatArea(area.id, e.target.value); e.target.value = ""; }}
-                  style={{ fontSize: 12, maxWidth: 340 }}>
-            <option value="">+ assegna categoria…</option>
-            {categorieTutte.filter(c => !assegnateAltrove.has(c)).map(c => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </div>
+        {(area.voci || []).length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--ink-3)", padding: "6px 0" }}>Nessuna sottovoce.</div>
+        )}
+        {(area.voci || []).map(v => (
+          <SBEditorVoceArea key={v.id} area={area} v={v} api={api}
+                             categorieTutte={categorieTutte} assegnateAltrove={assegnateAltrove} />
+        ))}
+        <button className="btn ghost sm" onClick={() => api.addVoceArea(area.id)}>+ Sottovoce</button>
       </div>
     </div>
   );
@@ -12637,18 +12688,31 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     moveArea: (id, dir) => { const s = clone(); const i = s.rf.aree.findIndex(x => x.id === id); const j = i + dir;
       if (i < 0 || j < 0 || j >= s.rf.aree.length) return;
       [s.rf.aree[i], s.rf.aree[j]] = [s.rf.aree[j], s.rf.aree[i]]; aggiorna(s); },
-    addCatArea: (id, cat) => { if (!cat) return; const s = clone();
-      s.rf.aree.forEach(a => { a.categorie = (a.categorie || []).filter(c => c !== cat); });
-      const a = s.rf.aree.find(x => x.id === id); if (!a) return;
-      a.categorie = [...(a.categorie || []), cat].sort(); aggiorna(s); },
-    delCatArea: (id, cat) => { const s = clone(); const a = s.rf.aree.find(x => x.id === id); if (!a) return;
-      a.categorie = (a.categorie || []).filter(c => c !== cat); aggiorna(s); },
+    addVoceArea: (areaId) => { const s = clone(); const a = s.rf.aree.find(x => x.id === areaId); if (!a) return;
+      a.voci = a.voci || []; a.voci.push({ id: uid(), codice: "", nome: "Nuova sottovoce", categorie: [] }); aggiorna(s); },
+    updVoceArea: (areaId, voceId, patch) => { const s = clone(); const a = s.rf.aree.find(x => x.id === areaId); if (!a) return;
+      const v = (a.voci || []).find(x => x.id === voceId); if (!v) return; Object.assign(v, patch); aggiorna(s); },
+    delVoceArea: (areaId, voceId) => { const s = clone(); const a = s.rf.aree.find(x => x.id === areaId); if (!a) return;
+      a.voci = (a.voci || []).filter(x => x.id !== voceId); aggiorna(s); },
+    moveVoceArea: (areaId, voceId, dir) => { const s = clone(); const a = s.rf.aree.find(x => x.id === areaId); if (!a) return;
+      const i = a.voci.findIndex(x => x.id === voceId); const j = i + dir;
+      if (i < 0 || j < 0 || j >= a.voci.length) return;
+      [a.voci[i], a.voci[j]] = [a.voci[j], a.voci[i]]; aggiorna(s); },
+    addCatVoce: (areaId, voceId, cat) => { if (!cat) return; const s = clone();
+      // assegnazione singola: la categoria viene tolta da qualunque altra sottovoce prima di aggiungerla qui
+      s.rf.aree.forEach(a => (a.voci || []).forEach(v => { v.categorie = (v.categorie || []).filter(c => c !== cat); }));
+      const a = s.rf.aree.find(x => x.id === areaId); if (!a) return;
+      const v = (a.voci || []).find(x => x.id === voceId); if (!v) return;
+      v.categorie = [...(v.categorie || []), cat].sort(); aggiorna(s); },
+    delCatVoce: (areaId, voceId, cat) => { const s = clone(); const a = s.rf.aree.find(x => x.id === areaId); if (!a) return;
+      const v = (a.voci || []).find(x => x.id === voceId); if (!v) return;
+      v.categorie = (v.categorie || []).filter(c => c !== cat); aggiorna(s); },
     setNatura: (cod, n) => { const s = clone(); s.rf.natura = s.rf.natura || {}; s.rf.natura[String(cod)] = n; aggiorna(s); },
   };
 
   const contiOrdinati = [...mastrini].sort((a, b) => a.codice - b.codice);
   const assegnateAltrove = new Set();
-  (schema.rf?.aree || []).forEach(a => (a.categorie || []).forEach(c => assegnateAltrove.add(c)));
+  (schema.rf?.aree || []).forEach(a => (a.voci || []).forEach(v => (v.categorie || []).forEach(c => assegnateAltrove.add(c))));
 
   const resetSchema = () => {
     if (!confirm("Ripristinare lo schema di default? Tutte le assegnazioni verranno perse.")) return;
@@ -12660,8 +12724,14 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     // proposta anche per le aree del rendiconto: investimenti riconosciuti per nome
     s.rf = s.rf || schemaDefault().rf;
     const gia = new Set();
-    (s.rf.aree || []).forEach(a => (a.categorie || []).forEach(c => gia.add(c)));
-    const op = s.rf.aree[0], inv = s.rf.aree[1], fin = s.rf.aree[2];
+    s.rf.aree.forEach(a => (a.voci || []).forEach(v => (v.categorie || []).forEach(c => gia.add(c))));
+    const voceAuto = (a) => {
+      a.voci = a.voci || [];
+      let v = a.voci.find(x => x.nome === "Automatiche");
+      if (!v) { v = { id: uid(), codice: "", nome: "Automatiche", categorie: [] }; a.voci.push(v); }
+      return v;
+    };
+    const op = voceAuto(s.rf.aree[0]), inv = voceAuto(s.rf.aree[1]), fin = voceAuto(s.rf.aree[2]);
     categorieTutte.forEach(c => {
       if (gia.has(c)) return;
       const u = c.toUpperCase();
@@ -12768,7 +12838,11 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     rfDir.aree.forEach(a => {
       bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
                   { content: money(a.totale), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }]);
-      a.righe.forEach(r => bodyD.push([`   ${r.cat}`, money(r.val)]));
+      (a.voci || []).forEach(v => {
+        bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
+                    { content: money(v.totale), styles: { fontStyle: "bold" } }]);
+        (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, money(r.val)]));
+      });
     });
     bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
                 { content: money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
@@ -12918,8 +12992,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       {tab === "rf" && (
         <div>
           <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12, lineHeight: 1.55 }}>
-            Il <b>metodo diretto</b> classifica i flussi di cassa per categoria di movimento: assegna ogni
-            categoria a un'area. Il <b>metodo indiretto</b> parte dal risultato e usa le variazioni dei saldi
+            Il <b>metodo diretto</b> classifica i flussi di cassa per categoria di movimento: ogni area può
+            avere più <b>sottovoci</b> (come le macroclassi di SP/CE), e ogni sottovoce raccoglie una o più
+            categorie di movimento — così eviti di riversare tutte le categorie in blocco sotto le 3 aree
+            principali. Il <b>metodo indiretto</b> parte dal risultato e usa le variazioni dei saldi
             patrimoniali, per cui ha bisogno di sapere la <b>natura</b> di ciascun conto. Le due strade
             arrivano alla stessa variazione di liquidità: se non coincidono per area, una categoria è
             classificata male.
@@ -12927,11 +13003,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
           {(schema.rf?.aree || []).map(a => (
             <SBEditorArea key={a.id} area={a} api={api}
-                          categorieTutte={categorieTutte}
-                          assegnateAltrove={new Set([...assegnateAltrove].filter(c => !(a.categorie || []).includes(c)))} />
+                          categorieTutte={categorieTutte} assegnateAltrove={assegnateAltrove} />
           ))}
           <button className="btn" onClick={() => {
-            const s = clone(); s.rf.aree.push({ id: uid(), codice: "", nome: "Nuova area", categorie: [] }); aggiorna(s);
+            const s = clone(); s.rf.aree.push({ id: uid(), codice: "", nome: "Nuova area", voci: [] }); aggiorna(s);
           }}>+ Area</button>
 
           {rfDir.nonAssegnate.length > 0 && (
@@ -13053,14 +13128,25 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       <td style={{ fontWeight: 700 }}>{a.codice ? a.codice + ") " : ""}{a.nome}</td>
                       <td className="num" style={{ fontWeight: 700 }}>{fmt(a.totale)}</td>
                     </tr>
-                    {a.righe.map(r => (
-                      <tr key={r.cat}>
-                        <td style={{ paddingLeft: 26 }}>{r.cat}</td>
-                        <td className="num" style={{ color: r.val < 0 ? "var(--danger)" : "inherit" }}>{fmt(r.val)}</td>
-                      </tr>
+                    {(a.voci || []).map(v => (
+                      <React.Fragment key={v.id}>
+                        <tr>
+                          <td style={{ paddingLeft: 18, fontWeight: 600, fontStyle: v.virtuale ? "italic" : "normal",
+                                       color: v.virtuale ? "var(--danger)" : "inherit" }}>
+                            {v.codice ? v.codice + ". " : ""}{v.nome}
+                          </td>
+                          <td className="num" style={{ fontWeight: 600 }}>{fmt(v.totale)}</td>
+                        </tr>
+                        {(v.righe || []).map(r => (
+                          <tr key={r.cat}>
+                            <td style={{ paddingLeft: 34, fontSize: 12.5, color: "var(--ink-2)" }}>{r.cat}</td>
+                            <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmt(r.val)}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
                     ))}
-                    {a.righe.length === 0 && (
-                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessun flusso</td><td className="num">—</td></tr>
+                    {(a.voci || []).length === 0 && (
+                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessuna sottovoce</td><td className="num">—</td></tr>
                     )}
                   </React.Fragment>
                 ))}
