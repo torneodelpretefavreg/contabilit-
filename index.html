@@ -12344,7 +12344,13 @@ function SBPillConto({ x, nome, onSegno, onRimuovi }) {
   );
 }
 
-function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati }) {
+function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
+  const [forza, setForza] = useState(false);
+  const codiciQui = new Set((v.conti || []).map(x => Number(x.c)));
+  const disponibili = contiOrdinati.filter(m => !codiciQui.has(Number(m.codice)));
+  const opzioni = forza ? disponibili : disponibili.filter(m => !assegnati[Number(m.codice)]);
+  const nNascosti = disponibili.length - opzioni.length;
+
   return (
     <div style={{ borderLeft: "2px solid var(--rule-2)", paddingLeft: 10, marginBottom: 10 }}>
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -12371,16 +12377,28 @@ function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati }) {
                 onRimuovi={() => api.delConto(p, cl.id, v.id, x.c)} />
             ))}
           </div>
-          <div style={{ marginTop: 6, marginLeft: 4 }}>
+          <div style={{ marginTop: 6, marginLeft: 4, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <select value="" onChange={e => { api.addConto(p, cl.id, v.id, e.target.value, 1); e.target.value = ""; }}
                     style={{ fontSize: 12, maxWidth: 340 }}>
               <option value="">+ aggiungi conto…</option>
-              {contiOrdinati.map(m => (
-                <option key={m.codice} value={m.codice}>
-                  {String(m.codice).padStart(2, "0")} · {(m.nome || "").trim()} · {fmt(m.saldo)}
-                </option>
-              ))}
+              {opzioni.map(m => {
+                const altrove = assegnati[Number(m.codice)];
+                return (
+                  <option key={m.codice} value={m.codice}>
+                    {String(m.codice).padStart(2, "0")} · {(m.nome || "").trim()} · {fmt(m.saldo)}
+                    {altrove ? ` ⚠ già in ${altrove.join(" · ")}` : ""}
+                  </option>
+                );
+              })}
             </select>
+            <label style={{ fontSize: 11, color: "var(--ink-2)", display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" }}
+                   title="Consente di scegliere anche conti già assegnati a un'altra voce (doppio conteggio volontario)">
+              <input type="checkbox" checked={forza} onChange={e => setForza(e.target.checked)} />
+              Forza doppio
+            </label>
+            {!forza && nNascosti > 0 && (
+              <span style={{ fontSize: 11, color: "var(--ink-3)" }}>{nNascosti} già assegnati nascosti</span>
+            )}
           </div>
         </>
       )}
@@ -12388,7 +12406,7 @@ function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati }) {
   );
 }
 
-function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati }) {
+function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati, assegnati }) {
   return (
     <div style={{ border: "1px solid var(--rule)", borderRadius: 8, marginBottom: 12, background: "var(--panel)" }}>
       <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px",
@@ -12418,7 +12436,7 @@ function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati }) {
         )}
         {(cl.voci || []).map(v => (
           <SBEditorVoce key={v.id} p={p} cl={cl} v={v} api={api}
-                        contiMap={contiMap} contiOrdinati={contiOrdinati} />
+                        contiMap={contiMap} contiOrdinati={contiOrdinati} assegnati={assegnati} />
         ))}
         <button className="btn ghost sm" onClick={() => api.addVoce(p, cl.id)}>+ Voce</button>
       </div>
@@ -12658,100 +12676,137 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const escludiConto = (cod) => aggiorna(statoRef.current.schema, [...new Set([...esclusi, Number(cod)])]);
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
-  // ---------- export PDF ----------
+  // ---------- export PDF (stessa grafica della pagina Export) ----------
   const esportaPDF = () => {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const money = n => Number(n).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const intestazione = (titolo) => {
-      doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+    const oggi = new Date().toLocaleDateString("it-IT");
+    const VERDE = [45, 94, 62], ROSSO = [181, 67, 67], NERO = [26, 26, 26];
+    const VERDE_CHIARO = [230, 240, 232], ROSSO_CHIARO = [251, 236, 236], GRIGIO_CHIARO = [238, 238, 234];
+
+    const intestazioneP = (titolo) => {
+      doc.setFont("helvetica", "bold"); doc.setFontSize(16);
       doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
       doc.setFont("helvetica", "normal"); doc.setFontSize(11);
-      doc.text(`${titolo} - Esercizio ${stagione}`, 105, 25, { align: "center" });
+      doc.text(`${titolo} · Stagione ${stagione}`, 105, 25, { align: "center" });
+      doc.setFontSize(9); doc.setTextColor(100);
+      doc.text(`Al ${oggi}`, 105, 31, { align: "center" });
+      doc.setTextColor(0);
     };
-    const tabella = (body, startY) => {
+    const intestazioneL = (titolo) => {
+      doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+      doc.text("FUTSAL FABBRICO ASD", 148, 14, { align: "center" });
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+      doc.text(`${titolo} · Stagione ${stagione}`, 148, 20, { align: "center" });
+      doc.setFontSize(8); doc.setTextColor(100);
+      doc.text(`Generato il ${oggi}`, 148, 25, { align: "center" });
+      doc.setTextColor(0);
+    };
+    // tabella con intestazione colorata (verde/rosso), come in Export
+    const tabellaColorata = (body, headLabel, startY, coloreHead) => {
       doc.autoTable({
-        startY, body, theme: "plain",
-        styles: { fontSize: 9, cellPadding: 1.8 },
+        startY, head: [[headLabel, "Importo"]], body, theme: "plain",
+        styles: { fontSize: 9, cellPadding: 2 },
+        headStyles: { fillColor: coloreHead, textColor: 240, fontStyle: "bold" },
         columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
       });
       return doc.lastAutoTable.finalY;
     };
+    // barra finale nera/colorata con etichetta e valore, come RISULTATO D'ESERCIZIO in Export
+    const barraFinale = (y, label, valore, colore) => {
+      doc.setFillColor(...colore); doc.rect(14, y, doc.internal.pageSize.width - 28, 10, "F");
+      doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(11);
+      doc.text(label, 16, y + 7);
+      doc.text(valore, doc.internal.pageSize.width - 16, y + 7, { align: "right" });
+      doc.setTextColor(0);
+    };
+    const righeClasse = (cl, prefissoVoce) => {
+      const rows = [[{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
+                     { content: money(cl.totale), styles: { fontStyle: "bold" } }]];
+      (cl.voci || []).forEach(v => rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore)]));
+      return rows;
+    };
 
     // --- Stato Patrimoniale ---
-    intestazione("Stato Patrimoniale");
-    const sezione = (lato, titolo, startY) => {
-      const body = [];
-      prospetti.sp.filter(c => c.lato === lato).forEach(cl => {
-        body.push([{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
-                   { content: money(cl.totale), styles: { fontStyle: "bold", halign: "right" } }]);
-        (cl.voci || []).forEach(v => body.push([`      ${v.codice ? v.codice + ". " : ""}${v.nome}`,
-                   { content: money(v.valore), styles: { halign: "right" } }]));
-      });
-      doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-      doc.text(titolo, 14, startY);
-      return tabella(body, startY + 3);
-    };
-    let y = sezione("attivo", "ATTIVO", 36);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(10);
-    doc.text("TOTALE ATTIVO", 14, y + 6);
-    doc.text(money(prospetti.totAttivo), 196, y + 6, { align: "right" });
-    y = sezione("passivo", "PASSIVO E PATRIMONIO NETTO", y + 16);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(10);
-    doc.text("TOTALE PASSIVO E PATRIMONIO NETTO", 14, y + 6);
-    doc.text(money(prospetti.totPassivo), 196, y + 6, { align: "right" });
-    doc.setFont("helvetica", "normal"); doc.setFontSize(8);
-    doc.text(Math.abs(prospetti.sbilancio) < 0.01 ? "Quadratura: OK" : `Sbilancio: ${money(prospetti.sbilancio)}`, 14, y + 12);
+    intestazioneP("Stato Patrimoniale");
+    const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => righeClasse(cl, ". "));
+    attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
+                      { content: money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
+    let y = tabellaColorata(attivoRows, "ATTIVO", 36, VERDE);
+    const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => righeClasse(cl, ". "));
+    passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
+                       { content: money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
+    y = tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, ROSSO);
+    const okSP = Math.abs(prospetti.sbilancio) < 0.01;
+    barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
+                okSP ? "0,00" : money(prospetti.sbilancio), okSP ? VERDE : ROSSO);
 
     // --- Conto Economico ---
-    doc.addPage(); intestazione("Conto Economico");
-    const bodyCE = [];
-    prospetti.ce.forEach(cl => {
-      bodyCE.push([{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
-                   { content: money(cl.totale), styles: { fontStyle: "bold", halign: "right" } }]);
-      (cl.voci || []).forEach(v => bodyCE.push([`      ${v.codice ? v.codice + ") " : ""}${v.nome}`,
-                   { content: money(v.valore), styles: { halign: "right" } }]));
-    });
-    let y2 = tabella(bodyCE, 34);
-    doc.setFillColor(26, 26, 26); doc.rect(14, y2 + 2, 182, 10, "F");
-    doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-    doc.text("RISULTATO D'ESERCIZIO", 16, y2 + 9);
-    doc.text(`${money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, 194, y2 + 9, { align: "right" });
-    doc.setTextColor(0);
+    doc.addPage(); intestazioneP("Conto Economico");
+    const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
+    const negCE = prospetti.ce.filter(cl => cl.segno < 0);
+    let y2 = 34;
+    if (posCE.length) {
+      const rows = posCE.flatMap(cl => righeClasse(cl, ") "));
+      rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
+                 { content: money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
+      y2 = tabellaColorata(rows, "VOCI POSITIVE", y2, VERDE) + 10;
+    }
+    if (negCE.length) {
+      const rows = negCE.flatMap(cl => righeClasse(cl, ") "));
+      rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
+                 { content: money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
+      y2 = tabellaColorata(rows, "VOCI NEGATIVE", y2, ROSSO) + 10;
+    }
+    barraFinale(y2, "RISULTATO D'ESERCIZIO",
+                `${money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, NERO);
 
     // --- Rendiconto: metodo diretto ---
-    doc.addPage(); intestazione("Rendiconto Finanziario - Metodo diretto");
+    doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo diretto");
     const bodyD = [];
     rfDir.aree.forEach(a => {
-      bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold" } },
-                  { content: money(a.totale), styles: { fontStyle: "bold", halign: "right" } }]);
-      a.righe.forEach(r => bodyD.push([`      ${r.cat}`, { content: money(r.val), styles: { halign: "right" } }]));
+      bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+                  { content: money(a.totale), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }]);
+      a.righe.forEach(r => bodyD.push([`   ${r.cat}`, money(r.val)]));
     });
     bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
-                { content: money(rfDir.variazione), styles: { fontStyle: "bold", halign: "right" } }]);
-    bodyD.push(["Disponibilita' liquide iniziali", { content: money(rfDir.apertura), styles: { halign: "right" } }]);
+                { content: money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
+    bodyD.push(["Disponibilita' liquide iniziali", money(rfDir.apertura)]);
     bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
-                { content: money(rfDir.chiusura), styles: { fontStyle: "bold", halign: "right" } }]);
-    tabella(bodyD, 34);
+                { content: money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
+    doc.autoTable({
+      startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
+      styles: { fontSize: 9, cellPadding: 2 },
+      headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
+      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+    });
 
     // --- Rendiconto: metodo indiretto ---
-    doc.addPage(); intestazione("Rendiconto Finanziario - Metodo indiretto");
+    doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo indiretto");
     const bodyI = [
-      ["Risultato d'esercizio", { content: money(rfInd.risultato), styles: { halign: "right" } }],
-      ["Ammortamenti e rettifiche non monetarie", { content: money(rfInd.ammortamenti), styles: { halign: "right" } }],
-      ["Variazione del capitale circolante", { content: money(rfInd.varCircolante), styles: { halign: "right" } }],
-      [{ content: "A) Flusso della gestione operativa", styles: { fontStyle: "bold" } },
-       { content: money(rfInd.operativo), styles: { fontStyle: "bold", halign: "right" } }],
-      [{ content: "B) Flusso dell'attivita' di investimento", styles: { fontStyle: "bold" } },
-       { content: money(rfInd.investimenti), styles: { fontStyle: "bold", halign: "right" } }],
-      [{ content: "C) Flusso dell'attivita' di finanziamento", styles: { fontStyle: "bold" } },
-       { content: money(rfInd.finanziamenti), styles: { fontStyle: "bold", halign: "right" } }],
+      ["Risultato d'esercizio", money(rfInd.risultato)],
+      ["Ammortamenti e rettifiche non monetarie", money(rfInd.ammortamenti)],
+      ["Variazione del capitale circolante", money(rfInd.varCircolante)],
+      [{ content: "A) Flusso della gestione operativa", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+       { content: money(rfInd.operativo), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
+      [{ content: "B) Flusso dell'attivita' di investimento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+       { content: money(rfInd.investimenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
+      [{ content: "C) Flusso dell'attivita' di finanziamento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+       { content: money(rfInd.finanziamenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
       [{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE (A+B+C)", styles: { fontStyle: "bold" } },
-       { content: money(rfInd.variazione), styles: { fontStyle: "bold", halign: "right" } }],
+       { content: money(rfInd.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }],
     ];
-    const y3 = tabella(bodyI, 34);
-    doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+    doc.autoTable({
+      startY: 30, head: [["Voce", "Importo"]], body: bodyI, theme: "plain",
+      styles: { fontSize: 9, cellPadding: 2 },
+      headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
+      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+    });
+    const y3 = doc.lastAutoTable.finalY;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100);
     doc.text(`Riscontro con il metodo diretto: ${money(rfDir.variazione)} - differenza ${money(rfInd.variazione - rfDir.variazione)}`, 14, y3 + 8);
+    doc.setTextColor(0);
 
     doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
   };
@@ -12843,10 +12898,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             Ogni voce raccoglie uno o più conti. Il pulsante <b>+ / −</b> su ciascun conto decide se il saldo
             entra col <b>segno naturale</b> o <b>invertito</b>: i fondi ammortamento vanno agganciati alla stessa
             voce del cespite col segno naturale, perché avendo saldo avere si deducono da soli e la voce espone il netto.
+            Un conto già assegnato altrove non compare più nell'elenco "+ aggiungi conto…": per inserirlo comunque
+            una seconda volta spunta <b>Forza doppio</b> accanto al menu della voce.
           </div>
           {schema[tab].map(cl => (
             <SBEditorClasse key={cl.id} p={tab} cl={cl} api={api}
-                            contiMap={contiMap} contiOrdinati={contiOrdinati} />
+                            contiMap={contiMap} contiOrdinati={contiOrdinati} assegnati={controlli.assegnati} />
           ))}
           <button className="btn" onClick={() => {
             const s = clone();
