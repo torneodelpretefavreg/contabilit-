@@ -5430,6 +5430,44 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     return { scritture, mastrini, totD, totA, spVoci, ceVoci, ricavi, costi, utile, attivo, passivo, rf };
   }, [movimenti, saldiIniziali, contiMap, conti, categorieRF]);
 
+  // === Schema di Bilancio (sola lettura): stessi prospetti personalizzati della pagina "Schema di Bilancio" ===
+  const [schemaBilancio, setSchemaBilancio] = useState(null);
+  useEffect(() => {
+    if (!firebaseReady || !stagione) { setSchemaBilancio(schemaDefault()); return; }
+    const ref = db.ref(SB_PATH(stagione));
+    const cb = ref.on("value", snap => {
+      const v = snap.val();
+      if (v && v.json) {
+        try { setSchemaBilancio(normalizzaSchema(JSON.parse(v.json).schema || {})); }
+        catch (e) { setSchemaBilancio(schemaDefault()); }
+      } else {
+        setSchemaBilancio(schemaDefault());
+      }
+    });
+    return () => ref.off("value", cb);
+  }, [stagione]);
+
+  const mastriniIniziali = useMemo(() => {
+    const soloAperture = (movimenti || []).filter(isAperturaMov);
+    return calcolaMastrini(generaLibroGiornale(soloAperture, saldiIniziali, contiMap));
+  }, [movimenti, saldiIniziali, contiMap]);
+
+  const prospettiSchema = useMemo(() => schemaBilancio ? calcolaProspetti(schemaBilancio, dati.mastrini) : null,
+    [schemaBilancio, dati.mastrini]);
+  const rfDirSchema = useMemo(() => schemaBilancio ? rendicontoDiretto(schemaBilancio, movimenti, saldiIniziali) : null,
+    [schemaBilancio, movimenti, saldiIniziali]);
+  const rfIndSchema = useMemo(() => schemaBilancio ? rendicontoIndiretto(schemaBilancio, dati.mastrini, mastriniIniziali, contiMap) : null,
+    [schemaBilancio, dati.mastrini, mastriniIniziali, contiMap]);
+
+  const exportProspettiSchemaPDF = () => {
+    if (!prospettiSchema || !rfDirSchema || !rfIndSchema) return;
+    setBusy(true);
+    try {
+      generaPdfProspettiSchema(prospettiSchema, rfDirSchema, rfIndSchema, stagione);
+      setLastAction("Prospetti civilistici (Schema di Bilancio) generati");
+    } finally { setBusy(false); }
+  };
+
   // === HELPER: header pagina PDF ===
   const addHeader = (doc, titoloDoc, pageNum, totPages) => {
     doc.setFont("helvetica", "bold");
@@ -6109,6 +6147,22 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <strong>Ideale per la chiusura annuale e la presentazione al direttivo.</strong>
         </p>
         <button className="btn accent" onClick={exportPacchettoCompleto} disabled={busy}>{busy ? "Generando…" : "Scarica pacchetto completo"}</button>
+      </div>
+
+      {/* PROSPETTI CIVILISTICI dallo Schema di Bilancio */}
+      <div className="card" style={{marginBottom:20, border:"2px solid var(--ink)", background:"var(--panel)"}}>
+        <div style={{display:"flex", alignItems:"baseline", gap:10, marginBottom:6}}>
+          <h3 className="card-title" style={{margin:0, fontSize:18}}>📐 Prospetti civilistici</h3>
+          <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:10}}>DA SCHEMA DI BILANCIO</span>
+        </div>
+        <p style={{fontSize:13, color:"var(--ink-2)", margin:"0 0 14px"}}>
+          Stato Patrimoniale, Conto Economico e Rendiconto Finanziario (metodo diretto e indiretto) esattamente come
+          li hai strutturati nella pagina <strong>Schema di Bilancio</strong> — stesse macroclassi, stesse voci, stessa
+          quadratura. Un unico PDF, stessa grafica del pacchetto completo.
+        </p>
+        <button className="btn accent" onClick={exportProspettiSchemaPDF} disabled={busy || !prospettiSchema}>
+          {busy ? "Generando…" : !prospettiSchema ? "Caricamento schema…" : "Scarica PDF"}
+        </button>
       </div>
 
       <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"24px 0 12px"}}>Documenti singoli</h3>
@@ -12264,7 +12318,14 @@ function disponibilitaLiquidePerConto(movimenti, saldiIniziali) {
       if (m.contoLiquiditaDest != null && byCod[m.contoLiquiditaDest]) byCod[m.contoLiquiditaDest].flusso += Number(m.importo) || 0;
       return;
     }
-    if ((m.tipo !== "entrata" && m.tipo !== "uscita") || m.contoLiquidita == null || !byCod[m.contoLiquidita]) return;
+    if ((m.tipo !== "entrata" && m.tipo !== "uscita") || m.contoLiquidita == null || !byCod[m.contoLiquidita]) {
+      // scritture libere/composte non monetarie il cui conto e' in realta' un conto di
+      // liquidita' (es. cassa/banca scelta per errore o di proposito in una scrittura libera):
+      // senza questo, il saldo per conto non coinciderebbe col mastrino reale.
+      const eff = effettoLiquiditaNascosto(m);
+      if (eff && byCod[eff.codice]) byCod[eff.codice].flusso += eff.delta;
+      return;
+    }
     byCod[m.contoLiquidita].flusso += (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
   });
   return Object.values(byCod).map(o => ({
@@ -12335,19 +12396,30 @@ function rendicontoDiretto(schema, movimenti, saldiIniziali) {
     }
   }
 
-  // disponibilita' iniziali = saldi iniziali dei conti di liquidita' + aperture monetarie
-  const liqSet = new Set(CONTI_LIQUIDITA.map(c => c.codice));
-  let apertura = CONTI_LIQUIDITA.reduce((s, c) => s + (Number(saldiIniziali && saldiIniziali[c.codice]) || 0), 0);
-  (movimenti || []).forEach(m => {
-    if (!isAperturaMov(m) || m.contoLiquidita == null || !liqSet.has(Number(m.contoLiquidita))) return;
-    apertura += (m.tipo === "entrata" ? 1 : m.tipo === "uscita" ? -1 : 0) * (Number(m.importo) || 0);
-  });
+  // Disponibilita' liquide: calcolate conto per conto (fonte di verita' - includono anche
+  // l'effetto "nascosto" di eventuali scritture libere/composte che toccano direttamente un
+  // conto di liquidita' via contoPdC), poi raggruppate nelle 4 righe di dettaglio richieste.
+  // Il totale per conto e' sempre la fonte di verita' per "Disponibilita' liquide finali":
+  // se differisce dalla variazione calcolata per categoria (aree), la differenza viene
+  // esposta come voce a parte, cosi' il totale e le sue righe di dettaglio quadrano sempre.
+  const perConto = disponibilitaLiquidePerConto(movimenti, saldiIniziali);
+  const dettaglioLiquidita = raggruppaDisponibilitaLiquide(perConto);
+  const apertura = r2(perConto.reduce((s, p) => s + p.apertura, 0));
+  const chiusura = r2(perConto.reduce((s, p) => s + p.chiusura, 0));
+  const variazioneAree = r2(aree.reduce((s, a) => s + a.totale, 0));
+  const differenzaNascosta = r2(chiusura - apertura - variazioneAree);
 
-  const variazione = r2(aree.reduce((s, a) => s + a.totale, 0));
-  const dettaglioLiquidita = raggruppaDisponibilitaLiquide(disponibilitaLiquidePerConto(movimenti, saldiIniziali));
+  if (primaArea && Math.abs(differenzaNascosta) > 0.005) {
+    primaArea.voci = [...primaArea.voci,
+      { id: "_ln", codice: "", nome: "Scritture libere su conti di liquidità non classificate", categorie: [],
+        righe: [], totale: differenzaNascosta, virtuale: true }];
+    primaArea.totale = r2(primaArea.totale + differenzaNascosta);
+  }
+  const variazione = r2(variazioneAree + differenzaNascosta);
+
   return {
-    aree, apertura: r2(apertura), variazione, chiusura: r2(apertura + variazione),
-    nonAssegnate: [...nonAssegnate].sort(), dettaglioLiquidita,
+    aree, apertura, variazione, chiusura,
+    nonAssegnate: [...nonAssegnate].sort(), dettaglioLiquidita, differenzaNascosta,
   };
 }
 
@@ -12411,6 +12483,150 @@ function SBPillConto({ x, nome, onSegno, onRimuovi }) {
       <button className="icon-btn" onClick={onRimuovi} title="Rimuovi">✕</button>
     </span>
   );
+}
+
+// Genera il PDF dei prospetti civilistici (SP, CE, RF diretto e indiretto) a partire
+// dai dati già calcolati con lo Schema di Bilancio. Funzione condivisa: la usano sia
+// la pagina Schema di Bilancio sia la pagina Export, così i due punti mostrano sempre
+// esattamente lo stesso prospetto con la stessa grafica.
+function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const money = n => Math.round(Number(n) || 0).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+  const oggi = new Date().toLocaleDateString("it-IT");
+  const VERDE = [45, 94, 62], ROSSO = [181, 67, 67], NERO = [26, 26, 26];
+  const VERDE_CHIARO = [230, 240, 232], ROSSO_CHIARO = [251, 236, 236], GRIGIO_CHIARO = [238, 238, 234];
+
+  const intestazioneP = (titolo) => {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+    doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
+    doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+    doc.text(`${titolo} · Stagione ${stagione}`, 105, 25, { align: "center" });
+    doc.setFontSize(9); doc.setTextColor(100);
+    doc.text(`Al ${oggi}`, 105, 31, { align: "center" });
+    doc.setTextColor(0);
+  };
+  const intestazioneL = (titolo) => {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+    doc.text("FUTSAL FABBRICO ASD", 148, 14, { align: "center" });
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+    doc.text(`${titolo} · Stagione ${stagione}`, 148, 20, { align: "center" });
+    doc.setFontSize(8); doc.setTextColor(100);
+    doc.text(`Generato il ${oggi}`, 148, 25, { align: "center" });
+    doc.setTextColor(0);
+  };
+  // tabella con intestazione colorata (verde/rosso), come in Export
+  const tabellaColorata = (body, headLabel, startY, coloreHead) => {
+    doc.autoTable({
+      startY, head: [[headLabel, "Importo"]], body, theme: "plain",
+      styles: { fontSize: 9, cellPadding: 2 },
+      headStyles: { fillColor: coloreHead, textColor: 240, fontStyle: "bold" },
+      columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
+    });
+    return doc.lastAutoTable.finalY;
+  };
+  // barra finale nera/colorata con etichetta e valore, come RISULTATO D'ESERCIZIO in Export
+  const barraFinale = (y, label, valore, colore) => {
+    doc.setFillColor(...colore); doc.rect(14, y, doc.internal.pageSize.width - 28, 10, "F");
+    doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(11);
+    doc.text(label, 16, y + 7);
+    doc.text(valore, doc.internal.pageSize.width - 16, y + 7, { align: "right" });
+    doc.setTextColor(0);
+  };
+  const righeClasse = (cl, prefissoVoce) => {
+    const rows = [[{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
+                   { content: money(cl.totale), styles: { fontStyle: "bold" } }]];
+    (cl.voci || []).forEach(v => rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore)]));
+    return rows;
+  };
+
+  // --- Stato Patrimoniale ---
+  intestazioneP("Stato Patrimoniale");
+  const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => righeClasse(cl, ". "));
+  attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
+                    { content: money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
+  let y = tabellaColorata(attivoRows, "ATTIVO", 36, VERDE);
+  const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => righeClasse(cl, ". "));
+  passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
+                     { content: money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
+  y = tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, ROSSO);
+  const okSP = Math.abs(prospetti.sbilancio) < 0.01;
+  barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
+              okSP ? "0" : money(prospetti.sbilancio), okSP ? VERDE : ROSSO);
+
+  // --- Conto Economico ---
+  doc.addPage(); intestazioneP("Conto Economico");
+  const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
+  const negCE = prospetti.ce.filter(cl => cl.segno < 0);
+  let y2 = 34;
+  if (posCE.length) {
+    const rows = posCE.flatMap(cl => righeClasse(cl, ") "));
+    rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
+               { content: money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
+    y2 = tabellaColorata(rows, "VOCI POSITIVE", y2, VERDE) + 10;
+  }
+  if (negCE.length) {
+    const rows = negCE.flatMap(cl => righeClasse(cl, ") "));
+    rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
+               { content: money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
+    y2 = tabellaColorata(rows, "VOCI NEGATIVE", y2, ROSSO) + 10;
+  }
+  barraFinale(y2, "RISULTATO D'ESERCIZIO",
+              `${money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, NERO);
+
+  // --- Rendiconto: metodo diretto ---
+  doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo diretto");
+  const bodyD = [];
+  rfDir.aree.forEach(a => {
+    bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+                { content: money(a.totale), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }]);
+    (a.voci || []).forEach(v => {
+      bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
+                  { content: money(v.totale), styles: { fontStyle: "bold" } }]);
+      (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, money(r.val)]));
+    });
+  });
+  bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
+              { content: money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
+  bodyD.push(["Disponibilita' liquide iniziali", money(rfDir.apertura)]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.apertura)]));
+  bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
+              { content: money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.chiusura)]));
+  doc.autoTable({
+    startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
+    styles: { fontSize: 9, cellPadding: 2 },
+    headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
+    columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+  });
+
+  // --- Rendiconto: metodo indiretto ---
+  doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo indiretto");
+  const bodyI = [
+    ["Risultato d'esercizio", money(rfInd.risultato)],
+    ["Ammortamenti e rettifiche non monetarie", money(rfInd.ammortamenti)],
+    ["Variazione del capitale circolante", money(rfInd.varCircolante)],
+    [{ content: "A) Flusso della gestione operativa", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+     { content: money(rfInd.operativo), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
+    [{ content: "B) Flusso dell'attivita' di investimento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+     { content: money(rfInd.investimenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
+    [{ content: "C) Flusso dell'attivita' di finanziamento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
+     { content: money(rfInd.finanziamenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
+    [{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE (A+B+C)", styles: { fontStyle: "bold" } },
+     { content: money(rfInd.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }],
+  ];
+  doc.autoTable({
+    startY: 30, head: [["Voce", "Importo"]], body: bodyI, theme: "plain",
+    styles: { fontSize: 9, cellPadding: 2 },
+    headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
+    columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+  });
+  const y3 = doc.lastAutoTable.finalY;
+  doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100);
+  doc.text(`Riscontro con il metodo diretto: ${money(rfDir.variazione)} - differenza ${money(rfInd.variazione - rfDir.variazione)}`, 14, y3 + 8);
+  doc.setTextColor(0);
+
+  doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
 }
 
 function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
@@ -12593,6 +12809,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const pendingRef = useRef(false);
   const scrittoRef = useRef(null);
   statoRef.current = { schema, esclusi };
+  const fmt0Euro = (n) => "€ " + fmt(n, 0);
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -12812,145 +13029,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
   // ---------- export PDF (stessa grafica della pagina Export) ----------
-  const esportaPDF = () => {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-    const money = n => Number(n).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const oggi = new Date().toLocaleDateString("it-IT");
-    const VERDE = [45, 94, 62], ROSSO = [181, 67, 67], NERO = [26, 26, 26];
-    const VERDE_CHIARO = [230, 240, 232], ROSSO_CHIARO = [251, 236, 236], GRIGIO_CHIARO = [238, 238, 234];
-
-    const intestazioneP = (titolo) => {
-      doc.setFont("helvetica", "bold"); doc.setFontSize(16);
-      doc.text("FUTSAL FABBRICO ASD", 105, 18, { align: "center" });
-      doc.setFont("helvetica", "normal"); doc.setFontSize(11);
-      doc.text(`${titolo} · Stagione ${stagione}`, 105, 25, { align: "center" });
-      doc.setFontSize(9); doc.setTextColor(100);
-      doc.text(`Al ${oggi}`, 105, 31, { align: "center" });
-      doc.setTextColor(0);
-    };
-    const intestazioneL = (titolo) => {
-      doc.setFont("helvetica", "bold"); doc.setFontSize(15);
-      doc.text("FUTSAL FABBRICO ASD", 148, 14, { align: "center" });
-      doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-      doc.text(`${titolo} · Stagione ${stagione}`, 148, 20, { align: "center" });
-      doc.setFontSize(8); doc.setTextColor(100);
-      doc.text(`Generato il ${oggi}`, 148, 25, { align: "center" });
-      doc.setTextColor(0);
-    };
-    // tabella con intestazione colorata (verde/rosso), come in Export
-    const tabellaColorata = (body, headLabel, startY, coloreHead) => {
-      doc.autoTable({
-        startY, head: [[headLabel, "Importo"]], body, theme: "plain",
-        styles: { fontSize: 9, cellPadding: 2 },
-        headStyles: { fillColor: coloreHead, textColor: 240, fontStyle: "bold" },
-        columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
-      });
-      return doc.lastAutoTable.finalY;
-    };
-    // barra finale nera/colorata con etichetta e valore, come RISULTATO D'ESERCIZIO in Export
-    const barraFinale = (y, label, valore, colore) => {
-      doc.setFillColor(...colore); doc.rect(14, y, doc.internal.pageSize.width - 28, 10, "F");
-      doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-      doc.text(label, 16, y + 7);
-      doc.text(valore, doc.internal.pageSize.width - 16, y + 7, { align: "right" });
-      doc.setTextColor(0);
-    };
-    const righeClasse = (cl, prefissoVoce) => {
-      const rows = [[{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
-                     { content: money(cl.totale), styles: { fontStyle: "bold" } }]];
-      (cl.voci || []).forEach(v => rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore)]));
-      return rows;
-    };
-
-    // --- Stato Patrimoniale ---
-    intestazioneP("Stato Patrimoniale");
-    const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => righeClasse(cl, ". "));
-    attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
-                      { content: money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
-    let y = tabellaColorata(attivoRows, "ATTIVO", 36, VERDE);
-    const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => righeClasse(cl, ". "));
-    passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
-                       { content: money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
-    y = tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, ROSSO);
-    const okSP = Math.abs(prospetti.sbilancio) < 0.01;
-    barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                okSP ? "0,00" : money(prospetti.sbilancio), okSP ? VERDE : ROSSO);
-
-    // --- Conto Economico ---
-    doc.addPage(); intestazioneP("Conto Economico");
-    const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
-    const negCE = prospetti.ce.filter(cl => cl.segno < 0);
-    let y2 = 34;
-    if (posCE.length) {
-      const rows = posCE.flatMap(cl => righeClasse(cl, ") "));
-      rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
-                 { content: money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
-      y2 = tabellaColorata(rows, "VOCI POSITIVE", y2, VERDE) + 10;
-    }
-    if (negCE.length) {
-      const rows = negCE.flatMap(cl => righeClasse(cl, ") "));
-      rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
-                 { content: money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
-      y2 = tabellaColorata(rows, "VOCI NEGATIVE", y2, ROSSO) + 10;
-    }
-    barraFinale(y2, "RISULTATO D'ESERCIZIO",
-                `${money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, NERO);
-
-    // --- Rendiconto: metodo diretto ---
-    doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo diretto");
-    const bodyD = [];
-    rfDir.aree.forEach(a => {
-      bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-                  { content: money(a.totale), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }]);
-      (a.voci || []).forEach(v => {
-        bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
-                    { content: money(v.totale), styles: { fontStyle: "bold" } }]);
-        (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, money(r.val)]));
-      });
-    });
-    bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
-                { content: money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
-    bodyD.push(["Disponibilita' liquide iniziali", money(rfDir.apertura)]);
-    rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.apertura)]));
-    bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
-                { content: money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
-    rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.chiusura)]));
-    doc.autoTable({
-      startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
-      styles: { fontSize: 9, cellPadding: 2 },
-      headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
-      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
-    });
-
-    // --- Rendiconto: metodo indiretto ---
-    doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo indiretto");
-    const bodyI = [
-      ["Risultato d'esercizio", money(rfInd.risultato)],
-      ["Ammortamenti e rettifiche non monetarie", money(rfInd.ammortamenti)],
-      ["Variazione del capitale circolante", money(rfInd.varCircolante)],
-      [{ content: "A) Flusso della gestione operativa", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-       { content: money(rfInd.operativo), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
-      [{ content: "B) Flusso dell'attivita' di investimento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-       { content: money(rfInd.investimenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
-      [{ content: "C) Flusso dell'attivita' di finanziamento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-       { content: money(rfInd.finanziamenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
-      [{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE (A+B+C)", styles: { fontStyle: "bold" } },
-       { content: money(rfInd.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }],
-    ];
-    doc.autoTable({
-      startY: 30, head: [["Voce", "Importo"]], body: bodyI, theme: "plain",
-      styles: { fontSize: 9, cellPadding: 2 },
-      headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
-      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
-    });
-    const y3 = doc.lastAutoTable.finalY;
-    doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100);
-    doc.text(`Riscontro con il metodo diretto: ${money(rfDir.variazione)} - differenza ${money(rfInd.variazione - rfDir.variazione)}`, 14, y3 + 8);
-    doc.setTextColor(0);
-
-    doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
-  };
+  const esportaPDF = () => generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione);
 
   // ---------- render dei prospetti ----------
   const rigaVoce = (v) => (
@@ -12962,7 +13041,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           {v.codice ? v.codice + ". " : ""}{v.nome}
           {v.speciale === "risultato" && <span style={{ color: "var(--ink-3)", fontSize: 11 }}> (da CE)</span>}
         </td>
-        <td className="num">{fmt(v.valore)}</td>
+        <td className="num">{fmt(v.valore, 0)}</td>
       </tr>
       {espansi[v.id] && v.dettaglio.map(d => (
         <tr key={d.c} style={{ fontSize: 12, color: "var(--ink-2)" }}>
@@ -12998,22 +13077,22 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       <div className="kpi-grid" style={{ marginBottom: 16 }}>
         <div className="kpi">
           <div className="label">Totale Attivo</div>
-          <div className="value">{fmtEuro(prospetti.totAttivo)}</div>
+          <div className="value">{fmt0Euro(prospetti.totAttivo)}</div>
         </div>
         <div className="kpi">
           <div className="label">Totale Passivo e PN</div>
-          <div className="value">{fmtEuro(prospetti.totPassivo)}</div>
+          <div className="value">{fmt0Euro(prospetti.totPassivo)}</div>
         </div>
         <div className="kpi">
           <div className="label">Risultato d'esercizio</div>
           <div className="value" style={{ color: prospetti.risultato >= 0 ? "var(--accent)" : "var(--danger)" }}>
-            {fmtEuro(prospetti.risultato)}
+            {fmt0Euro(prospetti.risultato)}
           </div>
         </div>
         <div className="kpi">
           <div className="label">Quadratura</div>
           <div className="value" style={{ color: Math.abs(prospetti.sbilancio) < 0.01 ? "var(--accent)" : "var(--danger)" }}>
-            {Math.abs(prospetti.sbilancio) < 0.01 ? "OK" : fmtEuro(prospetti.sbilancio)}
+            {Math.abs(prospetti.sbilancio) < 0.01 ? "OK" : fmt0Euro(prospetti.sbilancio)}
           </div>
           <div className="hint">
             {controlli.mancanti.length > 0 && `${controlli.mancanti.length} conti non assegnati`}
@@ -13096,6 +13175,18 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             </div>
           )}
 
+          {Math.abs(rfDir.differenzaNascosta) > 0.005 && (
+            <div className="card" style={{ marginTop: 16, borderLeft: "3px solid var(--danger)" }}>
+              <div className="card-title">Scritture libere su conti di liquidità ({fmt(rfDir.differenzaNascosta)})</div>
+              <div style={{ fontSize: 12, color: "var(--ink-2)", margin: "8px 0" }}>
+                Una o più scritture libere toccano direttamente un conto di cassa/banca (es. per errore, invece di
+                registrare un'entrata/uscita normale). La riga "Scritture libere su conti di liquidità non
+                classificate" nella prima area la rende visibile così le Disponibilità liquide finali restano
+                corrette; per farla sparire correggi la scrittura o registrala come movimento normale.
+              </div>
+            </div>
+          )}
+
           <div className="card" style={{ marginTop: 16 }}>
             <div className="card-title">Natura dei conti (metodo indiretto)</div>
             <div style={{ fontSize: 12, color: "var(--ink-2)", margin: "8px 0" }}>
@@ -13140,7 +13231,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       <React.Fragment key={cl.id}>
                         <tr style={{ background: "var(--panel-2)" }}>
                           <td style={{ fontWeight: 700 }}>{cl.codice ? cl.codice + ") " : ""}{cl.nome}</td>
-                          <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale)}</td>
+                          <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale, 0)}</td>
                         </tr>
                         {(cl.voci || []).map(rigaVoce)}
                       </React.Fragment>
@@ -13150,7 +13241,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                         {lato === "attivo" ? "TOTALE ATTIVO" : "TOTALE PASSIVO E PN"}
                       </td>
                       <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>
-                        {fmt(lato === "attivo" ? prospetti.totAttivo : prospetti.totPassivo)}
+                        {fmt((lato === "attivo" ? prospetti.totAttivo : prospetti.totPassivo), 0)}
                       </td>
                     </tr>
                   </tbody>
@@ -13159,7 +13250,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             ))}
             {Math.abs(prospetti.sbilancio) >= 0.01 && (
               <div style={{ marginTop: 10, color: "var(--danger)", fontSize: 13 }}>
-                ⚠ Sbilancio di {fmtEuro(prospetti.sbilancio)} tra attivo e passivo. Vedi la scheda Controlli.
+                ⚠ Sbilancio di {fmt0Euro(prospetti.sbilancio)} tra attivo e passivo. Vedi la scheda Controlli.
               </div>
             )}
           </div>
@@ -13175,7 +13266,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                         {cl.codice ? cl.codice + ") " : ""}{cl.nome}
                         <span style={{ color: "var(--ink-3)", fontWeight: 400, fontSize: 11 }}> {cl.segno >= 0 ? "(+)" : "(−)"}</span>
                       </td>
-                      <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale)}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale, 0)}</td>
                     </tr>
                     {(cl.voci || []).map(rigaVoce)}
                   </React.Fragment>
@@ -13183,7 +13274,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
                   <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>RISULTATO D'ESERCIZIO</td>
                   <td className="num" style={{ fontWeight: 700, fontSize: 14, color: prospetti.risultato >= 0 ? "var(--accent)" : "var(--danger)" }}>
-                    {fmt(prospetti.risultato)}
+                    {fmt(prospetti.risultato, 0)}
                   </td>
                 </tr>
               </tbody>
@@ -13198,7 +13289,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                   <React.Fragment key={a.id}>
                     <tr style={{ background: "var(--panel-2)" }}>
                       <td style={{ fontWeight: 700 }}>{a.codice ? a.codice + ") " : ""}{a.nome}</td>
-                      <td className="num" style={{ fontWeight: 700 }}>{fmt(a.totale)}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{fmt(a.totale, 0)}</td>
                     </tr>
                     {(a.voci || []).map(v => (
                       <React.Fragment key={v.id}>
@@ -13207,12 +13298,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                                        color: v.virtuale ? "var(--danger)" : "inherit" }}>
                             {v.codice ? v.codice + ". " : ""}{v.nome}
                           </td>
-                          <td className="num" style={{ fontWeight: 600 }}>{fmt(v.totale)}</td>
+                          <td className="num" style={{ fontWeight: 600 }}>{fmt(v.totale, 0)}</td>
                         </tr>
                         {(v.righe || []).map(r => (
                           <tr key={r.cat}>
                             <td style={{ paddingLeft: 34, fontSize: 12.5, color: "var(--ink-2)" }}>{r.cat}</td>
-                            <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmt(r.val)}</td>
+                            <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmt(r.val, 0)}</td>
                           </tr>
                         ))}
                       </React.Fragment>
@@ -13224,20 +13315,20 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 ))}
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
                   <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE</td>
-                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfDir.variazione)}</td>
+                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfDir.variazione, 0)}</td>
                 </tr>
-                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmt(rfDir.apertura)}</td></tr>
+                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmt(rfDir.apertura, 0)}</td></tr>
                 {rfDir.dettaglioLiquidita.map(d => (
                   <tr key={"ini-" + d.nome}>
                     <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
-                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.apertura)}</td>
+                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.apertura, 0)}</td>
                   </tr>
                 ))}
-                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmt(rfDir.chiusura)}</td></tr>
+                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmt(rfDir.chiusura, 0)}</td></tr>
                 {rfDir.dettaglioLiquidita.map(d => (
                   <tr key={"fin-" + d.nome}>
                     <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
-                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.chiusura)}</td>
+                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.chiusura, 0)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -13248,24 +13339,24 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             <div className="card-title">Rendiconto Finanziario · metodo indiretto</div>
             <table style={{ width: "100%", marginTop: 10 }}>
               <tbody>
-                <tr><td>Risultato d'esercizio</td><td className="num">{fmt(rfInd.risultato)}</td></tr>
-                <tr><td>Ammortamenti e rettifiche non monetarie</td><td className="num">{fmt(rfInd.ammortamenti)}</td></tr>
-                <tr><td>Variazione del capitale circolante</td><td className="num">{fmt(rfInd.varCircolante)}</td></tr>
+                <tr><td>Risultato d'esercizio</td><td className="num">{fmt(rfInd.risultato, 0)}</td></tr>
+                <tr><td>Ammortamenti e rettifiche non monetarie</td><td className="num">{fmt(rfInd.ammortamenti, 0)}</td></tr>
+                <tr><td>Variazione del capitale circolante</td><td className="num">{fmt(rfInd.varCircolante, 0)}</td></tr>
                 <tr style={{ background: "var(--panel-2)" }}>
                   <td style={{ fontWeight: 700 }}>A) Flusso della gestione operativa</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.operativo)}</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.operativo, 0)}</td>
                 </tr>
                 <tr style={{ background: "var(--panel-2)" }}>
                   <td style={{ fontWeight: 700 }}>B) Flusso dell'attività di investimento</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.investimenti)}</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.investimenti, 0)}</td>
                 </tr>
                 <tr style={{ background: "var(--panel-2)" }}>
                   <td style={{ fontWeight: 700 }}>C) Flusso dell'attività di finanziamento</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.finanziamenti)}</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.finanziamenti, 0)}</td>
                 </tr>
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
                   <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE (A+B+C)</td>
-                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfInd.variazione)}</td>
+                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfInd.variazione, 0)}</td>
                 </tr>
               </tbody>
             </table>
@@ -13284,18 +13375,18 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             <div className="card-title">Quadratura patrimoniale</div>
             <table style={{ width: "100%", marginTop: 8 }}>
               <tbody>
-                <tr><td>Totale Attivo</td><td className="num">{fmt(prospetti.totAttivo)}</td></tr>
-                <tr><td>Totale Passivo e Patrimonio Netto</td><td className="num">{fmt(prospetti.totPassivo)}</td></tr>
+                <tr><td>Totale Attivo</td><td className="num">{fmt(prospetti.totAttivo, 0)}</td></tr>
+                <tr><td>Totale Passivo e Patrimonio Netto</td><td className="num">{fmt(prospetti.totPassivo, 0)}</td></tr>
                 <tr style={{ borderTop: "1px solid var(--rule)" }}>
                   <td style={{ fontWeight: 700 }}>Differenza</td>
                   <td className="num" style={{ fontWeight: 700, color: Math.abs(prospetti.sbilancio) < 0.01 ? "var(--accent)" : "var(--danger)" }}>
-                    {fmt(prospetti.sbilancio)}
+                    {fmt(prospetti.sbilancio, 0)}
                   </td>
                 </tr>
               </tbody>
             </table>
             <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 10, lineHeight: 1.5 }}>
-              Il risultato del Conto Economico ({fmtEuro(prospetti.risultato)}) confluisce automaticamente
+              Il risultato del Conto Economico ({fmt0Euro(prospetti.risultato)}) confluisce automaticamente
               nella voce di Patrimonio Netto contrassegnata come calcolata.
             </div>
           </div>
