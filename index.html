@@ -5459,13 +5459,25 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   const rfIndSchema = useMemo(() => schemaBilancio ? rendicontoIndiretto(schemaBilancio, dati.mastrini, mastriniIniziali, contiMap) : null,
     [schemaBilancio, dati.mastrini, mastriniIniziali, contiMap]);
 
-  const exportProspettiSchemaPDF = () => {
-    if (!prospettiSchema || !rfDirSchema || !rfIndSchema) return;
+  // Prospetti "ufficiali": stessi dati e stessa grafica della pagina Schema di Bilancio.
+  // Sostituiscono i vecchi export semplici di SP, CE e RF (il resto della pagina non cambia).
+  const exportSPUfficialePDF = () => {
+    if (!prospettiSchema) return;
     setBusy(true);
-    try {
-      generaPdfProspettiSchema(prospettiSchema, rfDirSchema, rfIndSchema, stagione);
-      setLastAction("Prospetti civilistici (Schema di Bilancio) generati");
-    } finally { setBusy(false); }
+    try { generaPdfSP(prospettiSchema, stagione); setLastAction("Stato Patrimoniale (Schema di Bilancio) generato"); }
+    finally { setBusy(false); }
+  };
+  const exportCEUfficialePDF = () => {
+    if (!prospettiSchema) return;
+    setBusy(true);
+    try { generaPdfCE(prospettiSchema, stagione); setLastAction("Conto Economico (Schema di Bilancio) generato"); }
+    finally { setBusy(false); }
+  };
+  const exportRFUfficialePDF = () => {
+    if (!rfDirSchema) return;
+    setBusy(true);
+    try { generaPdfRF(rfDirSchema, stagione); setLastAction("Rendiconto Finanziario (Schema di Bilancio) generato"); }
+    finally { setBusy(false); }
   };
 
   // === HELPER: header pagina PDF ===
@@ -6149,22 +6161,6 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         <button className="btn accent" onClick={exportPacchettoCompleto} disabled={busy}>{busy ? "Generando…" : "Scarica pacchetto completo"}</button>
       </div>
 
-      {/* PROSPETTI CIVILISTICI dallo Schema di Bilancio */}
-      <div className="card" style={{marginBottom:20, border:"2px solid var(--ink)", background:"var(--panel)"}}>
-        <div style={{display:"flex", alignItems:"baseline", gap:10, marginBottom:6}}>
-          <h3 className="card-title" style={{margin:0, fontSize:18}}>📐 Prospetti civilistici</h3>
-          <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:10}}>DA SCHEMA DI BILANCIO</span>
-        </div>
-        <p style={{fontSize:13, color:"var(--ink-2)", margin:"0 0 14px"}}>
-          Stato Patrimoniale, Conto Economico e Rendiconto Finanziario (metodo diretto e indiretto) esattamente come
-          li hai strutturati nella pagina <strong>Schema di Bilancio</strong> — stesse macroclassi, stesse voci, stessa
-          quadratura. Un unico PDF, stessa grafica del pacchetto completo.
-        </p>
-        <button className="btn accent" onClick={exportProspettiSchemaPDF} disabled={busy || !prospettiSchema}>
-          {busy ? "Generando…" : !prospettiSchema ? "Caricamento schema…" : "Scarica PDF"}
-        </button>
-      </div>
-
       <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"24px 0 12px"}}>Documenti singoli</h3>
 
       <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))", gap:14}}>
@@ -6176,25 +6172,40 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <button className="btn" onClick={exportBilancioPDF} disabled={busy}>PDF</button>
         </div>
         <div className="card">
-          <h3 className="card-title">📊 Conto Economico</h3>
+          <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
+            <h3 className="card-title" style={{margin:0}}>📊 Conto Economico</h3>
+            <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:9.5}}>SCHEMA DI BILANCIO</span>
+          </div>
           <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
-            Ricavi, Costi e Risultato d'esercizio della stagione.
+            Voci positive e negative, Risultato d'esercizio — con le macroclassi che hai definito in Schema di Bilancio.
           </p>
-          <button className="btn" onClick={exportCEPDF} disabled={busy}>PDF</button>
+          <button className="btn" onClick={exportCEUfficialePDF} disabled={busy || !prospettiSchema}>
+            {!prospettiSchema ? "Caricamento…" : "PDF"}
+          </button>
         </div>
         <div className="card">
-          <h3 className="card-title">🏛 Stato Patrimoniale</h3>
+          <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
+            <h3 className="card-title" style={{margin:0}}>🏛 Stato Patrimoniale</h3>
+            <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:9.5}}>SCHEMA DI BILANCIO</span>
+          </div>
           <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
-            Attività, Passività e Patrimonio Netto.
+            Attivo, Passivo e Patrimonio Netto — con le macroclassi che hai definito in Schema di Bilancio.
           </p>
-          <button className="btn" onClick={exportSPPDF} disabled={busy}>PDF</button>
+          <button className="btn" onClick={exportSPUfficialePDF} disabled={busy || !prospettiSchema}>
+            {!prospettiSchema ? "Caricamento…" : "PDF"}
+          </button>
         </div>
         <div className="card">
-          <h3 className="card-title">💧 Rendiconto Finanziario</h3>
+          <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
+            <h3 className="card-title" style={{margin:0}}>💧 Rendiconto Finanziario</h3>
+            <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:9.5}}>SCHEMA DI BILANCIO</span>
+          </div>
           <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
-            Entrate e uscite per categoria e mese (formato A4 orizzontale).
+            Metodo diretto per aree e sottovoci, con il dettaglio delle disponibilità liquide. Formato A4 orizzontale.
           </p>
-          <button className="btn" onClick={exportRFPDF} disabled={busy}>PDF</button>
+          <button className="btn" onClick={exportRFUfficialePDF} disabled={busy || !rfDirSchema}>
+            {!rfDirSchema ? "Caricamento…" : "PDF"}
+          </button>
         </div>
         <div className="card">
           <h3 className="card-title">▣ Libro Cespiti</h3>
@@ -12466,7 +12477,7 @@ function rendicontoIndiretto(schema, mastriniFin, mastriniIni, contiMap) {
 // ---------- EDITOR (componenti a livello di modulo: NON ricrearli dentro il
 // render della pagina, altrimenti React rimonta gli input a ogni carattere) ----------
 
-function SBPillConto({ x, nome, onSegno, onRimuovi }) {
+function SBPillConto({ x, nome, saldo, onSegno, onRimuovi }) {
   const neg = Number(x.s) < 0;
   return (
     <span style={{
@@ -12476,6 +12487,9 @@ function SBPillConto({ x, nome, onSegno, onRimuovi }) {
     }}>
       <b style={{ fontFamily: "'JetBrains Mono',monospace" }}>{String(x.c).padStart(2, "0")}</b>
       <span>{nome}</span>
+      {saldo != null && (
+        <span className="mono" style={{ color: "var(--ink-3)", fontSize: 11 }}>{fmt(saldo)}</span>
+      )}
       <button className="icon-btn" onClick={onSegno} style={{ fontWeight: 700, color: neg ? "var(--danger)" : "var(--accent)" }}
               title={neg ? "Segno invertito: clicca per tornare al naturale" : "Segno naturale: clicca per invertire"}>
         {neg ? "−" : "+"}
@@ -12485,13 +12499,12 @@ function SBPillConto({ x, nome, onSegno, onRimuovi }) {
   );
 }
 
-// Genera il PDF dei prospetti civilistici (SP, CE, RF diretto e indiretto) a partire
-// dai dati già calcolati con lo Schema di Bilancio. Funzione condivisa: la usano sia
-// la pagina Schema di Bilancio sia la pagina Export, così i due punti mostrano sempre
-// esattamente lo stesso prospetto con la stessa grafica.
-function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
+// ---------- Costruttore PDF condiviso per i prospetti "ufficiali" (SP, CE, RF) ----------
+// Stessa grafica ovunque vengano generati: pagina Schema di Bilancio e pagina Export.
+// I numeri sono sempre arrotondati all'unita' di euro (nessun decimale).
+function creaPdfBuilder(stagione, orientamento) {
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: orientamento || "portrait", unit: "mm", format: "a4" });
   const money = n => Math.round(Number(n) || 0).toLocaleString("it-IT", { maximumFractionDigits: 0 });
   const oggi = new Date().toLocaleDateString("it-IT");
   const VERDE = [45, 94, 62], ROSSO = [181, 67, 67], NERO = [26, 26, 26];
@@ -12533,100 +12546,172 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
     doc.text(valore, doc.internal.pageSize.width - 16, y + 7, { align: "right" });
     doc.setTextColor(0);
   };
+  // righe di una macroclasse, con eventuale sottotitolo quando le voci sono raggruppate
+  // in una "sottosezione" (es. Immobilizzazioni materiali / immateriali / finanziarie)
   const righeClasse = (cl, prefissoVoce) => {
     const rows = [[{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
                    { content: money(cl.totale), styles: { fontStyle: "bold" } }]];
-    (cl.voci || []).forEach(v => rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore)]));
+    let prevSotto = "";
+    (cl.voci || []).forEach(v => {
+      const sotto = (v.sottosezione || "").trim();
+      if (sotto && sotto !== prevSotto) {
+        rows.push([{ content: `   ${sotto}`, styles: { fontStyle: "italic", textColor: [130, 130, 130] } }, ""]);
+      }
+      prevSotto = sotto;
+      rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore)]);
+    });
     return rows;
   };
 
-  // --- Stato Patrimoniale ---
-  intestazioneP("Stato Patrimoniale");
-  const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => righeClasse(cl, ". "));
+  return { doc, money, VERDE, ROSSO, NERO, VERDE_CHIARO, ROSSO_CHIARO, GRIGIO_CHIARO,
+           intestazioneP, intestazioneL, tabellaColorata, barraFinale, righeClasse };
+}
+
+// --- Stato Patrimoniale (documento singolo) ---
+function generaPdfSP(prospetti, stagione) {
+  const b = creaPdfBuilder(stagione, "portrait");
+  b.intestazioneP("Stato Patrimoniale");
+  const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => b.righeClasse(cl, ". "));
   attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
-                    { content: money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
-  let y = tabellaColorata(attivoRows, "ATTIVO", 36, VERDE);
-  const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => righeClasse(cl, ". "));
+                    { content: b.money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
+  let y = b.tabellaColorata(attivoRows, "ATTIVO", 36, b.VERDE);
+  const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => b.righeClasse(cl, ". "));
   passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
-                     { content: money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
-  y = tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, ROSSO);
+                     { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
+  y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
+  const ok = Math.abs(prospetti.sbilancio) < 0.01;
+  b.barraFinale(y + 6, ok ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
+                ok ? "0" : b.money(prospetti.sbilancio), ok ? b.VERDE : b.ROSSO);
+  b.doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
+}
+
+// --- Conto Economico (documento singolo) ---
+function generaPdfCE(prospetti, stagione) {
+  const b = creaPdfBuilder(stagione, "portrait");
+  b.intestazioneP("Conto Economico");
+  const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
+  const negCE = prospetti.ce.filter(cl => cl.segno < 0);
+  let y = 34;
+  if (posCE.length) {
+    const rows = posCE.flatMap(cl => b.righeClasse(cl, ") "));
+    rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
+               { content: b.money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
+    y = b.tabellaColorata(rows, "VOCI POSITIVE", y, b.VERDE) + 10;
+  }
+  if (negCE.length) {
+    const rows = negCE.flatMap(cl => b.righeClasse(cl, ") "));
+    rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
+               { content: b.money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
+    y = b.tabellaColorata(rows, "VOCI NEGATIVE", y, b.ROSSO) + 10;
+  }
+  b.barraFinale(y, "RISULTATO D'ESERCIZIO",
+                `${b.money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, b.NERO);
+  b.doc.save(`Conto_Economico_${stagione}.pdf`);
+}
+
+// --- Rendiconto Finanziario, metodo diretto (documento singolo) ---
+// Il metodo indiretto e' tolto per ora dai prospetti ufficiali: la funzione rimane
+// disponibile (rendicontoIndiretto) per il confronto mostrato nella pagina Schema di
+// Bilancio, semplicemente non viene stampata finche' non la si riattiva qui sotto.
+function generaPdfRF(rfDir, stagione) {
+  const b = creaPdfBuilder(stagione, "landscape");
+  b.intestazioneL("Rendiconto Finanziario · Metodo diretto");
+  const bodyD = [];
+  rfDir.aree.forEach(a => {
+    bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
+                { content: b.money(a.totale), styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } }]);
+    (a.voci || []).forEach(v => {
+      bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
+                  { content: b.money(v.totale), styles: { fontStyle: "bold" } }]);
+      (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, b.money(r.val)]));
+    });
+  });
+  bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
+              { content: b.money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
+  bodyD.push(["Disponibilita' liquide iniziali", b.money(rfDir.apertura)]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.apertura)]));
+  bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
+              { content: b.money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.chiusura)]));
+  b.doc.autoTable({
+    startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
+    styles: { fontSize: 9, cellPadding: 2 },
+    headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
+    columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+  });
+  b.doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
+}
+
+// Genera in un unico PDF (3 pagine) i prospetti civilistici SP + CE + RF (metodo diretto),
+// a partire dai dati già calcolati con lo Schema di Bilancio. Usata dal pulsante
+// "PDF prospetti" della pagina Schema di Bilancio. Il metodo indiretto e' tolto per ora
+// (vedi generaPdfRF); rfInd resta come parametro per quando verrà riattivato.
+function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
+  const b = creaPdfBuilder(stagione, "portrait");
+
+  // --- Stato Patrimoniale ---
+  b.intestazioneP("Stato Patrimoniale");
+  const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => b.righeClasse(cl, ". "));
+  attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
+                    { content: b.money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
+  let y = b.tabellaColorata(attivoRows, "ATTIVO", 36, b.VERDE);
+  const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => b.righeClasse(cl, ". "));
+  passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
+                     { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
+  y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
   const okSP = Math.abs(prospetti.sbilancio) < 0.01;
-  barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-              okSP ? "0" : money(prospetti.sbilancio), okSP ? VERDE : ROSSO);
+  b.barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
+                okSP ? "0" : b.money(prospetti.sbilancio), okSP ? b.VERDE : b.ROSSO);
 
   // --- Conto Economico ---
-  doc.addPage(); intestazioneP("Conto Economico");
+  b.doc.addPage(); b.intestazioneP("Conto Economico");
   const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
   const negCE = prospetti.ce.filter(cl => cl.segno < 0);
   let y2 = 34;
   if (posCE.length) {
-    const rows = posCE.flatMap(cl => righeClasse(cl, ") "));
+    const rows = posCE.flatMap(cl => b.righeClasse(cl, ") "));
     rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
-               { content: money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
-    y2 = tabellaColorata(rows, "VOCI POSITIVE", y2, VERDE) + 10;
+               { content: b.money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
+    y2 = b.tabellaColorata(rows, "VOCI POSITIVE", y2, b.VERDE) + 10;
   }
   if (negCE.length) {
-    const rows = negCE.flatMap(cl => righeClasse(cl, ") "));
+    const rows = negCE.flatMap(cl => b.righeClasse(cl, ") "));
     rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
-               { content: money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: ROSSO_CHIARO } }]);
-    y2 = tabellaColorata(rows, "VOCI NEGATIVE", y2, ROSSO) + 10;
+               { content: b.money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
+    y2 = b.tabellaColorata(rows, "VOCI NEGATIVE", y2, b.ROSSO) + 10;
   }
-  barraFinale(y2, "RISULTATO D'ESERCIZIO",
-              `${money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, NERO);
+  b.barraFinale(y2, "RISULTATO D'ESERCIZIO",
+                `${b.money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, b.NERO);
 
   // --- Rendiconto: metodo diretto ---
-  doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo diretto");
+  b.doc.addPage("a4", "landscape"); b.intestazioneL("Rendiconto Finanziario · Metodo diretto");
   const bodyD = [];
   rfDir.aree.forEach(a => {
-    bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-                { content: money(a.totale), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }]);
+    bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
+                { content: b.money(a.totale), styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } }]);
     (a.voci || []).forEach(v => {
       bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
-                  { content: money(v.totale), styles: { fontStyle: "bold" } }]);
-      (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, money(r.val)]));
+                  { content: b.money(v.totale), styles: { fontStyle: "bold" } }]);
+      (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, b.money(r.val)]));
     });
   });
   bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
-              { content: money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }]);
-  bodyD.push(["Disponibilita' liquide iniziali", money(rfDir.apertura)]);
-  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.apertura)]));
+              { content: b.money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
+  bodyD.push(["Disponibilita' liquide iniziali", b.money(rfDir.apertura)]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.apertura)]));
   bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
-              { content: money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
-  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, money(d.chiusura)]));
-  doc.autoTable({
+              { content: b.money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.chiusura)]));
+  b.doc.autoTable({
     startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
     styles: { fontSize: 9, cellPadding: 2 },
-    headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
+    headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
     columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
   });
 
-  // --- Rendiconto: metodo indiretto ---
-  doc.addPage("a4", "landscape"); intestazioneL("Rendiconto Finanziario · Metodo indiretto");
-  const bodyI = [
-    ["Risultato d'esercizio", money(rfInd.risultato)],
-    ["Ammortamenti e rettifiche non monetarie", money(rfInd.ammortamenti)],
-    ["Variazione del capitale circolante", money(rfInd.varCircolante)],
-    [{ content: "A) Flusso della gestione operativa", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-     { content: money(rfInd.operativo), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
-    [{ content: "B) Flusso dell'attivita' di investimento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-     { content: money(rfInd.investimenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
-    [{ content: "C) Flusso dell'attivita' di finanziamento", styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } },
-     { content: money(rfInd.finanziamenti), styles: { fontStyle: "bold", fillColor: GRIGIO_CHIARO } }],
-    [{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE (A+B+C)", styles: { fontStyle: "bold" } },
-     { content: money(rfInd.variazione), styles: { fontStyle: "bold", fillColor: VERDE_CHIARO } }],
-  ];
-  doc.autoTable({
-    startY: 30, head: [["Voce", "Importo"]], body: bodyI, theme: "plain",
-    styles: { fontSize: 9, cellPadding: 2 },
-    headStyles: { fillColor: VERDE, textColor: 240, fontStyle: "bold" },
-    columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
-  });
-  const y3 = doc.lastAutoTable.finalY;
-  doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100);
-  doc.text(`Riscontro con il metodo diretto: ${money(rfDir.variazione)} - differenza ${money(rfInd.variazione - rfDir.variazione)}`, 14, y3 + 8);
-  doc.setTextColor(0);
+  // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
 
-  doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
+  b.doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
 }
 
 function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
@@ -12635,6 +12720,7 @@ function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
   const disponibili = contiOrdinati.filter(m => !codiciQui.has(Number(m.codice)));
   const opzioni = forza ? disponibili : disponibili.filter(m => !assegnati[Number(m.codice)]);
   const nNascosti = disponibili.length - opzioni.length;
+  const saldiMap = useMemo(() => { const m = {}; contiOrdinati.forEach(c => { m[c.codice] = c.saldo; }); return m; }, [contiOrdinati]);
 
   return (
     <div style={{ borderLeft: "2px solid var(--rule-2)", paddingLeft: 10, marginBottom: 10 }}>
@@ -12643,6 +12729,10 @@ function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
                style={{ width: 42, textAlign: "center" }} placeholder="I" />
         <input value={v.nome || ""} onChange={e => api.updVoce(p, cl.id, v.id, { nome: e.target.value })}
                style={{ flex: 1, minWidth: 150 }} />
+        <input value={v.sottosezione || ""} onChange={e => api.updVoce(p, cl.id, v.id, { sottosezione: e.target.value })}
+               style={{ width: 160, fontSize: 11.5, fontStyle: "italic", color: "var(--ink-2)" }}
+               placeholder="Sotto-sezione (opz.)"
+               title="Raggruppa più voci sotto uno stesso sottotitolo (es. distinguere le immobilizzazioni per tipologia). Lascia vuoto per non raggruppare." />
         <button className="btn ghost sm" onClick={() => api.moveVoce(p, cl.id, v.id, -1)}>↑</button>
         <button className="btn ghost sm" onClick={() => api.moveVoce(p, cl.id, v.id, 1)}>↓</button>
         <button className="btn danger sm" onClick={() => api.delVoce(p, cl.id, v.id)}>✕</button>
@@ -12658,6 +12748,7 @@ function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
             {(v.conti || []).map(x => (
               <SBPillConto key={x.c} x={x}
                 nome={(contiMap[x.c]?.nome || "").trim() || `Conto ${x.c}`}
+                saldo={saldiMap[x.c]}
                 onSegno={() => api.updConto(p, cl.id, v.id, x.c, Number(x.s) < 0 ? 1 : -1)}
                 onRimuovi={() => api.delConto(p, cl.id, v.id, x.c)} />
             ))}
@@ -12719,10 +12810,22 @@ function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati, assegnati }) {
         {(cl.voci || []).length === 0 && (
           <div style={{ fontSize: 12, color: "var(--ink-3)", padding: "6px 0" }}>Nessuna voce.</div>
         )}
-        {(cl.voci || []).map(v => (
-          <SBEditorVoce key={v.id} p={p} cl={cl} v={v} api={api}
-                        contiMap={contiMap} contiOrdinati={contiOrdinati} assegnati={assegnati} />
-        ))}
+        {(cl.voci || []).map((v, i) => {
+          const sotto = (v.sottosezione || "").trim();
+          const sottoPrec = (((cl.voci || [])[i - 1] || {}).sottosezione || "").trim();
+          return (
+            <React.Fragment key={v.id}>
+              {sotto && sotto !== sottoPrec && (
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)", textTransform: "uppercase",
+                              letterSpacing: 0.4, margin: "12px 0 4px 2px", paddingTop: 8, borderTop: "1px dashed var(--rule-2)" }}>
+                  {sotto}
+                </div>
+              )}
+              <SBEditorVoce p={p} cl={cl} v={v} api={api}
+                            contiMap={contiMap} contiOrdinati={contiOrdinati} assegnati={assegnati} />
+            </React.Fragment>
+          );
+        })}
         <button className="btn ghost sm" onClick={() => api.addVoce(p, cl.id)}>+ Voce</button>
       </div>
     </div>
@@ -13054,6 +13157,27 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       ))}
     </React.Fragment>
   );
+  // inserisce un sottotitolo prima delle voci che condividono la stessa "sottosezione"
+  // (es. dentro Immobilizzazioni: materiali / immateriali / finanziarie)
+  const righeVociConSottosezioni = (voci) => {
+    const out = []; let prevSotto = "";
+    (voci || []).forEach(v => {
+      const sotto = (v.sottosezione || "").trim();
+      if (sotto && sotto !== prevSotto) {
+        out.push(
+          <tr key={"sh-" + v.id}>
+            <td colSpan={2} style={{ paddingLeft: 20, fontSize: 11, fontWeight: 700, color: "var(--ink-3)",
+                                      textTransform: "uppercase", letterSpacing: 0.4, paddingTop: 10 }}>
+              {sotto}
+            </td>
+          </tr>
+        );
+      }
+      prevSotto = sotto;
+      out.push(rigaVoce(v));
+    });
+    return out;
+  };
 
   const diffRF = Math.round((rfInd.variazione - rfDir.variazione) * 100) / 100;
 
@@ -13233,7 +13357,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                           <td style={{ fontWeight: 700 }}>{cl.codice ? cl.codice + ") " : ""}{cl.nome}</td>
                           <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale, 0)}</td>
                         </tr>
-                        {(cl.voci || []).map(rigaVoce)}
+                        {righeVociConSottosezioni(cl.voci)}
                       </React.Fragment>
                     ))}
                     <tr style={{ borderTop: "2px solid var(--ink)" }}>
@@ -13268,7 +13392,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       </td>
                       <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale, 0)}</td>
                     </tr>
-                    {(cl.voci || []).map(rigaVoce)}
+                    {righeVociConSottosezioni(cl.voci)}
                   </React.Fragment>
                 ))}
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
