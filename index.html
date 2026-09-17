@@ -13320,10 +13320,11 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
            14, doc.lastAutoTable.finalY + 5);
   doc.setTextColor(0);
 
-  // Dettaglio di ogni BU: conti economici e flussi di cassa
+  // Dettaglio di ogni BU: conti economici, conti patrimoniali e flussi di cassa
   (datiBU || []).forEach(x => {
     const eco = (x.conti || []).filter(c => c.tipo !== "Patrimoniale");
-    if (!eco.length) return;
+    const pat = (x.conti || []).filter(c => c.tipo === "Patrimoniale");
+    if (!eco.length && !pat.length) return;
     let y = doc.lastAutoTable.finalY + 12;
     if (y > H - 50) { doc.addPage("a4", "landscape"); y = 18; }
     doc.setFont("helvetica", "bold"); doc.setFontSize(11);
@@ -13333,7 +13334,7 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
              + (Math.abs(x.investimenti) > 0.5 ? ` · investimenti del periodo ${b.money(x.investimenti)}` : ""),
              14, y + 5);
     doc.setTextColor(0);
-    doc.autoTable({
+    if (eco.length) doc.autoTable({
       startY: y + 8,
       head: [["Cod.", "Conto", "Categoria", "Ricavi", "Costi", "Saldo"]],
       body: eco.map(c => [c.codice, c.nome, c.categoria || "",
@@ -13350,6 +13351,37 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
       columnStyles: { 0: { cellWidth: 14, halign: "right" }, 1: { cellWidth: 80 }, 2: { cellWidth: 45 },
                       3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
     });
+
+    // Conti patrimoniali della BU: cosa la BU ha in pancia (liquidita', immobilizzazioni,
+    // crediti, debiti, fondi), aperture comprese. Saldo in dare = attivo, in avere = passivo.
+    if (pat.length) {
+      let yp = (doc.lastAutoTable ? doc.lastAutoTable.finalY : y) + 7;
+      if (yp > H - 42) { doc.addPage("a4", "landscape"); yp = 18; }
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(90);
+      doc.text(`${x.nome} · conti patrimoniali`, 14, yp);
+      doc.setTextColor(0);
+      const totDare  = pat.reduce((s2, c) => s2 + c.dare, 0);
+      const totAvere = pat.reduce((s2, c) => s2 + c.avere, 0);
+      doc.autoTable({
+        startY: yp + 3,
+        head: [["Cod.", "Conto", "Categoria", "Dare", "Avere", "Saldo", "D/A"]],
+        body: pat.map(c => [c.codice, c.nome, c.categoria || "",
+                            b.money(c.dare), b.money(c.avere), b.money(Math.abs(c.saldoDA)),
+                            Math.abs(c.saldoDA) < 0.5 ? "" : (c.saldoDA > 0 ? "D" : "A")]),
+        foot: [[{ content: "TOTALE patrimoniali " + x.nome, colSpan: 3, styles: { fontStyle: "bold" } },
+                { content: b.money(totDare), styles: { fontStyle: "bold", halign: "right" } },
+                { content: b.money(totAvere), styles: { fontStyle: "bold", halign: "right" } },
+                { content: b.money(Math.abs(totDare - totAvere)), styles: { fontStyle: "bold", halign: "right" } },
+                { content: Math.abs(totDare - totAvere) < 0.5 ? "" : (totDare > totAvere ? "D" : "A"), styles: { fontStyle: "bold" } }]],
+        theme: "plain",
+        styles: { fontSize: 8, cellPadding: 1.4 },
+        headStyles: { fillColor: b.NERO, textColor: 240, fontStyle: "bold" },
+        footStyles: { fillColor: b.GRIGIO_CHIARO, textColor: 20 },
+        columnStyles: { 0: { cellWidth: 14, halign: "right" }, 1: { cellWidth: 80 }, 2: { cellWidth: 45 },
+                        3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" },
+                        6: { cellWidth: 12, halign: "center" } },
+      });
+    }
   });
 
   if (!docEsistente) doc.save(`Riepilogo_BU_${stagione}.pdf`);
