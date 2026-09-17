@@ -2829,15 +2829,9 @@ function generaRiapertura(movimenti, saldiIniziali, conti, annoY1) {
 // il passivo), e il risultato dell'esercizio chiuso va a RISERVA UTILE.
 // La proposta è modificabile riga per riga e viene scritta solo su conferma.
 // ============================================================
-function stagionePrecedenteDi(s) {
-  const y = Number(String(s || "").slice(0, 4));
-  if (!Number.isFinite(y) || y < 2000) return "";
-  return `${y - 1}-${String(y % 100).padStart(2, "0")}`;
-}
-
 function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToast }) {
   const annoY1 = Number(String(stagione).slice(0, 4));
-  const [origine, setOrigine] = useState(() => stagionePrecedenteDi(stagione));
+  const [origine, setOrigine] = useState(() => stagionePrecedenteDi(stagione) || "");
   const [datiOrigine, setDatiOrigine] = useState(null);
   const [stato, setStato] = useState("idle");        // idle | caricamento | pronto | errore
   const [errore, setErrore] = useState("");
