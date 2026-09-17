@@ -5393,7 +5393,7 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
 // ============================================================
 // PAGINA: EXPORT
 // ============================================================
-function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, categorieRF }) {
+function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, categorieRF, bu }) {
   const [busy, setBusy] = useState(false);
   const [lastAction, setLastAction] = useState(null);
 
@@ -6009,11 +6009,313 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   };
 
   // === EXPORT: EXCEL COMPLETO ===
+  // ============================================================
+  // DATI PER BUSINESS UNIT
+  // Stessa logica della pagina "Business Units": aggregazione dai righi
+  // Dare/Avere del libro giornale (così apertura e pagamento si compensano),
+  // più il rendiconto per cassa calcolato sui soli movimenti della BU.
+  // ============================================================
+  const datiBU = useMemo(() => {
+    const investSet = new Set((categorieRF && categorieRF.investimenti) || []);
+    const ledger = generaLibroGiornale(movimenti || [], {}, contiMap);
+
+    // stessa chiave usata dal libro giornale: i movimenti senza BU confluiscono in GENERAL,
+    // così conteggi, conti e flussi di cassa della stessa BU parlano sempre degli stessi movimenti
+    const keyBU = (m) => m.bu || "GENERAL";
+    const counts = {};
+    (movimenti || []).forEach(m => { const b = keyBU(m); counts[b] = (counts[b] || 0) + 1; });
+
+    const acc = {}, accFlow = {};
+    ledger.forEach(scr => {
+      const b = scr.bu || "(senza BU)";
+      if (!acc[b]) acc[b] = {};
+      if (!accFlow[b]) accFlow[b] = {};
+      (scr.righe || []).forEach(r => {
+        if (!acc[b][r.codice]) acc[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
+        acc[b][r.codice].dare  += r.dare || 0;
+        acc[b][r.codice].avere += r.avere || 0;
+        if (!scr.apertura) {
+          if (!accFlow[b][r.codice]) accFlow[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
+          accFlow[b][r.codice].dare  += r.dare || 0;
+          accFlow[b][r.codice].avere += r.avere || 0;
+        }
+      });
+    });
+
+    const nomi = [...new Set([...(bu || []), ...Object.keys(acc), ...Object.keys(counts)])]
+      .filter(n => n && (counts[n] || acc[n]))
+      .sort((a, b2) => a.localeCompare(b2));
+
+    return nomi.map(nome => {
+      let ricavi = 0, costi = 0;
+      const contiBU = Object.values(acc[nome] || {}).map(c => {
+        const cat = contiMap[c.codice]?.categoria || "";
+        const isRic = cat === "RICAVI";
+        const isCos = cat === "COSTI" || cat === "COSTI/RICAVI";
+        const netto = c.avere - c.dare;          // >0 eccedenza avere
+        if (isRic) ricavi += netto;
+        if (isCos) costi  += (c.dare - c.avere);
+        return {
+          codice: c.codice,
+          nome: (contiMap[c.codice]?.nome || `Conto ${c.codice}`).trim(),
+          categoria: cat,
+          tipo: isRic ? "Ricavo" : isCos ? "Costo" : "Patrimoniale",
+          dare: c.dare, avere: c.avere,
+          ricavi: isRic ? netto : 0,
+          costi:  isCos ? (c.dare - c.avere) : 0,
+          saldoDA: c.dare - c.avere,
+        };
+      })
+        .filter(c => Math.abs(c.dare) > 0.005 || Math.abs(c.avere) > 0.005)
+        .sort((a, b2) => (a.tipo === b2.tipo ? 0 : a.tipo === "Ricavo" ? -1 : b2.tipo === "Ricavo" ? 1 : a.tipo === "Costo" ? -1 : 1)
+                      || Math.abs(b2.saldoDA) - Math.abs(a.saldoDA));
+
+      // Investimenti di competenza del periodo (conti immobilizzazioni, aperture escluse)
+      const investimenti = Object.values(accFlow[nome] || {}).reduce((s, c) => {
+        const cat = (contiMap[c.codice]?.categoria || "").toUpperCase();
+        return cat.startsWith("IMM.") ? s + (c.dare - c.avere) : s;
+      }, 0);
+
+      const movs = (movimenti || []).filter(m => keyBU(m) === nome);
+      const rf = buildRendiconto(movs, conti, {}, investSet);
+
+      return {
+        nome,
+        count: counts[nome] || 0,
+        ricavi, costi, margine: ricavi - costi,
+        investimenti,
+        cassa: rf.grandEntrate - rf.grandUsciteOp - rf.grandInvest,
+        conti: contiBU,
+        rf,
+      };
+    });
+  }, [movimenti, contiMap, conti, categorieRF, bu]);
+
+  // ============================================================
+  // HELPER EXCEL — fogli impaginati come prospetto
+  // ============================================================
+  const XL_MONEY = "#,##0.00";
+  const XL_STILI = {
+    sezione:    { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "2D5E3E" } } },
+    sezioneNeg: { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "B54343" } } },
+    classe:     { font: { bold: true, color: { rgb: "1A1A1A" } }, fill: { fgColor: { rgb: "EDEBE3" } } },
+    voce:       { font: { bold: true, color: { rgb: "1A1A1A" } } },
+    totale:     { font: { bold: true, color: { rgb: "1A1A1A" } }, fill: { fgColor: { rgb: "F0EFEA" } } },
+    finale:     { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "1A1A1A" } } },
+    dettaglio:  { font: { italic: true, sz: 10, color: { rgb: "8A8578" } } },
+  };
+  const xlCella = (ws, r, c) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    if (!ws[ref]) ws[ref] = { t: "s", v: "" };
+    return ws[ref];
+  };
+  // aoa: righe; opts.kind: { indiceRiga: "classe" | "voce" | ... }
+  const xlFoglio = (aoa, { cols = [], headerRow = 3, moneyCols = [], kind = {} } = {}) => {
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const nCols = Math.max(...aoa.map(r => (r || []).length), cols.length, 1);
+    ws["!cols"] = (cols.length ? cols : Array(nCols).fill(16)).map(w => ({ wch: w }));
+    Object.assign(xlCella(ws, 0, 0), { s: { font: { bold: true, sz: 14 } } });
+    if (aoa.length > 1) Object.assign(xlCella(ws, 1, 0), { s: { font: { italic: true, sz: 9, color: { rgb: "8A8578" } } } });
+    if (headerRow >= 0) {
+      for (let c = 0; c < nCols; c++) {
+        Object.assign(xlCella(ws, headerRow, c), { s: { font: { bold: true, color: { rgb: "FFFFFF" } },
+          fill: { fgColor: { rgb: "1A1A1A" } }, alignment: { horizontal: c ? "right" : "left" } } });
+      }
+    }
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    for (let r = Math.max(headerRow + 1, 0); r <= range.e.r; r++) {
+      moneyCols.forEach(c => { const x = xlCella(ws, r, c); if (typeof x.v === "number") x.z = XL_MONEY; });
+      const base = XL_STILI[kind[r]] || null;
+      for (let c = 0; c < nCols; c++) {
+        const x = xlCella(ws, r, c);
+        if (base || moneyCols.includes(c)) {
+          x.s = Object.assign({}, base || {}, { alignment: { horizontal: c && moneyCols.includes(c) ? "right" : "left" } });
+        }
+      }
+    }
+    return ws;
+  };
+
+  // --- Stato Patrimoniale (schema di bilancio) ---
+  const foglioSP = (P) => {
+    const aoa = [["STATO PATRIMONIALE"], [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
+                 ["Voce", "Parziale", "Totale"]];
+    const kind = {};
+    const riga = (r, k) => { aoa.push(r); if (k) kind[aoa.length - 1] = k; };
+    [["attivo", "ATTIVO", "sezione", "TOTALE ATTIVO", P.totAttivo],
+     ["passivo", "PASSIVO E PATRIMONIO NETTO", "sezioneNeg", "TOTALE PASSIVO E PATRIMONIO NETTO", P.totPassivo]]
+    .forEach(([lato, titolo, stile, labelTot, valTot]) => {
+      riga([titolo, "", ""], stile);
+      P.sp.filter(c => c.lato === lato).forEach(cl => {
+        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", cl.totale], "classe");
+        (cl.voci || []).forEach(v => {
+          if (v.tipo === "sottosezione") { riga([`    ${v.nome}`, "", ""], "dettaglio"); return; }
+          riga([`    ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.valore, ""], "voce");
+        });
+      });
+      riga([labelTot, "", valTot], "totale");
+      riga([]);
+    });
+    const ok = Math.abs(P.sbilancio) < 0.01;
+    riga([ok ? "QUADRATURA ATTIVO / PASSIVO: OK" : "SBILANCIO ATTIVO / PASSIVO", "", ok ? 0 : P.sbilancio], "finale");
+    return xlFoglio(aoa, { cols: [58, 16, 16], moneyCols: [1, 2], kind });
+  };
+
+  // --- Conto Economico (schema di bilancio) ---
+  const foglioCE = (P) => {
+    const aoa = [["CONTO ECONOMICO"], [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
+                 ["Voce", "Parziale", "Totale"]];
+    const kind = {};
+    const riga = (r, k) => { aoa.push(r); if (k) kind[aoa.length - 1] = k; };
+    const pos = P.ce.filter(cl => cl.segno >= 0);
+    const neg = P.ce.filter(cl => cl.segno < 0);
+    [[pos, "VOCI POSITIVE", "sezione", "Totale voci positive"],
+     [neg, "VOCI NEGATIVE", "sezioneNeg", "Totale voci negative"]]
+    .forEach(([gruppo, titolo, stile, labelTot]) => {
+      if (!gruppo.length) return;
+      riga([titolo, "", ""], stile);
+      gruppo.forEach(cl => {
+        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", cl.totale], "classe");
+        (cl.voci || []).forEach(v => {
+          if (v.tipo === "sottosezione") { riga([`    ${v.nome}`, "", ""], "dettaglio"); return; }
+          riga([`    ${v.codice ? v.codice + ") " : ""}${v.nome}`, v.valore, ""], "voce");
+        });
+      });
+      riga([labelTot, "", gruppo.reduce((s, c) => s + c.totale, 0)], "totale");
+      riga([]);
+    });
+    riga([`RISULTATO D'ESERCIZIO (${P.risultato >= 0 ? "Utile" : "Perdita"})`, "", P.risultato], "finale");
+    return xlFoglio(aoa, { cols: [58, 16, 16], moneyCols: [1, 2], kind });
+  };
+
+  // --- Rendiconto Finanziario, metodo diretto (schema di bilancio) ---
+  const foglioRF = (R) => {
+    const aoa = [["RENDICONTO FINANZIARIO · METODO DIRETTO"],
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
+                 ["Voce", "Parziale", "Totale"]];
+    const kind = {};
+    const riga = (r, k) => { aoa.push(r); if (k) kind[aoa.length - 1] = k; };
+    R.aree.forEach(a => {
+      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", a.totale], "classe");
+      (a.voci || []).forEach(v => {
+        riga([`    ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.totale, ""], "voce");
+        (v.righe || []).forEach(x => riga([`        ${x.cat}`, x.val, ""], "dettaglio"));
+      });
+    });
+    riga([]);
+    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", R.variazione], "totale");
+    riga([]);
+    riga(["Disponibilità liquide iniziali", "", R.apertura], "classe");
+    R.dettaglioLiquidita.forEach(d => riga([`    ${d.nome}`, d.apertura, ""], "dettaglio"));
+    riga(["Disponibilità liquide finali", "", R.chiusura], "classe");
+    R.dettaglioLiquidita.forEach(d => riga([`    ${d.nome}`, d.chiusura, ""], "dettaglio"));
+    const scarto = Math.round((R.chiusura - R.apertura - R.variazione) * 100) / 100;
+    riga([]);
+    riga([Math.abs(scarto) < 0.01 ? "QUADRATURA CON LE DISPONIBILITÀ LIQUIDE: OK" : "SCARTO DI QUADRATURA", "", scarto], "finale");
+    return xlFoglio(aoa, { cols: [58, 16, 16], moneyCols: [1, 2], kind });
+  };
+
+  // --- Riepilogo per Business Unit ---
+  const foglioBURiepilogo = () => {
+    const aoa = [["RIEPILOGO PER BUSINESS UNIT"], [`Futsal Fabbrico ASD · Stagione ${stagione}`], [],
+                 ["Business Unit", "N. movimenti", "Ricavi", "Costi", "Margine", "% sui ricavi", "% sui costi",
+                  "Investimenti", "Entrate di cassa", "Uscite di cassa", "Flusso netto di cassa"]];
+    const kind = {};
+    const totR = datiBU.reduce((s, b) => s + b.ricavi, 0);
+    const totC = datiBU.reduce((s, b) => s + b.costi, 0);
+    datiBU.forEach(b => aoa.push([
+      b.nome, b.count, b.ricavi, b.costi, b.margine,
+      totR ? b.ricavi / totR : 0, totC ? b.costi / totC : 0,
+      b.investimenti, b.rf.grandEntrate, b.rf.grandUsciteOp + b.rf.grandInvest, b.cassa,
+    ]));
+    aoa.push(["TOTALE",
+      datiBU.reduce((s, b) => s + b.count, 0), totR, totC, totR - totC, totR ? 1 : 0, totC ? 1 : 0,
+      datiBU.reduce((s, b) => s + b.investimenti, 0),
+      datiBU.reduce((s, b) => s + b.rf.grandEntrate, 0),
+      datiBU.reduce((s, b) => s + b.rf.grandUsciteOp + b.rf.grandInvest, 0),
+      datiBU.reduce((s, b) => s + b.cassa, 0)]);
+    kind[aoa.length - 1] = "finale";
+    const ws = xlFoglio(aoa, { cols: [26, 13, 14, 14, 14, 12, 12, 14, 16, 16, 18],
+                               moneyCols: [2, 3, 4, 7, 8, 9, 10], kind });
+    for (let r = 4; r <= 4 + datiBU.length; r++) {
+      [5, 6].forEach(c => { const x = xlCella(ws, r, c); if (typeof x.v === "number") x.z = "0.0%"; });
+    }
+    return ws;
+  };
+
+  // --- Dettaglio conti per Business Unit ---
+  const foglioBUConti = () => {
+    const aoa = [["BUSINESS UNIT · DETTAGLIO CONTI"], [`Futsal Fabbrico ASD · Stagione ${stagione}`], [],
+                 ["Business Unit", "Cod.", "Conto", "Categoria", "Tipo", "Dare", "Avere", "Ricavi", "Costi", "Saldo (D−A)"]];
+    const kind = {};
+    datiBU.forEach(b => {
+      b.conti.forEach(c => aoa.push([b.nome, c.codice, c.nome, c.categoria, c.tipo, c.dare, c.avere, c.ricavi, c.costi, c.saldoDA]));
+      aoa.push([b.nome, "", `TOTALE ${b.nome}`, "", "", "", "", b.ricavi, b.costi, ""]);
+      kind[aoa.length - 1] = "totale";
+    });
+    return xlFoglio(aoa, { cols: [24, 7, 38, 20, 14, 14, 14, 14, 14, 14], moneyCols: [5, 6, 7, 8, 9], kind });
+  };
+
+  // --- Flussi mensili per Business Unit (entrate/uscite/investimenti per categoria) ---
+  const foglioBUMensile = () => {
+    const meseCap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
+    const aoa = [["BUSINESS UNIT · FLUSSI MENSILI"], [`Futsal Fabbrico ASD · Stagione ${stagione}`], [],
+                 ["Business Unit", "Sezione", "Voce", ...MESI.map(meseCap), "Totale"]];
+    const kind = {};
+    const mCols = MESI.map((_, i) => 3 + i).concat([3 + MESI.length]);
+    const catTot = (mappa, cat) => MESI.reduce((s, m) => s + ((mappa[cat] || {})[m] || 0), 0);
+    datiBU.forEach(b => {
+      const rf = b.rf;
+      const blocco = (sezione, mappa, labelTot, totMese, grand) => {
+        Object.keys(mappa).sort((x, y) => x.localeCompare(y)).forEach(cat =>
+          aoa.push([b.nome, sezione, cat, ...MESI.map(m => (mappa[cat][m] || 0)), catTot(mappa, cat)]));
+        aoa.push([b.nome, sezione, labelTot, ...MESI.map(m => totMese[m] || 0), grand]);
+        kind[aoa.length - 1] = "totale";
+      };
+      blocco("Entrate", rf.entrate, "TOTALE ENTRATE (A)", rf.totEntrate, rf.grandEntrate);
+      blocco("Uscite operative", rf.usciteOp, "TOTALE USCITE OPERATIVE (B)", rf.totUsciteOp, rf.grandUsciteOp);
+      blocco("Investimenti", rf.investimenti, "TOTALE INVESTIMENTI (C)", rf.totInvest, rf.grandInvest);
+      aoa.push([b.nome, "", "FLUSSO NETTO DI CASSA (A − B − C)",
+        ...MESI.map(m => (rf.totEntrate[m] || 0) - (rf.totUsciteOp[m] || 0) - (rf.totInvest[m] || 0)), b.cassa]);
+      kind[aoa.length - 1] = "finale";
+      aoa.push([]);
+    });
+    return xlFoglio(aoa, { cols: [24, 18, 32, ...MESI.map(() => 11), 13], moneyCols: mCols, kind });
+  };
+
   const exportExcel = () => {
+    if (!prospettiSchema || !rfDirSchema) { alert("Schema di Bilancio non ancora caricato: riprova tra un istante."); return; }
     setBusy(true);
     try {
       const wb = XLSX.utils.book_new();
 
+      // ========== PROSPETTI UFFICIALI (Schema di Bilancio) ==========
+      XLSX.utils.book_append_sheet(wb, foglioSP(prospettiSchema), "Stato Patrimoniale");
+      XLSX.utils.book_append_sheet(wb, foglioCE(prospettiSchema), "Conto Economico");
+      XLSX.utils.book_append_sheet(wb, foglioRF(rfDirSchema), "Rendiconto Finanziario");
+
+      // Raccordo voce di bilancio -> conti del piano dei conti
+      const voceDiConto = {};
+      const raccordoRows = [];
+      ["sp", "ce"].forEach(p => (prospettiSchema[p] || []).forEach(cl => (cl.voci || []).forEach(v => {
+        (v.dettaglio || []).forEach(d => {
+          const etichetta = `${p.toUpperCase()} · ${cl.codice ? cl.codice + ") " : ""}${cl.nome} · ${v.nome}`;
+          voceDiConto[d.c] = etichetta;
+          raccordoRows.push([p.toUpperCase(), `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`,
+                             `${v.codice ? v.codice + ". " : ""}${v.nome}`, d.c, d.nome, d.s, d.valore]);
+        });
+      })));
+      XLSX.utils.book_append_sheet(wb, xlFoglio(
+        [["RACCORDO VOCI DI BILANCIO / CONTI"], [`Futsal Fabbrico ASD · Stagione ${stagione}`], [],
+         ["Prospetto", "Classe", "Voce", "Cod.", "Conto", "Segno", "Importo"], ...raccordoRows],
+        { cols: [11, 34, 34, 7, 38, 8, 15], moneyCols: [6] }), "Raccordo voci-conti");
+
+      // ========== BUSINESS UNIT ==========
+      XLSX.utils.book_append_sheet(wb, foglioBURiepilogo(), "Riepilogo BU");
+      XLSX.utils.book_append_sheet(wb, foglioBUConti(), "BU conti");
+      XLSX.utils.book_append_sheet(wb, foglioBUMensile(), "BU flussi mensili");
+
+      // ========== DATI DI DETTAGLIO ==========
       // 1. Movimenti
       const movRows = movimenti.map(m => ({
         Tipo: m.tipo, Data: m.data, Mese: m.mese,
@@ -6040,15 +6342,16 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(lgRows), "Libro Giornale");
 
-      // 3. Bilancio Verifica
+      // 3. Bilancio Verifica (con la voce di bilancio in cui confluisce ogni conto)
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
         dati.mastrini.filter(m => m.dare > 0 || m.avere > 0).map(x => ({
           Codice: x.codice, Conto: x.nome.trim(), Categoria: x.categoria, Prospetto: x.prospetto,
           Dare: x.dare, Avere: x.avere, Saldo: x.saldo,
+          "Voce di bilancio": voceDiConto[Number(x.codice)] || "— non assegnato —",
         }))
       ), "Bilancio Verifica");
 
-      // 4. Rendiconto Finanziario — prospetto unico
+      // 4. Rendiconto per cassa, mese per mese (vista gestionale)
       const meseCap = (m) => m.charAt(0).toUpperCase() + m.slice(1);
       const rfSheetRows = rendicontoMatrix(dati.rf).map(r => {
         const row = { Voce: r.type === "header" ? r.label.toUpperCase() : r.label };
@@ -6064,7 +6367,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         }
         return row;
       });
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfSheetRows), "Rendiconto Finanziario");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rfSheetRows), "Rendiconto mensile");
 
       // 5. Cespiti
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
@@ -6082,19 +6385,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         }))
       ), "Piano dei Conti");
 
-      // 7. SP/CE riepilogo
-      const speceRows = [
-        { Sezione: "RICAVI", Voce: "Totale Ricavi", Importo: dati.ricavi },
-        { Sezione: "COSTI", Voce: "Totale Costi", Importo: dati.costi },
-        { Sezione: "RISULTATO", Voce: "Utile/Perdita", Importo: dati.utile },
-        { Sezione: "SP", Voce: "Totale Attivo", Importo: dati.attivo },
-        { Sezione: "SP", Voce: "Totale Passivo", Importo: dati.passivo },
-        { Sezione: "SP", Voce: "Attivo Netto", Importo: dati.attivo - dati.passivo },
-      ];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(speceRows), "Sintesi SP-CE");
-
       XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagione}.xlsx`);
-      setLastAction("Excel completo esportato");
+      setLastAction("Excel completo esportato — prospetti di bilancio e riepilogo BU inclusi");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
   };
@@ -6178,11 +6470,18 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <button className="btn" onClick={exportCespitiPDF} disabled={busy}>PDF</button>
         </div>
         <div className="card">
-          <h3 className="card-title">📊 Excel completo</h3>
+          <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
+            <h3 className="card-title" style={{margin:0}}>📊 Excel completo</h3>
+            <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:9.5}}>SCHEMA DI BILANCIO</span>
+          </div>
           <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
-            File <code>.xlsx</code> con 7 fogli: tutti i dati editabili.
+            File <code>.xlsx</code> con 13 fogli: Stato Patrimoniale, Conto Economico e Rendiconto Finanziario
+            impaginati come i prospetti ufficiali, raccordo voci–conti, riepilogo per Business Unit
+            (sintesi, conti, flussi mensili) e tutti i dati di dettaglio.
           </p>
-          <button className="btn" onClick={exportExcel} disabled={busy}>XLSX</button>
+          <button className="btn" onClick={exportExcel} disabled={busy || !prospettiSchema || !rfDirSchema}>
+            {(!prospettiSchema || !rfDirSchema) ? "Caricamento schema…" : "XLSX"}
+          </button>
         </div>
       </div>
 
@@ -14302,7 +14601,7 @@ function App() {
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "budget" && <PageBudget conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} bu={bu} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
-              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} />}
+              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} bu={bu} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
