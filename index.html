@@ -1180,6 +1180,19 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
   const diff = totDare - totAvere;
   const quadra = Math.abs(diff) < 0.005 && totDare > 0;
 
+  // Righe della scrittura libera che toccano un conto di liquidità: il denaro si muove
+  // davvero (il saldo del conto cambia), ma la scrittura nasce non monetaria e quindi non
+  // porta una categoria di rendiconto. Va segnalato prima di salvare, altrimenti la cassa
+  // cala senza che il rendiconto lo spieghi — o, peggio, il pagamento finisce registrato due volte.
+  const nomeConto = (cod) => {
+    const liq = CONTI_LIQUIDITA.find(c => Number(c.codice) === Number(cod));
+    if (liq) return (liq.nome || "").trim();
+    const c = (conti || []).find(x => Number(x.codice) === Number(cod));
+    return (c?.nome || `Conto ${cod}`).trim();
+  };
+  const righeLiquide = righe.filter(r => r.conto && CODICI_LIQUIDITA.includes(Number(r.conto))
+                                      && (Number(r.dare) > 0 || Number(r.avere) > 0));
+
   const addRiga = () => setRighe([...righe, { conto: "", dare: "", avere: "" }]);
   const removeRiga = (i) => {
     if (righe.length <= 2) return alert("Una scrittura deve avere almeno 2 righe");
@@ -1226,6 +1239,18 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
       if (righeValide.length < 2) return alert("Servono almeno 2 righe valide");
       if (!quadra) return alert(`La scrittura non quadra: DARE ${totDare.toFixed(2)} ≠ AVERE ${totAvere.toFixed(2)} (Δ ${diff.toFixed(2)})`);
       if (!descrizione.trim()) return alert("Aggiungi una descrizione alla scrittura");
+      if (righeLiquide.length) {
+        const elenco = righeLiquide.map(r => {
+          const d = Number(r.dare) > 0;
+          return `· ${nomeConto(r.conto)}: ${d ? "DARE" : "AVERE"} ${fmt(d ? Number(r.dare) : Number(r.avere))}`;
+        }).join("\n");
+        if (!confirm(
+          `Questa scrittura tocca conti di liquidità:\n\n${elenco}\n\n` +
+          `Il saldo di cassa cambierà per davvero, ma essendo una scrittura non monetaria non avrà una ` +
+          `categoria di rendiconto: comparirà nella riga "Scritture libere su conti di liquidità non classificate".\n\n` +
+          `Se si tratta di un incasso o di un pagamento, annulla e registralo come entrata o uscita — ` +
+          `e controlla che non sia già stato registrato come movimento di cassa.\n\nSalvare comunque?`)) return;
+      }
 
       // Genero scritturaId unico per legare le righe
       const scritturaId = "scr_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
@@ -1432,6 +1457,15 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
                quadra ? `✓ Scrittura quadrata: DARE = AVERE = ${fmt(totDare)} €` :
                `✗ Sbilancio: DARE ${fmt(totDare)} − AVERE ${fmt(totAvere)} = ${diff > 0 ? "+" : ""}${fmt(diff)} €`}
             </div>
+            {righeLiquide.length > 0 && (
+              <div style={{marginTop:8, padding:"8px 12px", background:"#fdf5e6", border:"1px solid #e6d5a8",
+                           borderRadius:6, fontSize:12.5, color:"#7a5a1d", lineHeight:1.45}}>
+                ⚠ {righeLiquide.length === 1 ? "Una riga usa un conto di liquidità" : `${righeLiquide.length} righe usano conti di liquidità`} ({righeLiquide.map(r => nomeConto(r.conto)).join(", ")}).
+                Il saldo di cassa si muoverà davvero, ma fuori dalle categorie del rendiconto.
+                Se è un incasso o un pagamento conviene registrarlo come entrata o uscita, dopo aver
+                verificato che non sia già a libro come movimento di cassa.
+              </div>
+            )}
           </div>
 
           <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
