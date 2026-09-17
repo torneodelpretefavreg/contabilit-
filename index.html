@@ -2661,7 +2661,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
             { codice: m.contoLiquidita, nome: liq.nome || "?", dare: m.importo, avere: 0 },
             { codice: m.contoPdC, nome: pdc?.nome || "?", dare: 0, avere: m.importo },
           ],
-          auto: true, origine: m._id || "mov", movId: m._id, bu: m.bu || "GENERAL",
+          auto: true, origine: m._id || "mov", movId: m._id, apertura: m.apertura, bu: m.bu || "GENERAL",
         });
       }
     } else if (m.tipo === "uscita" && m.contoPdC) {
@@ -2703,7 +2703,7 @@ function generaLibroGiornale(movimenti, saldiIniziali, contiMap) {
             { codice: m.contoPdC, nome: pdc?.nome || "?", dare: m.importo, avere: 0 },
             { codice: m.contoLiquidita, nome: liq.nome || "?", dare: 0, avere: m.importo },
           ],
-          auto: true, origine: m._id || "mov", movId: m._id, bu: m.bu || "GENERAL",
+          auto: true, origine: m._id || "mov", movId: m._id, apertura: m.apertura, bu: m.bu || "GENERAL",
         });
       }
     } else if (m.tipo === "giroconto") {
@@ -2819,6 +2819,287 @@ function generaRiapertura(movimenti, saldiIniziali, conti, annoY1) {
   const c60 = mastrini.find(m => m.codice === 60);
   const residuo60 = c60 ? r2(c60.saldo) : 0;
   return { aperture: ap, utile, totAttivo: r2(totAttivo), totPassivo, nConti, residuo60 };
+}
+
+// ============================================================
+// PAGINA: RIAPERTURA CONTI
+// Propone la scrittura di riapertura del nuovo esercizio a partire dai saldi
+// finali della stagione precedente: ogni conto patrimoniale torna dal suo lato
+// con contropartita 60 BILANCIO DI APERTURA (in AVERE per l'attivo, in DARE per
+// il passivo), e il risultato dell'esercizio chiuso va a RISERVA UTILE.
+// La proposta è modificabile riga per riga e viene scritta solo su conferma.
+// ============================================================
+function stagionePrecedenteDi(s) {
+  const y = Number(String(s || "").slice(0, 4));
+  if (!Number.isFinite(y) || y < 2000) return "";
+  return `${y - 1}-${String(y % 100).padStart(2, "0")}`;
+}
+
+function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToast }) {
+  const annoY1 = Number(String(stagione).slice(0, 4));
+  const [origine, setOrigine] = useState(() => stagionePrecedenteDi(stagione));
+  const [datiOrigine, setDatiOrigine] = useState(null);
+  const [stato, setStato] = useState("idle");        // idle | caricamento | pronto | errore
+  const [errore, setErrore] = useState("");
+  const [righe, setRighe] = useState([]);
+  const [salvando, setSalvando] = useState(false);
+  const [azzeraSaldi, setAzzeraSaldi] = useState(true);
+  const [sostituisci, setSostituisci] = useState(false);
+
+  const contiMap = useMemo(() => {
+    const m = {};
+    (conti || []).forEach(c => { m[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome }; });
+    if (datiOrigine) (datiOrigine.conti || []).forEach(c => { if (!m[c.codice]) m[c.codice] = c; });
+    return m;
+  }, [conti, datiOrigine]);
+
+  const apertureEsistenti = useMemo(() => (movimenti || []).filter(isAperturaMov), [movimenti]);
+
+  useEffect(() => { setDatiOrigine(null); setStato("idle"); setErrore(""); }, [origine, stagione]);
+
+  const carica = async () => {
+    if (!firebaseReady) { setErrore("Firebase non configurato"); setStato("errore"); return; }
+    if (!origine) { setErrore("Scegli la stagione da cui riaprire"); setStato("errore"); return; }
+    if (origine === stagione) { setErrore("La stagione di origine deve essere diversa da quella aperta"); setStato("errore"); return; }
+    setStato("caricamento"); setErrore("");
+    try {
+      const snap = await db.ref(`stagioni/${origine}`).once("value");
+      const v = snap.val();
+      if (!v) throw new Error(`La stagione ${origine} non esiste nel database`);
+      const movs = v.movimenti ? Object.entries(v.movimenti).map(([k, m]) => ({ ...m, _id: k })) : [];
+      if (!movs.length) throw new Error(`La stagione ${origine} non ha movimenti: non c'è nulla da riaprire`);
+      const contiOrig = v.conti ? Object.values(v.conti) : [];
+      setDatiOrigine({
+        movimenti: movs,
+        saldiIniziali: v.saldiIniziali || {},
+        conti: contiOrig.length ? contiOrig : (conti || []),
+      });
+      setStato("pronto");
+    } catch (e) {
+      setErrore((e && e.message) || String(e)); setStato("errore");
+    }
+  };
+
+  const proposta = useMemo(() => {
+    if (!datiOrigine) return null;
+    return generaRiapertura(datiOrigine.movimenti, datiOrigine.saldiIniziali, datiOrigine.conti, annoY1);
+  }, [datiOrigine, annoY1]);
+
+  useEffect(() => {
+    if (!proposta) { setRighe([]); return; }
+    setRighe(proposta.aperture.map((m, i) => ({
+      ...m, _k: `r${i}`, includi: true,
+      importo: Math.round((Number(m.importo) || 0) * 100) / 100,
+    })));
+  }, [proposta]);
+
+  const codiceDi = (m) => (m.contoLiquidita != null ? m.contoLiquidita : m.contoPdC);
+  const nomeDi = (m) => (contiMap[codiceDi(m)]?.nome || `Conto ${codiceDi(m)}`).trim();
+
+  const attive = righe.filter(r => r.includi && Math.abs(Number(r.importo) || 0) > 0.005);
+  const totDare  = attive.filter(r => r.tipo === "entrata").reduce((s, r) => s + (Number(r.importo) || 0), 0);
+  const totAvere = attive.filter(r => r.tipo === "uscita").reduce((s, r) => s + (Number(r.importo) || 0), 0);
+  const quadra = Math.abs(totDare - totAvere) < 0.01;
+
+  const setRiga = (k, patch) => setRighe(rs => rs.map(r => (r._k === k ? { ...r, ...patch } : r)));
+
+  const inserisci = async () => {
+    if (!attive.length) return;
+    if (!quadra && !confirm(
+      `La scrittura non quadra: DARE ${fmt(totDare)} contro AVERE ${fmt(totAvere)} ` +
+      `(differenza ${fmt(totDare - totAvere)}).\n\nIl conto 60 Bilancio di Apertura non si chiuderà a zero. Inserire lo stesso?`)) return;
+    const msg = `Inserisco ${attive.length} scritture di riapertura al ${annoY1}-09-01 nella stagione ${stagione}.\n\n` +
+      `• DARE totale: ${fmt(totDare)}\n• AVERE totale: ${fmt(totAvere)}\n` +
+      (sostituisci && apertureEsistenti.length ? `• Elimino prima le ${apertureEsistenti.length} scritture di apertura già presenti\n` : "") +
+      (azzeraSaldi ? "• Azzero i saldi iniziali di liquidità (i saldi arrivano dalla riapertura)\n" : "") +
+      "\nProcedere?";
+    if (!confirm(msg)) return;
+    setSalvando(true);
+    try {
+      const now = new Date().toISOString();
+      const upd = {};
+      if (sostituisci) apertureEsistenti.forEach(m => { if (m._id) upd[m._id] = null; });
+      attive.forEach((r, i) => {
+        const mov = { ...r };
+        delete mov._k; delete mov.includi; delete mov._id;
+        mov.importo = Math.round((Number(r.importo) || 0) * 100) / 100;
+        mov.creatoIl = now; mov.modificatoIl = now;
+        upd[`riapertura_${annoY1}_${String(i).padStart(4, "0")}`] = mov;
+      });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(upd);
+      if (azzeraSaldi) await db.ref(`stagioni/${stagione}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
+      onToast(`Riapertura inserita: ${attive.length} scritture al ${annoY1}-09-01`);
+      setSostituisci(false);
+    } catch (e) { alert("Errore: " + ((e && e.message) || e)); }
+    finally { setSalvando(false); }
+  };
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Riapertura conti</h2>
+          <div className="sub">
+            Propone la scrittura di apertura del {annoY1}-09-01 dai saldi finali della stagione precedente ·
+            contropartita 60 BILANCIO DI APERTURA
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{marginBottom:18}}>
+        <h3 className="card-title">1 · Da quale stagione riapro</h3>
+        <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+          <select value={origine} onChange={e => setOrigine(e.target.value)} style={{minWidth:140}}>
+            <option value="">— scegli —</option>
+            {(stagioniDisponibili || []).filter(s => s !== stagione).map(s => <option key={s} value={s}>{s}</option>)}
+            {origine && !(stagioniDisponibili || []).includes(origine) && <option value={origine}>{origine}</option>}
+          </select>
+          <button className="btn accent" onClick={carica} disabled={stato === "caricamento" || !origine}>
+            {stato === "caricamento" ? "Calcolo…" : "Calcola proposta"}
+          </button>
+          <span style={{fontSize:12.5, color:"var(--ink-3)"}}>
+            Stagione aperta: <strong>{stagione}</strong> · i saldi vengono letti dal vivo, senza modificare {origine || "la stagione di origine"}.
+          </span>
+        </div>
+        {stato === "errore" && (
+          <div style={{marginTop:12, padding:"10px 14px", background:"var(--danger-soft)", border:"1px solid #e8c4c4", borderRadius:8, fontSize:13, color:"var(--danger)"}}>
+            {errore}
+          </div>
+        )}
+        {apertureEsistenti.length > 0 && (
+          <div style={{marginTop:12, padding:"10px 14px", background:"#fdf5e6", border:"1px solid #e6d5a8", borderRadius:8, fontSize:13, color:"#7a5a1d"}}>
+            Attenzione: in {stagione} ci sono già {apertureEsistenti.length} scritture di apertura.
+            Inserire la proposta senza rimuoverle porterebbe a saldi doppi.
+          </div>
+        )}
+      </div>
+
+      {proposta && (
+        <>
+          <div className="kpi-grid" style={{marginBottom:18}}>
+            <div className="kpi">
+              <div className="label">Conti patrimoniali riaperti</div>
+              <div className="value">{proposta.nConti}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Totale attivo</div>
+              <div className="value">{fmt(proposta.totAttivo)}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Totale passivo e netto</div>
+              <div className="value">{fmt(proposta.totPassivo)}</div>
+            </div>
+            <div className="kpi accent">
+              <div className="label">Risultato {origine} a Riserva Utile</div>
+              <div className={"value " + (proposta.utile < 0 ? "neg" : "")}>{fmt(proposta.utile)}</div>
+            </div>
+          </div>
+
+          {Math.abs(proposta.residuo60) > 0.01 && (
+            <div className="card" style={{marginBottom:18, background:"#fdf5e6", borderColor:"#e6d5a8"}}>
+              <h3 className="card-title" style={{color:"#7a5a1d"}}>⚠ Il conto 60 di {origine} non è a zero</h3>
+              <p style={{fontSize:13, color:"var(--ink-2)", margin:0}}>
+                Residuo {fmt(proposta.residuo60)}: la scrittura di apertura della stagione che stai chiudendo
+                non quadra, quindi anche questa riapertura erediterà lo sbilancio. Conviene sistemarla prima.
+              </p>
+            </div>
+          )}
+
+          <div className="card" style={{marginBottom:18}}>
+            <h3 className="card-title">2 · Scrittura proposta al {annoY1}-09-01</h3>
+            <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+              Ogni riga è un movimento di apertura: il conto torna dal suo lato e la contropartita è sempre
+              60 BILANCIO DI APERTURA, che si chiude a zero quando DARE e AVERE coincidono.
+              Puoi escludere una riga o correggerne l'importo prima di inserirla.
+            </p>
+            <div className="tbl-wrap">
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th style={{width:40}}></th>
+                    <th style={{width:50}}>Cod.</th>
+                    <th>Conto</th>
+                    <th>Descrizione</th>
+                    <th className="num" style={{width:120}}>Dare</th>
+                    <th className="num" style={{width:120}}>Avere</th>
+                    <th style={{width:120}}>Contropartita</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {righe.map(r => {
+                    const dare = r.tipo === "entrata";
+                    const spento = !r.includi;
+                    return (
+                      <tr key={r._k} style={spento ? {opacity:0.4} : {}}>
+                        <td>
+                          <input type="checkbox" checked={r.includi}
+                                 onChange={e => setRiga(r._k, { includi: e.target.checked })} />
+                        </td>
+                        <td className="mono" style={{fontWeight:600}}>{String(codiceDi(r)).padStart(2,"0")}</td>
+                        <td>{nomeDi(r)}</td>
+                        <td style={{fontSize:12, color:"var(--ink-2)"}}>{r.descrizione}</td>
+                        <td className="num">
+                          {dare ? (
+                            <input type="number" step="0.01" value={r.importo} className="num"
+                                   onChange={e => setRiga(r._k, { importo: e.target.value === "" ? 0 : Number(e.target.value) })}
+                                   style={{width:110, textAlign:"right"}} />
+                          ) : ""}
+                        </td>
+                        <td className="num">
+                          {!dare ? (
+                            <input type="number" step="0.01" value={r.importo} className="num"
+                                   onChange={e => setRiga(r._k, { importo: e.target.value === "" ? 0 : Number(e.target.value) })}
+                                   style={{width:110, textAlign:"right"}} />
+                          ) : ""}
+                        </td>
+                        <td style={{fontSize:11.5, color:"var(--ink-3)"}}>60 Bilancio di Apertura</td>
+                      </tr>
+                    );
+                  })}
+                  <tr style={{borderTop:"2px solid var(--ink)", fontWeight:600, background:"var(--panel-2)"}}>
+                    <td colSpan={4} style={{fontFamily:"'Fraunces',serif", fontSize:14}}>TOTALI</td>
+                    <td className="num" style={{fontWeight:700}}>{fmt(totDare)}</td>
+                    <td className="num" style={{fontWeight:700}}>{fmt(totAvere)}</td>
+                    <td></td>
+                  </tr>
+                  <tr style={{background:"var(--panel-2)"}}>
+                    <td colSpan={4}>60 · Bilancio di Apertura (contropartita)</td>
+                    <td className="num">{fmt(totAvere)}</td>
+                    <td className="num">{fmt(totDare)}</td>
+                    <td className={quadra ? "" : "num neg"} style={{fontSize:12}}>
+                      {quadra ? "chiude a zero ✓" : `sbilancio ${fmt(totDare - totAvere)}`}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="card">
+            <h3 className="card-title">3 · Inserisci in {stagione}</h3>
+            <label style={{display:"flex", gap:8, alignItems:"center", fontSize:13, marginBottom:8}}>
+              <input type="checkbox" checked={azzeraSaldi} onChange={e => setAzzeraSaldi(e.target.checked)} />
+              Azzera i saldi iniziali di liquidità (i saldi arrivano dalla scrittura di riapertura)
+            </label>
+            <label style={{display:"flex", gap:8, alignItems:"center", fontSize:13, marginBottom:14,
+                           color: apertureEsistenti.length ? "var(--danger)" : "var(--ink-3)"}}>
+              <input type="checkbox" checked={sostituisci} disabled={!apertureEsistenti.length}
+                     onChange={e => setSostituisci(e.target.checked)} />
+              Elimina prima le {apertureEsistenti.length} scritture di apertura già presenti in {stagione}
+            </label>
+            <button className="btn accent" onClick={inserisci} disabled={salvando || !attive.length}>
+              {salvando ? "Inserimento…" : `Inserisci ${attive.length} scritture di riapertura`}
+            </button>
+            <div style={{fontSize:12, color:"var(--ink-3)", marginTop:10}}>
+              Le scritture vengono create come movimenti di apertura (categoria APERTURA, data {annoY1}-09-01):
+              restano fuori dal rendiconto finanziario e dagli investimenti del periodo, e formano i saldi di partenza dei prospetti.
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 // ============================================================
@@ -5480,6 +5761,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     finally { setBusy(false); }
   };
 
+  const exportBUPdf = () => {
+    setBusy(true);
+    try { generaPdfRiepilogoBU(datiBU, stagione); setLastAction("Riepilogo Business Unit generato"); }
+    catch (e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+
   // === HELPER: header pagina PDF ===
   const addHeader = (doc, titoloDoc, pageNum, totPages) => {
     doc.setFont("helvetica", "bold");
@@ -5797,8 +6085,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         "2.  Stato Patrimoniale",
         "3.  Conto Economico",
         "4.  Rendiconto Finanziario",
-        "5.  Libro Cespiti",
-        "6.  Elenco Movimenti",
+        "5.  Riepilogo per Business Unit",
+        "6.  Libro Cespiti",
+        "7.  Elenco Movimenti",
       ];
       indice.forEach((s, i) => doc.text(s, 35, 125 + i * 7));
 
@@ -5806,12 +6095,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFontSize(11); doc.setFont("helvetica","bold");
       doc.text("Dati di sintesi", 30, 185);
       doc.setFontSize(9); doc.setFont("helvetica","normal");
+      const int0 = (n) => Math.round(Number(n) || 0).toLocaleString("it-IT", { maximumFractionDigits: 0 });
       const kpi = [
-        ["Ricavi", `€ ${dati.ricavi.toFixed(2)}`],
-        ["Costi", `€ ${dati.costi.toFixed(2)}`],
-        ["Utile/Perdita d'esercizio", `€ ${dati.utile.toFixed(2)}`],
-        ["Attività totali", `€ ${dati.attivo.toFixed(2)}`],
-        ["Passività totali", `€ ${dati.passivo.toFixed(2)}`],
+        ["Ricavi", int0(dati.ricavi)],
+        ["Costi", int0(dati.costi)],
+        ["Utile/Perdita d'esercizio", int0(dati.utile)],
+        ["Attività totali", int0(dati.attivo)],
+        ["Passività totali", int0(dati.passivo)],
         ["N. movimenti registrati", `${movimenti.length}`],
         ["N. conti movimentati", `${dati.mastrini.filter(m => m.dare > 0 || m.avere > 0).length}`],
       ];
@@ -5931,10 +6221,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       });
 
 
-      // === 5. CESPITI (landscape) ===
+      // === 5. RIEPILOGO PER BUSINESS UNIT (landscape) ===
+      generaPdfRiepilogoBU(datiBU, stagione, doc, "5. Riepilogo per Business Unit");
+
+      // === 6. CESPITI (landscape) ===
       doc.addPage("a4", "landscape");
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("5. Libro Cespiti", 14, 14);
+      doc.text("6. Libro Cespiti", 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const totCosto = cespiti.reduce((s,c) => s + (c.costo_storico || 0), 0);
@@ -5964,10 +6257,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         columnStyles: { 4:{halign:"right"}, 5:{halign:"center"}, 6:{halign:"right"}, 7:{halign:"right"}, 8:{halign:"right"} },
       });
 
-      // === 6. ELENCO MOVIMENTI ===
+      // === 7. ELENCO MOVIMENTI ===
       doc.addPage("a4", "landscape");
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("6. Elenco Movimenti", 14, 14);
+      doc.text("7. Elenco Movimenti", 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const movRows = movimenti
@@ -6025,6 +6318,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     const counts = {};
     (movimenti || []).forEach(m => { const b = keyBU(m); counts[b] = (counts[b] || 0) + 1; });
 
+    // Un'apertura è tale se lo dice il movimento che l'ha generata: così le
+    // immobilizzazioni già presenti al 01/09 non risultano investimenti del periodo
+    // anche quando la scrittura non porta il flag.
+    const idsApertura = new Set((movimenti || []).filter(isAperturaMov).map(m => m._id));
+    const scritturaDiApertura = (scr) =>
+      scr.apertura === true || scr.origine === "apertura" || idsApertura.has(scr.movId);
+
     const acc = {}, accFlow = {};
     ledger.forEach(scr => {
       const b = scr.bu || "(senza BU)";
@@ -6034,7 +6334,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         if (!acc[b][r.codice]) acc[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
         acc[b][r.codice].dare  += r.dare || 0;
         acc[b][r.codice].avere += r.avere || 0;
-        if (!scr.apertura) {
+        if (!scritturaDiApertura(scr)) {
           if (!accFlow[b][r.codice]) accFlow[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
           accFlow[b][r.codice].dare  += r.dare || 0;
           accFlow[b][r.codice].avere += r.avere || 0;
@@ -6094,7 +6394,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   // ============================================================
   // HELPER EXCEL — fogli impaginati come prospetto
   // ============================================================
-  const XL_MONEY = "#,##0.00";
+  // Prospetti e riepiloghi: importi in euro interi (stessa convenzione dei PDF ufficiali).
+  // I fogli di dettaglio (movimenti, libro giornale, verifica) restano al centesimo.
+  const XL_MONEY = "#,##0";
   const XL_STILI = {
     sezione:    { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "2D5E3E" } } },
     sezioneNeg: { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "B54343" } } },
@@ -6110,7 +6412,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     return ws[ref];
   };
   // aoa: righe; opts.kind: { indiceRiga: "classe" | "voce" | ... }
-  const xlFoglio = (aoa, { cols = [], headerRow = 3, moneyCols = [], kind = {} } = {}) => {
+  const XL_RIGA = { bottom: { style: "hair", color: { rgb: "DDDAD1" } } };
+  const xlFoglio = (aoa, { cols = [], headerRow = 3, moneyCols = [], kind = {}, numFmt = XL_MONEY, livelli = null } = {}) => {
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const nCols = Math.max(...aoa.map(r => (r || []).length), cols.length, 1);
     ws["!cols"] = (cols.length ? cols : Array(nCols).fill(16)).map(w => ({ wch: w }));
@@ -6124,95 +6427,151 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     }
     const range = XLSX.utils.decode_range(ws["!ref"]);
     for (let r = Math.max(headerRow + 1, 0); r <= range.e.r; r++) {
-      moneyCols.forEach(c => { const x = xlCella(ws, r, c); if (typeof x.v === "number") x.z = XL_MONEY; });
-      const base = XL_STILI[kind[r]] || null;
+      moneyCols.forEach(c => { const x = xlCella(ws, r, c); if (typeof x.v === "number") x.z = numFmt; });
+      const vuota = !(aoa[r] || []).some(v => v !== undefined && v !== null && v !== "");
+      if (vuota) continue;                       // righe di stacco: nessun filetto, nessun fondino
+      const base = XL_STILI[kind[r]] || {};
       for (let c = 0; c < nCols; c++) {
         const x = xlCella(ws, r, c);
-        if (base || moneyCols.includes(c)) {
-          x.s = Object.assign({}, base || {}, { alignment: { horizontal: c && moneyCols.includes(c) ? "right" : "left" } });
-        }
+        // il filetto sottile attraversa tutta la riga: l'occhio segue la voce fino all'importo
+        x.s = Object.assign({}, base, {
+          border: XL_RIGA,
+          alignment: { horizontal: moneyCols.includes(c) ? "right" : "left", vertical: "center" },
+        });
       }
+    }
+    // Raggruppamento a livelli: in Excel compaiono i pulsanti +/- a sinistra,
+    // così il dettaglio dei conti si apre solo quando serve.
+    if (livelli) {
+      const righe = [];
+      for (let r = 0; r <= range.e.r; r++) {
+        const lv = livelli[r] || 0;
+        righe[r] = lv > 0 ? { level: Math.min(lv, 7) } : {};
+      }
+      ws["!rows"] = righe;
+      ws["!outline"] = { above: true };   // il riepilogo sta sopra il dettaglio, non sotto
     }
     return ws;
   };
 
+  // Conti che compongono una voce dei prospetti: i valori a zero si omettono,
+  // così il breakdown mostra solo cosa ha davvero concorso al saldo.
+  const xlDettaglioConti = (voce) => (voce.dettaglio || [])
+    .filter(d => Math.abs(d.valore) > 0.005)
+    .sort((a, b) => Math.abs(b.valore) - Math.abs(a.valore));
+
+  // Conti movimentati dietro ogni categoria di cassa (per il breakdown del rendiconto):
+  // aperture, scritture non monetarie e giroconti restano fuori, come nel rendiconto stesso.
+  const contiPerCategoria = useMemo(() => {
+    const out = {};
+    (movimenti || []).forEach(m => {
+      if (isAperturaMov(m) || m.nonMonetario) return;
+      if (m.tipo !== "entrata" && m.tipo !== "uscita") return;
+      const cat = m.categoria || "(senza categoria)";
+      const cod = m.contoPdC != null ? Number(m.contoPdC) : null;
+      const key = cod != null ? cod : "_";
+      if (!out[cat]) out[cat] = {};
+      if (!out[cat][key]) out[cat][key] = {
+        codice: cod,
+        nome: cod != null ? (contiMap[cod]?.nome || `Conto ${cod}`).trim() : "(senza contropartita)",
+        val: 0,
+      };
+      out[cat][key].val += (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
+    });
+    const finale = {};
+    Object.entries(out).forEach(([cat, mappa]) => {
+      finale[cat] = Object.values(mappa)
+        .filter(d => Math.abs(d.val) > 0.005)
+        .sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
+    });
+    return finale;
+  }, [movimenti, contiMap]);
+
   // --- Stato Patrimoniale (schema di bilancio) ---
   const foglioSP = (P) => {
-    const aoa = [["STATO PATRIMONIALE"], [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
-                 ["Voce", "Parziale", "Totale"]];
-    const kind = {};
-    const riga = (r, k) => { aoa.push(r); if (k) kind[aoa.length - 1] = k; };
+    const aoa = [["STATO PATRIMONIALE"],
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio · i conti sotto ogni voce si aprono con i pulsanti +/− a sinistra`], [],
+                 ["Voce", "Di cui conto", "Parziale", "Totale"]];
+    const kind = {}, livelli = {};
+    const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
     [["attivo", "ATTIVO", "sezione", "TOTALE ATTIVO", P.totAttivo],
      ["passivo", "PASSIVO E PATRIMONIO NETTO", "sezioneNeg", "TOTALE PASSIVO E PATRIMONIO NETTO", P.totPassivo]]
     .forEach(([lato, titolo, stile, labelTot, valTot]) => {
-      riga([titolo, "", ""], stile);
+      riga([titolo, "", "", ""], stile);
       P.sp.filter(c => c.lato === lato).forEach(cl => {
-        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", cl.totale], "classe");
+        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", "", cl.totale], "classe");
         (cl.voci || []).forEach(v => {
-          if (v.tipo === "sottosezione") { riga([`    ${v.nome}`, "", ""], "dettaglio"); return; }
-          riga([`    ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.valore, ""], "voce");
+          if (v.tipo === "sottosezione") { riga([`  ${v.nome}`, "", "", ""], "dettaglio", 1); return; }
+          riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, "", v.valore, ""], "voce", 1);
+          xlDettaglioConti(v).forEach(d => riga([`     ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 2));
         });
       });
-      riga([labelTot, "", valTot], "totale");
+      riga([labelTot, "", "", valTot], "totale");
       riga([]);
     });
     const ok = Math.abs(P.sbilancio) < 0.01;
-    riga([ok ? "QUADRATURA ATTIVO / PASSIVO: OK" : "SBILANCIO ATTIVO / PASSIVO", "", ok ? 0 : P.sbilancio], "finale");
-    return xlFoglio(aoa, { cols: [58, 16, 16], moneyCols: [1, 2], kind });
+    riga([ok ? "QUADRATURA ATTIVO / PASSIVO: OK" : "SBILANCIO ATTIVO / PASSIVO", "", "", ok ? 0 : P.sbilancio], "finale");
+    return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
   };
 
   // --- Conto Economico (schema di bilancio) ---
   const foglioCE = (P) => {
-    const aoa = [["CONTO ECONOMICO"], [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
-                 ["Voce", "Parziale", "Totale"]];
-    const kind = {};
-    const riga = (r, k) => { aoa.push(r); if (k) kind[aoa.length - 1] = k; };
+    const aoa = [["CONTO ECONOMICO"],
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio · i conti sotto ogni voce si aprono con i pulsanti +/− a sinistra`], [],
+                 ["Voce", "Di cui conto", "Parziale", "Totale"]];
+    const kind = {}, livelli = {};
+    const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
     const pos = P.ce.filter(cl => cl.segno >= 0);
     const neg = P.ce.filter(cl => cl.segno < 0);
     [[pos, "VOCI POSITIVE", "sezione", "Totale voci positive"],
      [neg, "VOCI NEGATIVE", "sezioneNeg", "Totale voci negative"]]
     .forEach(([gruppo, titolo, stile, labelTot]) => {
       if (!gruppo.length) return;
-      riga([titolo, "", ""], stile);
+      riga([titolo, "", "", ""], stile);
       gruppo.forEach(cl => {
-        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", cl.totale], "classe");
+        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", "", cl.totale], "classe");
         (cl.voci || []).forEach(v => {
-          if (v.tipo === "sottosezione") { riga([`    ${v.nome}`, "", ""], "dettaglio"); return; }
-          riga([`    ${v.codice ? v.codice + ") " : ""}${v.nome}`, v.valore, ""], "voce");
+          if (v.tipo === "sottosezione") { riga([`  ${v.nome}`, "", "", ""], "dettaglio", 1); return; }
+          riga([`  ${v.codice ? v.codice + ") " : ""}${v.nome}`, "", v.valore, ""], "voce", 1);
+          xlDettaglioConti(v).forEach(d => riga([`     ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 2));
         });
       });
-      riga([labelTot, "", gruppo.reduce((s, c) => s + c.totale, 0)], "totale");
+      riga([labelTot, "", "", gruppo.reduce((s, c) => s + c.totale, 0)], "totale");
       riga([]);
     });
-    riga([`RISULTATO D'ESERCIZIO (${P.risultato >= 0 ? "Utile" : "Perdita"})`, "", P.risultato], "finale");
-    return xlFoglio(aoa, { cols: [58, 16, 16], moneyCols: [1, 2], kind });
+    riga([`RISULTATO D'ESERCIZIO (${P.risultato >= 0 ? "Utile" : "Perdita"})`, "", "", P.risultato], "finale");
+    return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
   };
 
   // --- Rendiconto Finanziario, metodo diretto (schema di bilancio) ---
   const foglioRF = (R) => {
     const aoa = [["RENDICONTO FINANZIARIO · METODO DIRETTO"],
-                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
-                 ["Voce", "Parziale", "Totale"]];
-    const kind = {};
-    const riga = (r, k) => { aoa.push(r); if (k) kind[aoa.length - 1] = k; };
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio · sotto ogni categoria i conti movimentati, apribili con i pulsanti +/− a sinistra`], [],
+                 ["Voce", "Di cui conto", "Parziale", "Totale"]];
+    const kind = {}, livelli = {};
+    const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
     R.aree.forEach(a => {
-      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", a.totale], "classe");
+      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", "", a.totale], "classe");
       (a.voci || []).forEach(v => {
-        riga([`    ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.totale, ""], "voce");
-        (v.righe || []).forEach(x => riga([`        ${x.cat}`, x.val, ""], "dettaglio"));
+        riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, "", v.totale, ""], "voce", 1);
+        (v.righe || []).forEach(x => {
+          riga([`     · ${x.cat}`, "", x.val, ""], null, 2);
+          (contiPerCategoria[x.cat] || []).forEach(d =>
+            riga([`        ${d.codice != null ? d.codice + " " : ""}${d.nome}`, d.val, "", ""], "dettaglio", 3));
+        });
       });
     });
     riga([]);
-    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", R.variazione], "totale");
+    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", "", R.variazione], "totale");
     riga([]);
-    riga(["Disponibilità liquide iniziali", "", R.apertura], "classe");
-    R.dettaglioLiquidita.forEach(d => riga([`    ${d.nome}`, d.apertura, ""], "dettaglio"));
-    riga(["Disponibilità liquide finali", "", R.chiusura], "classe");
-    R.dettaglioLiquidita.forEach(d => riga([`    ${d.nome}`, d.chiusura, ""], "dettaglio"));
+    riga(["Disponibilità liquide iniziali", "", "", R.apertura], "classe");
+    R.dettaglioLiquidita.forEach(d => riga([`     · ${d.nome}`, "", d.apertura, ""], null, 1));
+    riga(["Disponibilità liquide finali", "", "", R.chiusura], "classe");
+    R.dettaglioLiquidita.forEach(d => riga([`     · ${d.nome}`, "", d.chiusura, ""], null, 1));
     const scarto = Math.round((R.chiusura - R.apertura - R.variazione) * 100) / 100;
     riga([]);
-    riga([Math.abs(scarto) < 0.01 ? "QUADRATURA CON LE DISPONIBILITÀ LIQUIDE: OK" : "SCARTO DI QUADRATURA", "", scarto], "finale");
-    return xlFoglio(aoa, { cols: [58, 16, 16], moneyCols: [1, 2], kind });
+    riga([Math.abs(scarto) < 0.01 ? "QUADRATURA CON LE DISPONIBILITÀ LIQUIDE: OK" : "SCARTO DI QUADRATURA", "", "", scarto], "finale");
+    return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
   };
 
   // --- Riepilogo per Business Unit ---
@@ -6407,7 +6766,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <span className="pill" style={{background:"var(--accent)", borderColor:"var(--accent)", color:"#fff", fontSize:10}}>CONSIGLIATO</span>
         </div>
         <p style={{fontSize:13, color:"var(--ink-2)", margin:"0 0 14px"}}>
-          Un unico PDF con frontespizio, indice, e tutti i prospetti contabili: Bilancio di Verifica, Stato Patrimoniale, Conto Economico, Rendiconto Finanziario, Cespiti, Elenco Movimenti.
+          Un unico PDF con frontespizio, indice, e tutti i prospetti contabili: Bilancio di Verifica, Stato Patrimoniale, Conto Economico, Rendiconto Finanziario, Riepilogo per Business Unit, Cespiti, Elenco Movimenti.
           <br/>
           <strong>Ideale per la chiusura annuale e la presentazione al direttivo.</strong>
         </p>
@@ -6461,6 +6820,14 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <button className="btn" onClick={exportRFUfficialePDF} disabled={busy || !rfDirSchema}>
             {!rfDirSchema ? "Caricamento…" : "PDF"}
           </button>
+        </div>
+        <div className="card">
+          <h3 className="card-title">◎ Riepilogo Business Unit</h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Tabella di confronto tra le BU (ricavi, costi, margine, investimenti, flussi di cassa) e, per ciascuna,
+            il dettaglio dei conti economici. Formato A4 orizzontale.
+          </p>
+          <button className="btn" onClick={exportBUPdf} disabled={busy || !datiBU.length}>PDF</button>
         </div>
         <div className="card">
           <h3 className="card-title">▣ Libro Cespiti</h3>
@@ -8616,6 +8983,9 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
     });
 
     // Dare/Avere per (BU, conto) dai righi del libro giornale
+    const idsApertura = new Set((movimenti || []).filter(isAperturaMov).map(m => m._id));
+    const scritturaDiApertura = (scr) =>
+      scr.apertura === true || scr.origine === "apertura" || idsApertura.has(scr.movId);
     const acc = {};
     const accFlow = {}; // stesso dato ma senza le scritture di apertura (per gli investimenti del periodo)
     ledgerBU.forEach(scr => {
@@ -8626,7 +8996,7 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
         if (!acc[b][r.codice]) acc[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
         acc[b][r.codice].dare += r.dare || 0;
         acc[b][r.codice].avere += r.avere || 0;
-        if (!scr.apertura) {
+        if (!scritturaDiApertura(scr)) {
           if (!accFlow[b][r.codice]) accFlow[b][r.codice] = { codice: r.codice, dare: 0, avere: 0 };
           accFlow[b][r.codice].dare += r.dare || 0;
           accFlow[b][r.codice].avere += r.avere || 0;
@@ -12902,6 +13272,96 @@ function generaPdfRF(rfDir, stagione) {
   b.doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
 }
 
+// --- Riepilogo per Business Unit (documento singolo o pagina del pacchetto) ---
+// datiBU: [{ nome, count, ricavi, costi, margine, investimenti, cassa, conti, rf }]
+function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
+  const b = creaPdfBuilder(stagione, "landscape", docEsistente);
+  const doc = b.doc;
+  const W = doc.internal.pageSize.width;
+  const H = doc.internal.pageSize.height;
+
+  if (docEsistente) {
+    doc.addPage("a4", "landscape");
+    doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+    doc.text(titoloSezione || "Riepilogo per Business Unit", 14, 14);
+    doc.setDrawColor(26, 26, 26); doc.line(14, 17, W - 14, 17);
+  } else {
+    b.intestazioneL("Riepilogo per Business Unit");
+  }
+
+  const tot = (datiBU || []).reduce((s, x) => ({
+    count: s.count + x.count, ricavi: s.ricavi + x.ricavi, costi: s.costi + x.costi,
+    margine: s.margine + x.margine, investimenti: s.investimenti + x.investimenti,
+    entrate: s.entrate + x.rf.grandEntrate,
+    uscite: s.uscite + x.rf.grandUsciteOp + x.rf.grandInvest,
+    cassa: s.cassa + x.cassa,
+  }), { count: 0, ricavi: 0, costi: 0, margine: 0, investimenti: 0, entrate: 0, uscite: 0, cassa: 0 });
+
+  const body = (datiBU || []).map(x => [
+    x.nome, x.count, b.money(x.ricavi), b.money(x.costi), b.money(x.margine),
+    tot.ricavi ? (x.ricavi / tot.ricavi * 100).toFixed(1) + "%" : "—",
+    b.money(x.investimenti), b.money(x.rf.grandEntrate),
+    b.money(x.rf.grandUsciteOp + x.rf.grandInvest), b.money(x.cassa),
+  ]);
+  const grassetto = (v) => ({ content: v, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } });
+  body.push([grassetto("TOTALE"), grassetto(tot.count), grassetto(b.money(tot.ricavi)),
+             grassetto(b.money(tot.costi)), grassetto(b.money(tot.margine)), grassetto("100%"),
+             grassetto(b.money(tot.investimenti)), grassetto(b.money(tot.entrate)),
+             grassetto(b.money(tot.uscite)), grassetto(b.money(tot.cassa))]);
+
+  doc.autoTable({
+    startY: docEsistente ? 21 : 31,
+    head: [["Business Unit", "Mov.", "Ricavi", "Costi", "Margine", "% ricavi",
+            "Investimenti", "Entrate di cassa", "Uscite di cassa", "Flusso netto"]],
+    body,
+    styles: { fontSize: 8.5, cellPadding: 1.8 },
+    headStyles: { fillColor: b.NERO, textColor: 240, fontStyle: "bold" },
+    columnStyles: { 0: { cellWidth: 46 }, 1: { halign: "right" }, 2: { halign: "right" }, 3: { halign: "right" },
+                    4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" },
+                    7: { halign: "right" }, 8: { halign: "right" }, 9: { halign: "right" } },
+  });
+
+  doc.setFontSize(8); doc.setTextColor(120);
+  doc.text("Investimenti: acquisti di immobilizzazioni di competenza del periodo; i beni già presenti all'apertura non sono conteggiati.",
+           14, doc.lastAutoTable.finalY + 5);
+  doc.setTextColor(0);
+
+  // Dettaglio di ogni BU: conti economici e flussi di cassa
+  (datiBU || []).forEach(x => {
+    const eco = (x.conti || []).filter(c => c.tipo !== "Patrimoniale");
+    if (!eco.length) return;
+    let y = doc.lastAutoTable.finalY + 12;
+    if (y > H - 50) { doc.addPage("a4", "landscape"); y = 18; }
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11);
+    doc.text(x.nome, 14, y);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(110);
+    doc.text(`${x.count} movimenti · margine ${b.money(x.margine)} · flusso di cassa ${b.money(x.cassa)}`
+             + (Math.abs(x.investimenti) > 0.5 ? ` · investimenti del periodo ${b.money(x.investimenti)}` : ""),
+             14, y + 5);
+    doc.setTextColor(0);
+    doc.autoTable({
+      startY: y + 8,
+      head: [["Cod.", "Conto", "Categoria", "Ricavi", "Costi", "Saldo"]],
+      body: eco.map(c => [c.codice, c.nome, c.categoria || "",
+                          c.ricavi ? b.money(c.ricavi) : "", c.costi ? b.money(c.costi) : "",
+                          b.money(c.ricavi - c.costi)]),
+      foot: [[{ content: "TOTALE " + x.nome, colSpan: 3, styles: { fontStyle: "bold" } },
+              { content: b.money(x.ricavi), styles: { fontStyle: "bold", halign: "right" } },
+              { content: b.money(x.costi), styles: { fontStyle: "bold", halign: "right" } },
+              { content: b.money(x.margine), styles: { fontStyle: "bold", halign: "right" } }]],
+      theme: "plain",
+      styles: { fontSize: 8, cellPadding: 1.4 },
+      headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
+      footStyles: { fillColor: b.GRIGIO_CHIARO, textColor: 20 },
+      columnStyles: { 0: { cellWidth: 14, halign: "right" }, 1: { cellWidth: 80 }, 2: { cellWidth: 45 },
+                      3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
+    });
+  });
+
+  if (!docEsistente) doc.save(`Riepilogo_BU_${stagione}.pdf`);
+  return doc;
+}
+
 // Genera in un unico PDF (3 pagine) i prospetti civilistici SP + CE + RF (metodo diretto),
 // a partire dai dati già calcolati con lo Schema di Bilancio. Usata dal pulsante
 // "PDF prospetti" della pagina Schema di Bilancio. Il metodo indiretto e' tolto per ora
@@ -14545,6 +15005,7 @@ function App() {
           <button className={"navlink " + (page==="export"?"active":"")} onClick={() => setPage("export")}><span className="ico">↧</span> Export</button>
 
           <div className="section-label">Gestione</div>
+          <button className={"navlink " + (page==="riapertura"?"active":"")} onClick={() => setPage("riapertura")}><span className="ico">⟳</span> Riapertura conti</button>
           <button className={"navlink " + (page==="cespiti"?"active":"")} onClick={() => setPage("cespiti")}><span className="ico">▣</span> Cespiti</button>
           <button className={"navlink " + (page==="crediti"?"active":"")} onClick={() => setPage("crediti")}><span className="ico">🧾</span> Crediti</button>
           <button className={"navlink " + (page==="ammortamenti"?"active":"")} onClick={() => setPage("ammortamenti")}><span className="ico">⊟</span> Ammortamenti</button>
@@ -14602,6 +15063,7 @@ function App() {
               {page === "budget" && <PageBudget conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} bu={bu} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} bu={bu} />}
+              {page === "riapertura" && <PageRiapertura conti={conti} movimenti={movimenti} stagione={stagione} stagioniDisponibili={stagioniDisponibili} onToast={showToast} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
