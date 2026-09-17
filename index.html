@@ -1969,7 +1969,7 @@ function ManutenzioneBox({ stagione }) {
 // ============================================================
 // PAGINA: NUOVO MOVIMENTO
 // ============================================================
-function PageNuovo({ conti, stagione, categorie, onSaved, onCancel }) {
+function PageNuovo({ conti, movimenti, stagione, categorie, onSaved, onCancel }) {
   const [cespitoFromMov, setCespitoFromMov] = useState(null);
 
   const contiMap = useMemo(() => {
@@ -1978,11 +1978,41 @@ function PageNuovo({ conti, stagione, categorie, onSaved, onCancel }) {
     return m;
   }, [conti]);
 
+  // Movimenti gia' a libro che somigliano a quello in arrivo: stesso conto, stesso importo,
+  // stesso verso, a pochi giorni di distanza. Sotto i 100 euro non si segnala nulla, perche'
+  // quote e rimborsi identici sono normali e l'avviso diventerebbe rumore.
+  const possibiliDoppioni = (m) => {
+    const imp = Math.round((Number(m.importo) || 0) * 100) / 100;
+    if (imp < 100 || !m.contoPdC) return [];
+    const t = new Date(m.data).getTime();
+    if (!isFinite(t)) return [];
+    return (movimenti || []).filter(x => {
+      if (Number(x.contoPdC) !== Number(m.contoPdC)) return false;
+      if (x.tipo !== m.tipo) return false;
+      if (Math.abs((Math.round((Number(x.importo) || 0) * 100) / 100) - imp) > 0.005) return false;
+      const tx = new Date(x.data).getTime();
+      return isFinite(tx) && Math.abs(tx - t) <= 10 * 86400000;
+    });
+  };
+
+  const confermaDoppioni = (m) => {
+    const simili = possibiliDoppioni(m);
+    if (!simili.length) return true;
+    const elenco = simili.slice(0, 5).map(x =>
+      `· ${fmtDate(x.data)} · ${fmt(x.importo)} · ${(x.descrizione || "senza descrizione").slice(0, 60)}`
+    ).join("\n");
+    return confirm(
+      `Attenzione: ${simili.length === 1 ? "c'è già un movimento" : `ci sono già ${simili.length} movimenti`} ` +
+      `sullo stesso conto, stesso importo e stesso verso, a pochi giorni di distanza:\n\n${elenco}\n\n` +
+      `Se è la stessa operazione, annulla: registrarla di nuovo la conteggerebbe due volte.\n\nSalvare comunque?`);
+  };
+
   const handleSave = async (payload) => {
     if (!firebaseReady) return alert("Firebase non configurato");
     try {
       // === Caso scrittura composta: salvo N movimenti in batch ===
       if (payload.composta && Array.isArray(payload.movimenti)) {
+        for (const riga of payload.movimenti) { if (!confermaDoppioni(riga)) return; }
         const updates = {};
         payload.movimenti.forEach((m, i) => {
           // Pulisco undefined
@@ -1997,6 +2027,7 @@ function PageNuovo({ conti, stagione, categorie, onSaved, onCancel }) {
       }
 
       // === Caso movimento semplice ===
+      if ((payload.tipo === "entrata" || payload.tipo === "uscita") && !confermaDoppioni(payload)) return;
       // Pulisco undefined (Firebase li rifiuta)
       const dati = {...payload};
       Object.keys(dati).forEach(k => { if (dati[k] === undefined) dati[k] = null; });
@@ -3887,6 +3918,14 @@ function PageBilancio({ conti, movimenti, saldiIniziali }) {
   const totD = mastrini.reduce((s, m) => s + m.dare, 0);
   const totA = mastrini.reduce((s, m) => s + m.avere, 0);
 
+  // Conti col saldo dalla parte sbagliata: un debito con eccedenza DARE o un credito
+  // con eccedenza AVERE quasi sempre significa una scrittura doppia o un verso invertito.
+  const saldiAnomali = useMemo(() => mastrini.filter(m => {
+    const ecc = contiMap[m.codice]?.eccedenza;
+    if (!ecc || Math.abs(m.saldo) < 0.5) return false;
+    return (ecc === "DARE" && m.saldo < 0) || (ecc === "AVERE" && m.saldo > 0);
+  }), [mastrini, contiMap]);
+
   // SP / CE sintetico
   const spVoci = mastrini.filter(m => m.prospetto === "SP" || m.prospetto === "SP/CE");
   const ceVoci = mastrini.filter(m => m.prospetto === "CE" || m.prospetto === "SP/CE");
@@ -3930,6 +3969,42 @@ function PageBilancio({ conti, movimenti, saldiIniziali }) {
           <div className="hint">Stato Patrimoniale</div>
         </div>
       </div>
+
+      {saldiAnomali.length > 0 && (
+        <div className="card" style={{marginTop:22, background:"#fdf5e6", borderColor:"#e6d5a8"}}>
+          <h3 className="card-title" style={{color:"#7a5a1d"}}>
+            ⚠ {saldiAnomali.length === 1 ? "Un conto ha" : `${saldiAnomali.length} conti hanno`} il saldo dalla parte sbagliata
+          </h3>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 10px"}}>
+            Il saldo è opposto all'eccedenza prevista dal piano dei conti. Di solito è una scrittura
+            registrata due volte o un dare e avere invertiti: apri il mastrino del conto per vederne i movimenti.
+          </p>
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th style={{width:50}}>Cod.</th><th>Conto</th><th>Categoria</th>
+                  <th className="num">Dare</th><th className="num">Avere</th>
+                  <th className="num">Saldo</th><th style={{width:130}}>Attesa</th>
+                </tr>
+              </thead>
+              <tbody>
+                {saldiAnomali.map(m => (
+                  <tr key={m.codice}>
+                    <td className="mono" style={{fontWeight:600}}>{String(m.codice).padStart(2,"0")}</td>
+                    <td>{(m.nome || "").trim()}</td>
+                    <td style={{fontSize:12, color:"var(--ink-3)"}}>{m.categoria}</td>
+                    <td className="num">{fmt(m.dare)}</td>
+                    <td className="num">{fmt(m.avere)}</td>
+                    <td className="num neg">{fmt(Math.abs(m.saldo))} {m.saldo > 0 ? "D" : "A"}</td>
+                    <td style={{fontSize:12, color:"var(--ink-3)"}}>eccedenza {contiMap[m.codice]?.eccedenza}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"28px 0 12px"}}>Bilancio di Verifica</h3>
       <div className="tbl-wrap" style={{maxHeight:600, overflowY:"auto"}}>
@@ -15107,7 +15182,7 @@ function App() {
                 </div>
               )}
               {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} />}
-              {page === "nuovo" && <PageNuovo conti={conti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
+              {page === "nuovo" && <PageNuovo conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
