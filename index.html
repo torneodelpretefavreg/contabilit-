@@ -6320,6 +6320,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         styles: { fontSize: 8, cellPadding: 1.6 },
         headStyles: { fillColor: bRF.VERDE, textColor: 240, fontStyle: "bold" },
         columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
+        // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
+        margin: { left: (doc.internal.pageSize.width - 140) / 2 },
       });
 
 
@@ -13338,6 +13340,8 @@ function generaPdfRF(rfDir, stagione) {
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
     columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
+    // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
+    margin: { left: (b.doc.internal.pageSize.width - 140) / 2 },
   });
   b.doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
 }
@@ -13528,6 +13532,8 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
     columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
+    // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
+    margin: { left: (b.doc.internal.pageSize.width - 140) / 2 },
   });
 
   // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
