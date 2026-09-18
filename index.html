@@ -6306,7 +6306,6 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         (a.voci || []).forEach(v => {
           bodyRFpk.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
                          { content: bRF.money(v.totale), styles: { fontStyle: "bold" } }]);
-          (v.righe || []).forEach(r => bodyRFpk.push([`      ${r.cat}`, bRF.money(r.val)]));
         });
       });
       bodyRFpk.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
@@ -6320,7 +6319,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         startY: 20, head: [["Voce", "Importo"]], body: bodyRFpk, theme: "plain",
         styles: { fontSize: 8, cellPadding: 1.6 },
         headStyles: { fillColor: bRF.VERDE, textColor: 240, fontStyle: "bold" },
-        columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+        columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
       });
 
 
@@ -6563,33 +6562,6 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     .filter(d => Math.abs(d.valore) > 0.005)
     .sort((a, b) => Math.abs(b.valore) - Math.abs(a.valore));
 
-  // Conti movimentati dietro ogni categoria di cassa (per il breakdown del rendiconto):
-  // aperture, scritture non monetarie e giroconti restano fuori, come nel rendiconto stesso.
-  const contiPerCategoria = useMemo(() => {
-    const out = {};
-    (movimenti || []).forEach(m => {
-      if (isAperturaMov(m) || m.nonMonetario) return;
-      if (m.tipo !== "entrata" && m.tipo !== "uscita") return;
-      const cat = m.categoria || "(senza categoria)";
-      const cod = m.contoPdC != null ? Number(m.contoPdC) : null;
-      const key = cod != null ? cod : "_";
-      if (!out[cat]) out[cat] = {};
-      if (!out[cat][key]) out[cat][key] = {
-        codice: cod,
-        nome: cod != null ? (contiMap[cod]?.nome || `Conto ${cod}`).trim() : "(senza contropartita)",
-        val: 0,
-      };
-      out[cat][key].val += (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0);
-    });
-    const finale = {};
-    Object.entries(out).forEach(([cat, mappa]) => {
-      finale[cat] = Object.values(mappa)
-        .filter(d => Math.abs(d.val) > 0.005)
-        .sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
-    });
-    return finale;
-  }, [movimenti, contiMap]);
-
   // --- Stato Patrimoniale (schema di bilancio) ---
   const foglioSP = (P) => {
     const aoa = [["STATO PATRIMONIALE"],
@@ -6649,32 +6621,28 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   // --- Rendiconto Finanziario, metodo diretto (schema di bilancio) ---
   const foglioRF = (R) => {
     const aoa = [["RENDICONTO FINANZIARIO · METODO DIRETTO"],
-                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio · sotto ogni categoria i conti movimentati, apribili con i pulsanti +/− a sinistra`], [],
-                 ["Voce", "Di cui conto", "Parziale", "Totale"]];
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
+                 ["Voce", "Parziale", "Totale"]];
     const kind = {}, livelli = {};
     const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
     R.aree.forEach(a => {
-      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", "", a.totale], "classe");
+      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", a.totale], "classe");
       (a.voci || []).forEach(v => {
-        riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, "", v.totale, ""], "voce", 1);
-        (v.righe || []).forEach(x => {
-          riga([`     · ${x.cat}`, "", x.val, ""], null, 2);
-          (contiPerCategoria[x.cat] || []).forEach(d =>
-            riga([`        ${d.codice != null ? d.codice + " " : ""}${d.nome}`, d.val, "", ""], "dettaglio", 3));
-        });
+        riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.totale, ""], "voce", 1);
+        (v.righe || []).forEach(x => riga([`   · ${x.cat}`, x.val, ""], null, 2));
       });
     });
     riga([]);
-    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", "", R.variazione], "totale");
+    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", R.variazione], "totale");
     riga([]);
-    riga(["Disponibilità liquide iniziali", "", "", R.apertura], "classe");
-    R.dettaglioLiquidita.forEach(d => riga([`     · ${d.nome}`, "", d.apertura, ""], null, 1));
-    riga(["Disponibilità liquide finali", "", "", R.chiusura], "classe");
-    R.dettaglioLiquidita.forEach(d => riga([`     · ${d.nome}`, "", d.chiusura, ""], null, 1));
+    riga(["Disponibilità liquide iniziali", "", R.apertura], "classe");
+    R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.apertura, ""], null, 1));
+    riga(["Disponibilità liquide finali", "", R.chiusura], "classe");
+    R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.chiusura, ""], null, 1));
     const scarto = Math.round((R.chiusura - R.apertura - R.variazione) * 100) / 100;
     riga([]);
-    riga([Math.abs(scarto) < 0.01 ? "QUADRATURA CON LE DISPONIBILITÀ LIQUIDE: OK" : "SCARTO DI QUADRATURA", "", "", scarto], "finale");
-    return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
+    riga([Math.abs(scarto) < 0.01 ? "QUADRATURA CON LE DISPONIBILITÀ LIQUIDE: OK" : "SCARTO DI QUADRATURA", "", scarto], "finale");
+    return xlFoglio(aoa, { cols: [36, 13, 13], moneyCols: [1, 2], kind, livelli });
   };
 
   // --- Riepilogo per Business Unit ---
@@ -13356,7 +13324,6 @@ function generaPdfRF(rfDir, stagione) {
     (a.voci || []).forEach(v => {
       bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
                   { content: b.money(v.totale), styles: { fontStyle: "bold" } }]);
-      (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, b.money(r.val)]));
     });
   });
   bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
@@ -13370,7 +13337,7 @@ function generaPdfRF(rfDir, stagione) {
     startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
-    columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+    columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
   });
   b.doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
 }
@@ -13547,7 +13514,6 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
     (a.voci || []).forEach(v => {
       bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
                   { content: b.money(v.totale), styles: { fontStyle: "bold" } }]);
-      (v.righe || []).forEach(r => bodyD.push([`      ${r.cat}`, b.money(r.val)]));
     });
   });
   bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
@@ -13561,7 +13527,7 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
     startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
-    columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 50, halign: "right" } },
+    columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
   });
 
   // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
