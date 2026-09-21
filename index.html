@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.27.0";
+const APP_VERSION = "3.28.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -3205,6 +3205,42 @@ function rilevaCorrezioniChiusura(dati, origine) {
 // il passivo), e il risultato dell'esercizio chiuso va a RISERVA UTILE.
 // La proposta è modificabile riga per riga e viene scritta solo su conferma.
 // ============================================================
+// Quanti conti sono davvero MAPPATI dentro uno schema di bilancio salvato su
+// Firebase. Serve alla riapertura: una stagione appena creata ha gia' un record
+// schemaBilancio (il default viene scritto da sola appena si apre la pagina),
+// quindi "esiste" non vuol dire "e' configurato". Conta SP + CE (voci e
+// sotto-voci) e le assegnazioni del rendiconto; 0 = schema ancora vergine.
+function contiMappatiSchema(rec) {
+  if (!rec || !rec.json) return 0;
+  let j = null;
+  try { j = JSON.parse(rec.json); } catch (e) { return 0; }
+  const s = (j && j.schema) ? j.schema : j;
+  if (!s) return 0;
+  const inClassi = (classi) => (classi || []).reduce((n, cl) =>
+    n + (cl.voci || []).reduce((m, v) =>
+      m + (v.conti || []).length
+        + (v.sottovoci || []).reduce((k, sv) => k + (sv.conti || []).length, 0), 0), 0);
+  const inRf = ((s.rf && s.rf.aree) || []).reduce((n, a) =>
+    n + (a.voci || []).reduce((m, v) => m + (v.categorie || []).length, 0), 0)
+    + Object.keys((s.rf && s.rf.natura) || {}).length;
+  return inClassi(s.sp) + inClassi(s.ce) + inRf;
+}
+
+// Categorie del rendiconto presenti nell'origine e non ancora nella stagione
+// nuova. Si ragiona per differenza e non per "c'e' / non c'e'": una stagione
+// nuova nasce con la sola APERTURA, che basterebbe a far sembrare tutto a posto.
+function categorieMancanti(orig, tgt) {
+  const arr = (x) => Array.isArray(x) ? x.filter(Boolean)
+                   : (x ? Object.values(x).filter(Boolean) : []);
+  const out = { entrate: [], uscite: [], investimenti: [], totale: 0 };
+  ["entrate", "uscite", "investimenti"].forEach(k => {
+    const gia = new Set(arr(tgt && tgt[k]));
+    out[k] = arr(orig && orig[k]).filter(c => !gia.has(c));
+    out.totale += out[k].length;
+  });
+  return out;
+}
+
 function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToast }) {
   const annoY1 = Number(String(stagione).slice(0, 4));
   const [origine, setOrigine] = useState(() => stagionePrecedenteDi(stagione) || "");
@@ -3237,15 +3273,40 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
     if (!datiOrigine || !datiTarget) return null;
     const giaCodici = new Set((datiTarget.conti || []).map(c => Number(c.codice)));
     const contiMancanti = (datiOrigine.conti || []).filter(c => !giaCodici.has(Number(c.codice)));
-    // i cespiti dismessi sono usciti dal patrimonio: non passano al nuovo anno
-    const cespitiDaPortare = (datiOrigine.cespiti || []).filter(c => !(c.dismissione && c.dismissione.data));
+    // i cespiti dismessi sono usciti dal patrimonio: non passano al nuovo anno.
+    // Il confronto e' per conto, cosi' il libro cespiti si completa invece di
+    // restare tutto fuori solo perche' nella stagione nuova c'e' gia' una scheda.
+    const chiaveCesp = (c) => String(c && c.conto || "").trim().toUpperCase();
+    const cespGia = new Set((datiTarget.cespiti || []).map(chiaveCesp));
+    const cespitiVivi = (datiOrigine.cespiti || []).filter(c => !(c.dismissione && c.dismissione.data));
+    const cespitiDaPortare = cespitiVivi.filter(c => !cespGia.has(chiaveCesp(c)));
+    // Lo schema di una stagione nuova ESISTE quasi sempre (il default viene
+    // scritto appena si apre la pagina Schema di Bilancio) ma e' VUOTO: non
+    // basta guardare se c'e', bisogna contare i conti mappati dentro.
+    const origMap = contiMappatiSchema(datiOrigine.schemaBilancio);
+    const tgtMap  = contiMappatiSchema(datiTarget.schemaBilancio);
+    // Stesso discorso per le categorie: una stagione nuova nasce con la sola
+    // "APERTURA", quindi si fa l'unione invece di copiare tutto-o-niente.
+    const catMancanti = categorieMancanti(datiOrigine.categorieRF, datiTarget.categorieRF);
+    // Anche le business unit nascono dal default: quelle nate durante l'anno
+    // (una festa, un evento) non esistono nella stagione nuova.
+    const buGia = new Set((datiTarget.businessUnits || []).map(b => String(b.nome || b).trim().toUpperCase()));
+    const buMancanti = (datiOrigine.businessUnits || [])
+      .map(b => String(b.nome || b).trim())
+      .filter(n => n && !buGia.has(n.toUpperCase()));
     return {
+      buMancanti,
+      buGia: buGia.size,
       contiMancanti,
       contiGia: giaCodici.size,
       cespitiDaPortare,
-      cespitiGia: (datiTarget.cespiti || []).length,
-      schemaDaPortare: !!(datiOrigine.schemaBilancio && datiOrigine.schemaBilancio.json) && !(datiTarget.schemaBilancio && datiTarget.schemaBilancio.json),
-      categorieDaPortare: !!datiOrigine.categorieRF && !datiTarget.categorieRF,
+      cespitiGia: cespGia.size,
+      cespitiVivi: cespitiVivi.length,
+      schemaContiOrigine: origMap,
+      schemaContiTarget: tgtMap,
+      schemaDaPortare: origMap > 0 && tgtMap === 0,
+      catMancanti,
+      categorieDaPortare: catMancanti.totale > 0,
     };
   }, [datiOrigine, datiTarget]);
 
@@ -3269,6 +3330,7 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
         // anagrafiche da portare nel nuovo esercizio insieme ai saldi
         schemaBilancio: v.schemaBilancio || null,
         categorieRF: v.categorieRF || null,
+        businessUnits: v.businessUnits ? Object.values(v.businessUnits) : [],
       });
       const tgt = await db.ref(`stagioni/${stagione}`).once("value");
       const tv = tgt.val() || {};
@@ -3277,6 +3339,7 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
         cespiti: tv.cespiti ? Object.values(tv.cespiti) : [],
         schemaBilancio: tv.schemaBilancio || null,
         categorieRF: tv.categorieRF || null,
+        businessUnits: tv.businessUnits ? Object.values(tv.businessUnits) : [],
       });
       setStato("pronto");
     } catch (e) {
@@ -3345,9 +3408,10 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
       (azzeraSaldi ? "• Azzero i saldi iniziali di liquidità (i saldi arrivano dalla riapertura)\n" : "") +
       (portaAnagrafiche && anagrafiche ? (
         (anagrafiche.contiMancanti.length ? `• Copio ${anagrafiche.contiMancanti.length} conti mancanti nel piano dei conti\n` : "") +
-        (anagrafiche.cespitiDaPortare.length && !anagrafiche.cespitiGia ? `• Copio ${anagrafiche.cespitiDaPortare.length} schede cespite (fondo accumulato, quota da ricalcolare)\n` : "") +
-        (anagrafiche.schemaDaPortare ? "• Copio lo schema di bilancio (SP / CE / rendiconto)\n" : "") +
-        (anagrafiche.categorieDaPortare ? "• Copio le categorie del rendiconto\n" : "")
+        (anagrafiche.cespitiDaPortare.length ? `• Copio ${anagrafiche.cespitiDaPortare.length} schede cespite (fondo accumulato, quota da ricalcolare)\n` : "") +
+        (anagrafiche.schemaDaPortare ? `• Copio lo schema di bilancio: ${anagrafiche.schemaContiOrigine} assegnazioni (SP / CE / rendiconto)\n` : "") +
+        (anagrafiche.categorieDaPortare ? `• Aggiungo ${anagrafiche.catMancanti.totale} categorie del rendiconto\n` : "") +
+        (anagrafiche.buMancanti.length ? `• Aggiungo ${anagrafiche.buMancanti.length} business unit: ${anagrafiche.buMancanti.join(", ")}\n` : "")
       ) : "") +
       "\nProcedere?";
     if (!confirm(msg)) return;
@@ -3377,7 +3441,7 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
           a.contiMancanti.forEach(c => { cObj[`c${c.codice}`] = c; });
           await db.ref(`stagioni/${stagione}/conti`).update(cObj);
         }
-        if (a.cespitiDaPortare.length && !a.cespitiGia) {
+        if (a.cespitiDaPortare.length) {
           const cespObj = {};
           a.cespitiDaPortare.forEach((c, i) => {
             const nuovo = { ...c };
@@ -3395,19 +3459,42 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
           });
           await db.ref(`stagioni/${stagione}/cespiti`).update(cespObj);
         }
+        // Lo schema si copia solo se quello nuovo e' ancora vergine: se ci ha
+        // gia' lavorato sopra qualcuno non lo tocco, sarebbe una sovrascrittura.
         if (a.schemaDaPortare) {
           await db.ref(`stagioni/${stagione}/schemaBilancio`)
-            .set({ json: datiOrigine.schemaBilancio.json, aggiornatoIl: now });
+            .set({ json: datiOrigine.schemaBilancio.json, aggiornatoIl: now, copiatoDa: origine });
         }
+        // Le categorie si UNISCONO: quelle gia' presenti nella stagione nuova
+        // restano, si aggiungono solo quelle che mancano.
         if (a.categorieDaPortare) {
-          await db.ref(`stagioni/${stagione}/categorieRF`).set(datiOrigine.categorieRF);
+          const arr = (x) => Array.isArray(x) ? x.filter(Boolean)
+                           : (x ? Object.values(x).filter(Boolean) : []);
+          const unione = {};
+          ["entrate", "uscite", "investimenti"].forEach(k => {
+            const lista = [...new Set([
+              ...arr(datiTarget.categorieRF && datiTarget.categorieRF[k]),
+              ...arr(datiOrigine.categorieRF && datiOrigine.categorieRF[k]),
+            ])].sort();
+            if (lista.length) unione[k] = lista;
+          });
+          await db.ref(`stagioni/${stagione}/categorieRF`).set(unione);
+        }
+        if (a.buMancanti.length) {
+          const buObj = {};
+          a.buMancanti.forEach((nome, i) => {
+            buObj[`bu_${annoY1}_${String(i).padStart(3, "0")}`] = { nome, ordine: a.buGia + i };
+          });
+          await db.ref(`stagioni/${stagione}/businessUnits`).update(buObj);
         }
         riportate = a;
       }
 
       const extra = riportate
-        ? ` · ${riportate.contiMancanti.length} conti, ${(riportate.cespitiDaPortare.length && !riportate.cespitiGia) ? riportate.cespitiDaPortare.length : 0} cespiti` +
-          (riportate.schemaDaPortare ? ", schema" : "") + (riportate.categorieDaPortare ? ", categorie" : "")
+        ? ` · ${riportate.contiMancanti.length} conti, ${riportate.cespitiDaPortare.length} cespiti` +
+          (riportate.schemaDaPortare ? ", schema" : "") +
+          (riportate.categorieDaPortare ? `, ${riportate.catMancanti.totale} categorie` : "") +
+          (riportate.buMancanti.length ? `, ${riportate.buMancanti.length} BU` : "")
         : "";
       onToast(`Riapertura inserita: ${attive.length} scritture al ${annoY1}-09-01${extra}`);
       setSostituisci(false);
@@ -3616,17 +3703,25 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
                     <li>{anagrafiche.contiMancanti.length > 0
                         ? <><strong>{anagrafiche.contiMancanti.length} conti</strong> da copiare (in {stagione} ce ne sono {anagrafiche.contiGia})</>
                         : <span style={{color:"var(--ok)"}}>piano dei conti già completo</span>}</li>
-                    <li>{anagrafiche.cespitiGia > 0
-                        ? <span style={{color:"var(--ok)"}}>libro cespiti già presente ({anagrafiche.cespitiGia} schede): non lo tocco</span>
-                        : anagrafiche.cespitiDaPortare.length > 0
-                          ? <><strong>{anagrafiche.cespitiDaPortare.length} schede cespite</strong> da copiare, col fondo accumulato e la quota da ricalcolare</>
+                    <li>{anagrafiche.cespitiDaPortare.length > 0
+                        ? <><strong>{anagrafiche.cespitiDaPortare.length} schede cespite</strong> da copiare, col fondo accumulato e la quota da ricalcolare
+                            {anagrafiche.cespitiGia > 0 && <span style={{color:"var(--ink-3)"}}> (in {stagione} ce ne sono già {anagrafiche.cespitiGia}, quelle le lascio stare)</span>}</>
+                        : anagrafiche.cespitiGia > 0
+                          ? <span style={{color:"var(--ok)"}}>libro cespiti già completo ({anagrafiche.cespitiGia} schede)</span>
                           : <span style={{color:"var(--ink-3)"}}>nessun cespite da portare</span>}</li>
                     <li>{anagrafiche.schemaDaPortare
-                        ? <><strong>schema di bilancio</strong> da copiare (voci, sotto-voci, rendiconto)</>
-                        : <span style={{color:"var(--ok)"}}>schema di bilancio già presente</span>}</li>
+                        ? <><strong>schema di bilancio</strong> da copiare: {anagrafiche.schemaContiOrigine} assegnazioni fra voci, sotto-voci e rendiconto
+                            {" "}(in {stagione} lo schema è ancora vuoto)</>
+                        : anagrafiche.schemaContiTarget > 0
+                          ? <span style={{color:"var(--ok)"}}>schema di bilancio già configurato ({anagrafiche.schemaContiTarget} assegnazioni): non lo tocco</span>
+                          : <span style={{color:"var(--ink-3)"}}>in {origine} lo schema è vuoto: niente da copiare</span>}</li>
                     <li>{anagrafiche.categorieDaPortare
-                        ? <><strong>categorie del rendiconto</strong> da copiare</>
-                        : <span style={{color:"var(--ok)"}}>categorie già presenti</span>}</li>
+                        ? <><strong>{anagrafiche.catMancanti.totale} categorie del rendiconto</strong> da aggiungere
+                            {" "}({anagrafiche.catMancanti.entrate.length} in entrata, {anagrafiche.catMancanti.uscite.length} in uscita)</>
+                        : <span style={{color:"var(--ok)"}}>categorie del rendiconto già complete</span>}</li>
+                    <li>{anagrafiche.buMancanti.length > 0
+                        ? <><strong>{anagrafiche.buMancanti.length} business unit</strong> da aggiungere: {anagrafiche.buMancanti.join(", ")}</>
+                        : <span style={{color:"var(--ok)"}}>business unit già complete ({anagrafiche.buGia})</span>}</li>
                   </ul>
                   Non sovrascrivo mai ciò che esiste già: aggiungo solo quello che manca, quindi puoi
                   ripetere l'operazione senza fare danni.
