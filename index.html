@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.22.0";
+const APP_VERSION = "3.23.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -6205,6 +6205,32 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     finally { setBusy(false); }
   };
 
+  // Il libro cespiti espone i beni IN CARICO; quelli usciti nell'esercizio
+  // vanno in un blocco a parte e non entrano nei totali, altrimenti il totale
+  // del costo storico non torna col saldo dei conti immobilizzazione.
+  const cespitiInCarico = (cespiti || []).filter(c => !(c.dismissione && c.dismissione.data));
+  const cespitiDismessi = (cespiti || []).filter(c => c.dismissione && c.dismissione.data);
+  const tabellaDismessi = (doc, y) => {
+    if (!cespitiDismessi.length) return y;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(10);
+    doc.text("Cespiti dismessi nell'esercizio", 14, y);
+    doc.autoTable({
+      startY: y + 3,
+      head: [["Bene", "Data uscita", "Motivo", "Costo storico", "Fondo all'uscita", "Netto scaricato"]],
+      body: cespitiDismessi.map(c => {
+        const d = c.dismissione || {};
+        return [c.conto || "", pdfData(d.data), d.motivo || "",
+                pdfNum(d.costoAllUscita != null ? d.costoAllUscita : c.costo_storico || 0),
+                pdfNum(d.fondoAllUscita != null ? d.fondoAllUscita : c.fondo_ammortamento || 0),
+                pdfNum(d.nettoScaricato || 0)];
+      }),
+      styles: { fontSize: 8, cellPadding: 1.5 },
+      headStyles: { fillColor: [120, 120, 120], textColor: 240, fontStyle: "bold" },
+      columnStyles: { 3:{halign:"right"}, 4:{halign:"right"}, 5:{halign:"right"} },
+    });
+    return doc.lastAutoTable.finalY;
+  };
+
   // === EXPORT: CESPITI (PDF) ===
   const exportCespitiPDF = () => {
     setBusy(true);
@@ -6217,11 +6243,11 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFontSize(10); doc.setFont("helvetica", "normal");
       doc.text(`Libro Cespiti & Ammortamenti · Stagione ${stagione}`, 148, 20, { align: "center" });
 
-      const totCosto = cespiti.reduce((s,c) => s + (c.costo_storico || 0), 0);
-      const totFondo = cespiti.reduce((s,c) => s + (c.fondo_ammortamento || 0), 0);
-      const totQuota = cespiti.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
+      const totCosto = cespitiInCarico.reduce((s,c) => s + (c.costo_storico || 0), 0);
+      const totFondo = cespitiInCarico.reduce((s,c) => s + (c.fondo_ammortamento || 0), 0);
+      const totQuota = cespitiInCarico.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
 
-      const rows = cespiti.map(c => [
+      const rows = cespitiInCarico.map(c => [
         c.conto || "",
         c.classe || "",
         c.n_beni || "",
@@ -6249,6 +6275,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         headStyles: { fillColor: [26, 26, 26], textColor: 240, fontStyle: "bold" },
         columnStyles: { 4:{halign:"right"}, 5:{halign:"center"}, 6:{halign:"right"}, 7:{halign:"right"}, 8:{halign:"right"} },
       });
+      tabellaDismessi(doc, doc.lastAutoTable.finalY + 10);
 
       doc.save(`Cespiti_${stagione}.pdf`);
       setLastAction("Cespiti esportati");
@@ -6456,10 +6483,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.text("7. Libro Cespiti", 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
-      const totCosto = cespiti.reduce((s,c) => s + (c.costo_storico || 0), 0);
-      const totFondo = cespiti.reduce((s,c) => s + (c.fondo_ammortamento || 0), 0);
-      const totQuota = cespiti.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
-      const cespitiRows = cespiti.map(c => [
+      const totCosto = cespitiInCarico.reduce((s,c) => s + (c.costo_storico || 0), 0);
+      const totFondo = cespitiInCarico.reduce((s,c) => s + (c.fondo_ammortamento || 0), 0);
+      const totQuota = cespitiInCarico.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
+      const cespitiRows = cespitiInCarico.map(c => [
         c.conto || "", c.classe || "", c.n_beni || "", c.anno_inizio || "",
         pdfNum(c.costo_storico || 0),
         c.aliquota ? ((c.aliquota * 100).toFixed(0) + "%") : "",
@@ -6482,6 +6509,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         headStyles: { fillColor: [26,26,26], textColor: 240, fontStyle: "bold" },
         columnStyles: { 4:{halign:"right"}, 5:{halign:"center"}, 6:{halign:"right"}, 7:{halign:"right"}, 8:{halign:"right"} },
       });
+      tabellaDismessi(doc, doc.lastAutoTable.finalY + 10);
 
       // === 8. ELENCO MOVIMENTI ===
       doc.addPage("a4", "landscape");
@@ -7210,8 +7238,27 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
       else if (annoRiferimento >= annoUltimo) stato = "Ultimo anno";
       else stato = `In ammortamento (${anniResidui} anni residui)`;
 
+      // Un cespite DISMESSO (svalutato, venduto, rottamato) e' uscito dal
+      // patrimonio: in contabilita' costo e fondo sono stati azzerati, quindi
+      // il libro deve smettere di portarlo. Resta come riga di storia, ma non
+      // ammortizza piu' e non entra nei totali ne' nelle quadrature.
+      const dismesso = !!(c.dismissione && c.dismissione.data);
+      if (dismesso) {
+        return {
+          ...c, dismesso,
+          quotaAnnua: 0, quotaEsercizio: 0, isCorrente: false,
+          giorni: null, ragguaglio: null, dataMancante: false, dataReg, dataFromLedger,
+          ledgerCount: ledger ? ledger.count : 0, buLedger: (ledger && ledger.bu) || null,
+          durataTeorica, anniDecorsi, fondoTeorico: 0, valoreResiduo: 0, anniResidui: 0,
+          annoUltimo, scostamento: 0,
+          stato: `Dismesso il ${fmtDate(c.dismissione.data)}`,
+          costoOrig: costo, fondoOrig: fondoAttuale,
+        };
+      }
+
       return {
         ...c,
+        dismesso,
         quotaAnnua,
         quotaEsercizio,
         isCorrente,
@@ -7237,13 +7284,14 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
 
   // Totali
   const tot = useMemo(() => {
+    const vivi = piano.filter(c => !c.dismesso);   // i dismessi non sono piu' in carico
     return {
-      costo: piano.reduce((s,c) => s + (Number(c.costo_storico) || 0), 0),
-      quotaAnnua: piano.reduce((s,c) => s + c.quotaAnnua, 0),
-      quotaEsercizio: piano.reduce((s,c) => s + (c.quotaEsercizio || 0), 0),
-      fondoAttuale: piano.reduce((s,c) => s + (Number(c.fondo_ammortamento) || 0), 0),
-      fondoTeorico: piano.reduce((s,c) => s + c.fondoTeorico, 0),
-      valoreResiduo: piano.reduce((s,c) => s + c.valoreResiduo, 0),
+      costo: vivi.reduce((s,c) => s + (Number(c.costo_storico) || 0), 0),
+      quotaAnnua: vivi.reduce((s,c) => s + c.quotaAnnua, 0),
+      quotaEsercizio: vivi.reduce((s,c) => s + (c.quotaEsercizio || 0), 0),
+      fondoAttuale: vivi.reduce((s,c) => s + (Number(c.fondo_ammortamento) || 0), 0),
+      fondoTeorico: vivi.reduce((s,c) => s + c.fondoTeorico, 0),
+      valoreResiduo: vivi.reduce((s,c) => s + c.valoreResiduo, 0),
     };
   }, [piano]);
 
@@ -7288,7 +7336,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
   const [modaleConti, setModaleConti] = useState(false);
 
   // Righe proponibili: quota > 0, non già registrate in questo esercizio
-  const proposte = useMemo(() => piano.map(c => {
+  const proposte = useMemo(() => piano.filter(c => !c.dismesso).map(c => {
     const quota = Number(c.quotaEsercizio) || 0;
     const residuo = Math.max(0, Number(c.valoreResiduo) || 0);
     const importo = Math.round(Math.min(quota, residuo) * 100) / 100;
@@ -7378,6 +7426,45 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
         amm_reg: null,
       });
       onToast("Ammortamento stornato");
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+
+  // ---------- Dismissione di un cespite ----------
+  // Serve quando il bene esce dal patrimonio (svalutazione totale, vendita,
+  // rottamazione) e in contabilita' costo e fondo sono gia' stati azzerati:
+  // senza questo, la scheda resta viva e il libro cespiti non riconcilia piu'
+  // con lo stato patrimoniale. Non genera scritture: registra solo l'uscita.
+  const dismettiCespite = async (c) => {
+    if (!firebaseReady) return alert("Firebase non disponibile");
+    const costo = Number(c.costo_storico) || 0;
+    const fondo = Number(c.fondo_ammortamento) || 0;
+    const netto = Math.round((costo - fondo) * 100) / 100;
+    const data = prompt(
+      `Dismissione di "${c.conto}"\n\nCosto storico ${fmtEuro(costo)} · fondo ${fmtEuro(fondo)} · valore netto ${fmtEuro(netto)}.\n\n` +
+      `Data di uscita (aaaa-mm-gg):`, FINE_ESERCIZIO_ISO);
+    if (!data) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return alert("Data non valida. Usa il formato aaaa-mm-gg.");
+    const motivo = prompt("Motivo dell'uscita (svalutazione, vendita, rottamazione, ...):", "Svalutazione");
+    if (motivo === null) return;
+    if (!confirm(
+      `Confermi la dismissione di "${c.conto}" al ${fmtDate(data)}?\n\n` +
+      `La scheda resta nel libro come storia, ma esce dai totali e non viene piu' ammortizzata.\n\n` +
+      `ATTENZIONE: questa operazione NON genera scritture contabili. Le scritture di scarico del costo ` +
+      `(${fmtEuro(costo)}) e del fondo (${fmtEuro(fondo)}) devono essere gia' state registrate in libro giornale.`)) return;
+    try {
+      await db.ref(`stagioni/${stagione}/cespiti/${c._key}`).update({
+        dismissione: { data, motivo: motivo || "", costoAllUscita: costo, fondoAllUscita: fondo,
+                       nettoScaricato: netto, registratoIl: new Date().toISOString() },
+      });
+      onToast(`${c.conto} dismesso al ${fmtDate(data)}`);
+    } catch (e) { alert("Errore: " + e.message); }
+  };
+  const ripristinaCespite = async (c) => {
+    if (!firebaseReady) return alert("Firebase non disponibile");
+    if (!confirm(`Riportare "${c.conto}" fra i cespiti in carico?\n\nTorna nei totali e riprende ad ammortizzare.`)) return;
+    try {
+      await db.ref(`stagioni/${stagione}/cespiti/${c._key}`).update({ dismissione: null });
+      onToast(`${c.conto} ripristinato`);
     } catch (e) { alert("Errore: " + e.message); }
   };
 
@@ -7648,7 +7735,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
             </tr>
           </thead>
           <tbody>
-            {piano.map((c, i) => (
+            {piano.filter(c => !c.dismesso).map((c, i) => (
               <tr key={c._key || i}>
                 <td style={{fontWeight:500}}>{c.conto}</td>
                 <td className="num">{fmt(c.costo_storico)}</td>
@@ -7710,6 +7797,9 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
                   ) : (
                     <span style={{color:"var(--ink-3)"}}>—</span>
                   )}
+                  <button className="btn ghost sm" style={{marginLeft:6}}
+                          title="Il bene è uscito dal patrimonio (svalutazione, vendita, rottamazione): scarica la scheda dal libro cespiti"
+                          onClick={() => dismettiCespite(c)}>⊘</button>
                 </td>
               </tr>
             ))}
@@ -7731,6 +7821,51 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
           </tbody>
         </table>
       </div>
+
+      {piano.some(c => c.dismesso) && (
+        <>
+          <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"28px 0 12px"}}>Cespiti dismessi</h3>
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Bene</th>
+                  <th style={{width:110}}>Data uscita</th>
+                  <th>Motivo</th>
+                  <th className="num" style={{width:130}}>Costo storico</th>
+                  <th className="num" style={{width:130}}>Fondo all'uscita</th>
+                  <th className="num" style={{width:130}}>Netto scaricato</th>
+                  <th style={{width:60}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {piano.filter(c => c.dismesso).map((c, i) => {
+                  const d = c.dismissione || {};
+                  return (
+                    <tr key={c._key || "d" + i} style={{color:"var(--ink-2)"}}>
+                      <td style={{fontWeight:500}}>{c.conto}</td>
+                      <td>{fmtDate(d.data)}</td>
+                      <td style={{fontSize:12}}>{d.motivo || "—"}</td>
+                      <td className="num">{fmt(d.costoAllUscita != null ? d.costoAllUscita : c.costo_storico)}</td>
+                      <td className="num">{fmt(d.fondoAllUscita != null ? d.fondoAllUscita : c.fondo_ammortamento)}</td>
+                      <td className="num" style={{fontWeight:600}}>{fmt(d.nettoScaricato)}</td>
+                      <td>
+                        <button className="btn ghost sm" title="Riporta il cespite fra quelli in carico"
+                                onClick={() => ripristinaCespite(c)}>↩</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{marginTop:10, fontSize:12, color:"var(--ink-3)"}}>
+            Beni usciti dal patrimonio nel corso dell'esercizio. Restano qui come storia ma non figurano
+            più fra i cespiti in carico: non si ammortizzano, non entrano nei totali e non vengono
+            confrontati con la contabilità, dove costo e fondo sono già stati azzerati.
+          </div>
+        </>
+      )}
 
       <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"28px 0 12px"}}>Quadratura fondi ammortamento</h3>
       <div className="tbl-wrap">
