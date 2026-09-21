@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.28.0";
+const APP_VERSION = "3.29.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1888,13 +1888,13 @@ function ManutenzioneBox({ stagione }) {
       const oldTelecamera = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "TELECAMERA PER FUTSAL");
       const oldCostiImpianto = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "COSTI IMPIANTO");
 
-      const rimborsiDaSpostare = Object.entries(movsSnap.val() || {}).filter(([k, m]) => {
-        if (m.contoPdC !== 36) return false;
-        if (m.tipo !== "uscita") return false;
-        const cat = (m.categoria || "").toUpperCase();
-        const desc = (m.descrizione || "").toUpperCase();
-        return cat.includes("RIMBORSO") || desc.includes("RIMBORSO") || desc.includes("RIMBORSI");
-      });
+      // Qui c'era la regola "ogni uscita sul conto 36 che parla di rimborsi va
+      // spostata sul conto 80". E' sbagliata: quando un socio anticipa una spesa
+      // il costo si rileva UNA volta (con il debito v/soci in avere) e il
+      // pagamento successivo CHIUDE quel debito, quindi va proprio sul conto 36.
+      // Spostarlo sul conto 80 registra il costo una seconda volta e lascia il
+      // debito aperto. Regola rimossa in 3.29.0 dopo che aveva gonfiato i costi
+      // del 2025-26 di 29,00 €.
 
       const lines = [];
       if (!hasApertura) lines.push("• Inserire scrittura di APERTURA al 01/09/2025 (25 movimenti)");
@@ -1906,7 +1906,6 @@ function ManutenzioneBox({ stagione }) {
       if (oldLavagnetta) lines.push("• Rinominare LAVAGNETTA → LAVAGNETTA FUTSAL");
       if (oldTelecamera) lines.push("• Rinominare TELECAMERA PER FUTSAL → TELECAMERA FUTSAL");
       if (oldCostiImpianto) lines.push("• Rinominare COSTI IMPIANTO → COSTI DI IMPIANTO");
-      if (rimborsiDaSpostare.length > 0) lines.push(`• Riclassificare ${rimborsiDaSpostare.length} rimborsi spese (€${rimborsiDaSpostare.reduce((s,[,m])=>s+(m.importo||0),0).toFixed(2)}) da conto 36 a conto 80`);
 
       if (lines.length === 0) {
         alert("✓ Nessun disallineamento rilevato. Tutto è già aggiornato.");
@@ -1970,13 +1969,6 @@ function ManutenzioneBox({ stagione }) {
       if (oldLavagnetta) await db.ref(`stagioni/${stagione}/cespiti/${oldLavagnetta._key}`).update({ conto: "LAVAGNETTA FUTSAL" });
       if (oldTelecamera) await db.ref(`stagioni/${stagione}/cespiti/${oldTelecamera._key}`).update({ conto: "TELECAMERA FUTSAL" });
       if (oldCostiImpianto) await db.ref(`stagioni/${stagione}/cespiti/${oldCostiImpianto._key}`).update({ conto: "COSTI DI IMPIANTO" });
-
-      // Rimborsi → conto 80
-      for (const [movKey, m] of rimborsiDaSpostare) {
-        await db.ref(`stagioni/${stagione}/movimenti/${movKey}`).update({
-          contoPdC: 80, modificatoIl: new Date().toISOString()
-        });
-      }
 
       alert("✓ Migration completata.\n\nLa pagina si ricarica per applicare i cambiamenti.");
       window.location.reload();
@@ -16173,20 +16165,12 @@ function App() {
     })();
   }, []);
 
-  // Auto-seed quando si seleziona una stagione vuota
-  // O auto-reset se trova la vecchia struttura
+  // Avvio di una stagione: due sole cose automatiche, entrambe additive.
+  // Nessun confirm() e nessuna scrittura che tocchi movimenti esistenti: da qui
+  // in poi i dati si cambiano solo da un pulsante che si e' scelto di premere.
   useEffect(() => {
     if (!firebaseReady) return;
     (async () => {
-      const oldSeedSnap = await db.ref(`stagioni/${stagione}/scrittureSeed`).once("value");
-      if (oldSeedSnap.exists()) {
-        if (confirm("Rilevati dati della Release 1.0. Aggiornare alla nuova versione con saldi corretti e Libro Giornale? I dati saranno reimportati da zero dallo sheet.")) {
-          await db.ref(`stagioni/${stagione}`).remove();
-          await seedStagione();
-        }
-        return;
-      }
-
       // Auto-discovery BU: se non esistono, le seedo (default + qualunque BU usata nei movimenti)
       const buSnap = await db.ref(`stagioni/${stagione}/businessUnits`).once("value");
       if (!buSnap.exists()) {
@@ -16202,306 +16186,16 @@ function App() {
         buArr.forEach((b, i) => { buObj[`bu_${i}`] = { nome: b, ordine: i }; });
         await db.ref(`stagioni/${stagione}/businessUnits`).set(buObj);
       }
-      // Controlla se i movimenti hanno il campo contoPdC (introdotto in Release 2)
-      const movsSnap = await db.ref(`stagioni/${stagione}/movimenti`).once("value");
-      if (movsSnap.exists()) {
-        const movs = Object.values(movsSnap.val() || {});
-        const importati = movs.filter(m => m.importato);
-        const senzaPdC = importati.filter(m => m.tipo !== "giroconto" && !m.contoPdC);
-
-        // Trigger per Release 3.2: i movimenti importati hanno una vecchia versione (entrata 4350 IDEA VERDE + 7 prelievi POS al conto 20)
-        // Riconosco da: c'è un'entrata con descrizione che contiene "PRELIEVO DA POS PER PAGAMENTI IDEA VERDE"
-        const hasOldImport = importati.some(m => m.tipo === "entrata" && (m.descrizione || "").includes("PRELIEVO DA POS PER PAGAMENTI IDEA VERDE"));
-
-        if (importati.length > 0 && senzaPdC.length > 0) {
-          if (confirm(`Rilevati ${senzaPdC.length} movimenti importati senza conto P.d.C. (Release 1.1). Aggiornare alla Release 2 con auto-mapping al Piano dei Conti? I movimenti importati verranno ricaricati.`)) {
-            const updates = {};
-            Object.entries(movsSnap.val() || {}).forEach(([k, m]) => {
-              if (m.importato) updates[k] = null;
-            });
-            await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
-            const movsObj = {};
-            SEED_MOVIMENTI.forEach((m, i) => {
-              movsObj[`seed_${String(i).padStart(4,'0')}`] = {
-                ...m, importato: true, creatoIl: new Date().toISOString()
-              };
-            });
-            await db.ref(`stagioni/${stagione}/movimenti`).update(movsObj);
-          }
-          return;
-        }
-
-        if (hasOldImport) {
-          if (confirm("Rilevata vecchia versione dei movimenti importati (Release 2/3.0/3.1). Aggiornare alla Release 3.2 con i prelievi POS riclassificati correttamente? I movimenti importati verranno ricaricati (i movimenti che hai creato tu rimangono invariati).")) {
-            const updates = {};
-            Object.entries(movsSnap.val() || {}).forEach(([k, m]) => {
-              if (m.importato) updates[k] = null;
-            });
-            await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
-            const movsObj = {};
-            SEED_MOVIMENTI.forEach((m, i) => {
-              movsObj[`seed_${String(i).padStart(4,'0')}`] = {
-                ...m, importato: true, creatoIl: new Date().toISOString()
-              };
-            });
-            await db.ref(`stagioni/${stagione}/movimenti`).update(movsObj);
-          }
-        }
-
-        // Migration v3.10: inserisci scrittura di apertura completa
-        const hasApertura = importati.some(m => m.apertura === true);
-        if (!hasApertura) {
-          if (confirm("Vuoi inserire la scrittura completa di APERTURA al 01/09/2025 (immobilizzazioni + fondi amm.to + crediti + debiti + patrimonio netto)?\n\nVerrà aggiunta come 25 movimenti datati 01/09/2025, e i saldi iniziali (FUTSAL/CASSA/POS) verranno trasferiti nella scrittura di apertura.\n\nQuesta operazione è raccomandata per una contabilità formalmente completa.")) {
-            // Azzero i saldi iniziali (ora vengono dalla scrittura di apertura)
-            await db.ref(`stagioni/${stagione}/saldiIniziali`).set({
-              1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0
-            });
-            // Inserisco i movimenti di apertura
-            const apertureObj = {};
-            APERTURA_MOVIMENTI.forEach((m, i) => {
-              apertureObj[`apertura_${String(i).padStart(4,'0')}`] = m;
-            });
-            await db.ref(`stagioni/${stagione}/movimenti`).update(apertureObj);
-            alert("Scrittura di apertura inserita correttamente. I saldi liquidità sono ora generati dai movimenti di apertura del 01/09/2025.");
-          }
-        }
-
-        // ============================================================
-        // Migration v3.16: correzione scritture Idea Verde del 17/05/2026
-        // Le tre "chiusura conti transitori" e le assicurazioni erano state
-        // salvate come movimenti singoli con i versi invertiti e contropartita
-        // "DA ASSEGNARE": il conto 81 cresceva invece di chiudersi e il conto 83
-        // finiva tutto in dare. Qui le elimino e le rifaccio come scritture
-        // composte quadrate, e sposto su IDEA VERDE i movimenti finiti in GENERAL.
-        // ============================================================
-        {
-          const tuttiMov = Object.entries(movsSnap.val() || {}).map(([k, m]) => ({ ...m, _k: k }));
-          const giaFatto = tuttiMov.some(m => String(m.scritturaId || "").startsWith("scr_iv_"));
-
-          const rotte = tuttiMov.filter(m =>
-            m.data === "2026-05-17" &&
-            m.contoLiquidita == null && m.tipo !== "giroconto" &&
-            !String(m.scritturaId || "").startsWith("scr_iv_") &&
-            /Chiusura conti transitori Idea Verde|Assicurazioni Idea Verde a Pro Loco/i.test(m.descrizione || "")
-          );
-
-          const giroDaSpostare = tuttiMov.filter(m =>
-            m.tipo === "giroconto" && /IDEA VERDE/i.test(m.descrizione || "") && (m.bu || "") !== "IDEA VERDE"
-          );
-
-          // Incassi lordi dell'evento (conto 81, monetari, BU IDEA VERDE)
-          const incassiIV = tuttiMov
-            .filter(m => Number(m.contoPdC) === 81 && m.tipo === "entrata" && m.contoLiquidita != null && (m.bu || "") === "IDEA VERDE")
-            .reduce((s, m) => s + (Number(m.importo) || 0), 0);
-          const QUOTE_PARTNER = 4350;   // Fabbrico Calcio 3.350 + Pro Loco 1.000
-          const ASSICURAZIONI = 130;    // a Pro Loco, costo dell'associazione
-          const ricavoCompetenza = Math.round((incassiIV - QUOTE_PARTNER) * 100) / 100;
-
-          if (!giaFatto && rotte.length > 0 && incassiIV > 0) {
-            const msg = [
-              "Rilevate scritture non quadrate su IDEA VERDE (17/05/2026).",
-              "",
-              `• Elimino ${rotte.length} movimenti sbagliati (chiusura transitori 4.350 / 3.350 / 1.000 e assicurazioni 130)`,
-              "• Rifaccio le scritture corrette:",
-              `   DARE 81 Eventi c/incassi anticipati ${fmt(QUOTE_PARTNER)} / AVERE 83 Debiti v/partner ${fmt(QUOTE_PARTNER)}`,
-              `   DARE 20 Spese diverse ${fmt(ASSICURAZIONI)} / AVERE 83 Debiti v/partner ${fmt(ASSICURAZIONI)}`,
-              `   DARE 81 Eventi c/incassi anticipati ${fmt(ricavoCompetenza)} / AVERE 28 Entrate da eventi ${fmt(ricavoCompetenza)}`,
-              giroDaSpostare.length ? `• Sposto ${giroDaSpostare.length} movimenti da GENERAL a IDEA VERDE` : "",
-              "",
-              `Risultato atteso: conto 81 a zero, conto 83 chiuso dai pagamenti del 18/05, margine IDEA VERDE ${fmt(ricavoCompetenza - ASSICURAZIONI - 614.5)} pari alla cassa.`,
-              "",
-              "Procedere?",
-            ].filter(Boolean).join("\n");
-
-            if (confirm(msg)) {
-              const now = new Date().toISOString();
-              const del = {};
-              rotte.forEach(m => { del[m._k] = null; });
-              await db.ref(`stagioni/${stagione}/movimenti`).update(del);
-
-              const nuove = [
-                { id: "scr_iv_quote", desc: "Giro quote partner Idea Verde (Fabbrico Calcio + Pro Loco)", dareConto: 81, avereConto: 83, importo: QUOTE_PARTNER },
-                { id: "scr_iv_assic", desc: "Assicurazioni Idea Verde da riconoscere a Pro Loco", dareConto: 20, avereConto: 83, importo: ASSICURAZIONI },
-                { id: "scr_iv_ricavo", desc: "Ricavo di competenza Idea Verde", dareConto: 81, avereConto: 28, importo: ricavoCompetenza },
-              ];
-              const add = {};
-              nuove.forEach(s => {
-                if (!(s.importo > 0)) return;
-                const comune = {
-                  data: "2026-05-17", contoLiquidita: null, contoLiquiditaDest: null,
-                  categoria: "SCRITTURA COMPOSTA", bu: "IDEA VERDE",
-                  descrizione: s.desc, mese: "maggio", nonMonetario: true,
-                  scritturaComposta: true, scritturaId: s.id, importo: s.importo,
-                  creatoIl: now, modificatoIl: now,
-                };
-                add[db.ref(`stagioni/${stagione}/movimenti`).push().key] = { ...comune, tipo: "uscita", contoPdC: s.dareConto, dare: s.importo, avere: 0 };
-                add[db.ref(`stagioni/${stagione}/movimenti`).push().key] = { ...comune, tipo: "entrata", contoPdC: s.avereConto, dare: 0, avere: s.importo };
-              });
-              giroDaSpostare.forEach(m => { add[m._k] = { ...m, bu: "IDEA VERDE", modificatoIl: now }; delete add[m._k]._k; });
-              await db.ref(`stagioni/${stagione}/movimenti`).update(add);
-
-              alert("Correzione Idea Verde completata.\n\nControlla il Bilancio di Verifica: dare e avere devono ora quadrare, il conto 81 deve essere a zero e il conto 83 chiuso.");
-            }
-          } else if (giroDaSpostare.length > 0) {
-            // Le scritture erano già a posto: resta solo da riassegnare la BU
-            if (confirm(`${giroDaSpostare.length} movimenti Idea Verde risultano su un'altra BU. Spostarli su IDEA VERDE?`)) {
-              const now = new Date().toISOString();
-              const upd = {};
-              giroDaSpostare.forEach(m => { const d = { ...m, bu: "IDEA VERDE", modificatoIl: now }; delete d._k; upd[m._k] = d; });
-              await db.ref(`stagioni/${stagione}/movimenti`).update(upd);
-              alert("Movimenti riassegnati a IDEA VERDE.");
-            }
-          }
-        }
-
-        // Migration v3.13: aggiungi conto 80 + sistema cespiti + riclassifica rimborsi
-        const contiSnapMig = await db.ref(`stagioni/${stagione}/conti`).once("value");
-        const contiVal = contiSnapMig.val() || {};
-        const has80 = Object.values(contiVal).some(c => c.codice === 80);
-        const hasStampante = Object.values(contiVal).some(c => c.codice === 78);
-        const hasTreppiede = Object.values(contiVal).some(c => c.codice === 79);
-
-        const cespitiSnap = await db.ref(`stagioni/${stagione}/cespiti`).once("value");
-        const cespitiVal = cespitiSnap.val() || {};
-        const cespitiList = Object.entries(cespitiVal).map(([k,c]) => ({...c, _key: k}));
-
-        const hasSpeakerNuovo = cespitiList.some(c =>
-          (c.conto || "").toUpperCase().includes("SPEAKER") && Math.abs((c.costo_storico || 0) - 2338.83) < 0.5
-        );
-        const hasMaterialeAggiornato = cespitiList.some(c =>
-          (c.conto || "").toUpperCase().includes("MATERIALE ALLENAMENTO") && Math.abs((c.costo_storico || 0) - 137.95) < 0.5
-        );
-        const hasStampanteCespite = cespitiList.some(c =>
-          (c.conto || "").toUpperCase().includes("STAMPANTE")
-        );
-        const hasTreppiedeCespite = cespitiList.some(c =>
-          (c.conto || "").toUpperCase().includes("TREPPIEDE")
-        );
-        const oldLavagnetta = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "LAVAGNETTA");
-        const oldTelecamera = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "TELECAMERA PER FUTSAL");
-        const oldCostiImpianto = cespitiList.find(c => (c.conto || "").trim().toUpperCase() === "COSTI IMPIANTO");
-
-        // Check rimborsi spese su conto 36 da spostare
-        const rimborsiDaSpostare = Object.entries(movsSnap.val() || {}).filter(([k, m]) => {
-          if (m.contoPdC !== 36) return false;
-          if (m.tipo !== "uscita") return false;
-          const cat = (m.categoria || "").toUpperCase();
-          const desc = (m.descrizione || "").toUpperCase();
-          return cat.includes("RIMBORSO") || desc.includes("RIMBORSO") || desc.includes("RIMBORSI");
-        });
-
-        const needsMigration = !has80 || !hasSpeakerNuovo || !hasMaterialeAggiornato ||
-                               (hasStampante && !hasStampanteCespite) ||
-                               (hasTreppiede && !hasTreppiedeCespite) ||
-                               oldLavagnetta || oldTelecamera || oldCostiImpianto ||
-                               rimborsiDaSpostare.length > 0;
-
-        if (needsMigration) {
-          const lines = ["Rilevati disallineamenti da sistemare:\n"];
-          if (!has80) lines.push("• Aggiungere conto 80 RIMBORSI SPESE SOCI");
-          if (!hasSpeakerNuovo) lines.push("• Aggiungere SPEAKER nuovo 2.338,83 € (Altoparlanti Thomann)");
-          if (!hasMaterialeAggiornato) lines.push("• Aggiornare MATERIALE ALLENAMENTO FUTSAL: 65,95 → 137,95 € (aggiunti palloni Tuttocampo)");
-          if (hasStampante && !hasStampanteCespite) lines.push("• Aggiungere cespite STAMPANTE SCONTRINI 70 €");
-          if (hasTreppiede && !hasTreppiedeCespite) lines.push("• Aggiungere cespite TREPPIEDE 35 €");
-          if (oldLavagnetta) lines.push("• Rinominare LAVAGNETTA → LAVAGNETTA FUTSAL");
-          if (oldTelecamera) lines.push("• Rinominare TELECAMERA PER FUTSAL → TELECAMERA FUTSAL");
-          if (oldCostiImpianto) lines.push("• Rinominare COSTI IMPIANTO → COSTI DI IMPIANTO");
-          if (rimborsiDaSpostare.length > 0) lines.push(`• Riclassificare ${rimborsiDaSpostare.length} rimborsi spese da conto 36 a conto 80 (€${rimborsiDaSpostare.reduce((s,[,m])=>s+(m.importo||0),0).toFixed(2)})`);
-          lines.push("\nProcedere con la migration?");
-
-          if (confirm(lines.join("\n"))) {
-            // Conto 80
-            if (!has80) {
-              await db.ref(`stagioni/${stagione}/conti/c80`).set({
-                codice: 80,
-                nome: "RIMBORSI SPESE SOCI",
-                eccedenza: "DARE",
-                prospetto: "CE",
-                categoria: "COSTI"
-              });
-            }
-
-            // Speaker nuovo
-            if (!hasSpeakerNuovo) {
-              await db.ref(`stagioni/${stagione}/cespiti`).push({
-                conto: "SPEAKER",
-                classe: "IMMOBILIZZAZIONI MATERIALI",
-                n_beni: 1,
-                costo_unitario: 2338.83,
-                anno_inizio: 2026,
-                costo_storico: 2338.83,
-                aliquota: 0,
-                quota_esercizio: 0,
-                fondo_ammortamento: 0,
-              });
-            }
-
-            // Stampante scontrini cespite
-            if (hasStampante && !hasStampanteCespite) {
-              await db.ref(`stagioni/${stagione}/cespiti`).push({
-                conto: "STAMPANTE SCONTRINI",
-                classe: "IMMOBILIZZAZIONI MATERIALI",
-                n_beni: 1,
-                costo_unitario: 70,
-                anno_inizio: 2026,
-                costo_storico: 70,
-                aliquota: 0,
-                quota_esercizio: 0,
-                fondo_ammortamento: 0,
-              });
-            }
-
-            // Treppiede cespite
-            if (hasTreppiede && !hasTreppiedeCespite) {
-              await db.ref(`stagioni/${stagione}/cespiti`).push({
-                conto: "TREPPIEDE",
-                classe: "IMMOBILIZZAZIONI MATERIALI",
-                n_beni: 1,
-                costo_unitario: 35,
-                anno_inizio: 2026,
-                costo_storico: 35,
-                aliquota: 0,
-                quota_esercizio: 0,
-                fondo_ammortamento: 0,
-              });
-            }
-
-            // Materiale allenamento aggiornato
-            if (!hasMaterialeAggiornato) {
-              const matCesp = cespitiList.find(c => (c.conto || "").toUpperCase().includes("MATERIALE ALLENAMENTO"));
-              if (matCesp) {
-                await db.ref(`stagioni/${stagione}/cespiti/${matCesp._key}`).update({
-                  costo_storico: 137.95,
-                  costo_unitario: 137.95,
-                  n_beni: 1,
-                });
-              }
-            }
-
-            // Rinomine
-            if (oldLavagnetta) {
-              await db.ref(`stagioni/${stagione}/cespiti/${oldLavagnetta._key}`).update({ conto: "LAVAGNETTA FUTSAL" });
-            }
-            if (oldTelecamera) {
-              await db.ref(`stagioni/${stagione}/cespiti/${oldTelecamera._key}`).update({ conto: "TELECAMERA FUTSAL" });
-            }
-            if (oldCostiImpianto) {
-              await db.ref(`stagioni/${stagione}/cespiti/${oldCostiImpianto._key}`).update({ conto: "COSTI DI IMPIANTO" });
-            }
-
-            // Riclassifica rimborsi: 36 → 80
-            for (const [movKey, m] of rimborsiDaSpostare) {
-              await db.ref(`stagioni/${stagione}/movimenti/${movKey}`).update({
-                contoPdC: 80,
-                modificatoIl: new Date().toISOString()
-              });
-            }
-
-            alert("Migration completata.\n\nNota: la discrepanza PALLONI FUTSAL (cespite 227 vs movimento 199, +28€) non è stata sistemata: verifica manualmente.\n\nPer i nuovi cespiti (Speaker, Stampante, Treppiede) l'aliquota è a 0%: impostala tu dalla matita ✎ in Cespiti.");
-          }
-        }
-        return;
-      }
+      // Le migration one-off (Release 1.1/2/3.0/3.1/3.2, v3.10 apertura, v3.13
+      // conto 80 + cespiti + rimborsi, v3.16 Idea Verde) stavano QUI e partivano
+      // da sole a ogni caricamento, con un confirm(). Sono state rimosse in 3.29.0.
+      // Motivo: non avevano un flag "gia' fatto", quindi ricomparivano per sempre,
+      // e nel frattempo i dati sono stati corretti a mano. Due esempi concreti:
+      // la v3.13 rispostava sul conto 80 i rimborsi messi sul conto 36, ricreando
+      // il doppio conteggio del costo; le migration di Release 2/3.2 cancellavano
+      // e reimportavano TUTTI i movimenti importati, buttando via le correzioni.
+      // Un aggiornamento dei dati e' una cosa che si decide, non che parte da sola:
+      // se un domani serve, va messo dietro un pulsante esplicito.
       const contiSnap = await db.ref(`stagioni/${stagione}/conti`).once("value");
       if (!contiSnap.exists()) {
         // Il seed carica i movimenti storici dello sheet: puo' partire SOLO al
