@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.29.0";
+const APP_VERSION = "3.30.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1699,7 +1699,14 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
   // KPI: nuove = solo movimenti registrati dall'utente, totale = inclusi gli importati.
   // Le APERTURE sono escluse: non sono entrate/uscite della stagione ma la dotazione iniziale.
   // (restano invece nei "saldi" qui sopra, perché lì costituiscono la base della liquidità reale)
-  const movStagione = movimenti.filter(m => !isAperturaMov(m));
+  // Escluse anche le scritture NON MONETARIE: qui si contano i soldi entrati e
+  // usciti davvero, e una scrittura senza conto di liquidità non muove cassa.
+  // Sommarle gonfiava il totale, perché ogni scrittura in partita doppia ha una
+  // gamba "entrata" anche quando non incassa niente: il fondo ammortamento in
+  // contropartita di un ammortamento, il debito verso un partner, un giro fra
+  // due conti economici. Il saldo non cambiava (le due gambe si annullano), ma
+  // entrate e uscite lorde risultavano entrambe piu' alte del vero.
+  const movStagione = movimenti.filter(m => !isAperturaMov(m) && !m.nonMonetario);
   const totEntrateNuove = movStagione.filter(m => m.tipo === "entrata" && !m.importato).reduce((s,m) => s + m.importo, 0);
   const totUsciteNuove = movStagione.filter(m => m.tipo === "uscita" && !m.importato).reduce((s,m) => s + m.importo, 0);
   const totEntrate = movStagione.filter(m => m.tipo === "entrata").reduce((s,m) => s + m.importo, 0);
@@ -1722,19 +1729,21 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
           <div className="hint">Tutti i conti aggregati</div>
         </div>
         <div className="kpi">
-          <div className="label">Entrate stagione</div>
+          {/* "Incassi" e non "Entrate": sono soldi entrati in cassa, non ricavi.
+              I ricavi di competenza stanno nel Conto Economico e sono un altro numero. */}
+          <div className="label">Incassi stagione</div>
           <div className="value" style={{color:"var(--accent)"}}>{fmtEuro(totEntrate)}</div>
-          <div className="hint">{totEntrateNuove > 0 ? `di cui ${fmtEuro(totEntrateNuove)} nuove` : `${movStagione.filter(m=>m.tipo==="entrata").length} movimenti`}</div>
+          <div className="hint">{totEntrateNuove > 0 ? `di cui ${fmtEuro(totEntrateNuove)} nuovi` : `${movStagione.filter(m=>m.tipo==="entrata").length} movimenti`}</div>
         </div>
         <div className="kpi">
-          <div className="label">Uscite stagione</div>
+          <div className="label">Pagamenti stagione</div>
           <div className="value" style={{color:"var(--danger)"}}>{fmtEuro(totUscite)}</div>
-          <div className="hint">{totUsciteNuove > 0 ? `di cui ${fmtEuro(totUsciteNuove)} nuove` : `${movStagione.filter(m=>m.tipo==="uscita").length} movimenti`}</div>
+          <div className="hint">{totUsciteNuove > 0 ? `di cui ${fmtEuro(totUsciteNuove)} nuovi` : `${movStagione.filter(m=>m.tipo==="uscita").length} movimenti`}</div>
         </div>
         <div className="kpi">
-          <div className="label">Saldo stagione</div>
+          <div className="label">Saldo di cassa</div>
           <div className={"value " + (totEntrate-totUscite < 0 ? "neg" : "")}>{fmtEuro(totEntrate - totUscite)}</div>
-          <div className="hint">Entrate − Uscite</div>
+          <div className="hint">Incassi − Pagamenti · solo movimenti di cassa</div>
         </div>
       </div>
 
