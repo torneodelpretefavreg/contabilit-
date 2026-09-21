@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.24.0";
+const APP_VERSION = "3.24.1";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2322,7 +2322,11 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
             motivi.push(`Conto "${nomeConto}" ma categoria "${m.categoria}": attesa "${r.attesa}" (la categoria decide la voce del rendiconto)`);
             // Propongo la categoria solo se esiste gia' fra quelle in uso:
             // non invento nomi nuovi che poi resterebbero fuori dal rendiconto.
-            const esistente = (categorie || []).find(c => String(c).toUpperCase() === r.attesa);
+            // "categorie" arriva come { entrate: [...], uscite: [...] }, non come array:
+            // cerco nell'elenco dello stesso verso del movimento
+            const elencoCat = Array.isArray(categorie) ? categorie
+              : ((m.tipo === "entrata" ? categorie?.entrate : categorie?.uscite) || []);
+            const esistente = elencoCat.find(c => String(c).toUpperCase() === r.attesa);
             if (esistente) catSuggerita = esistente;
           }
         });
