@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.25.0";
+const APP_VERSION = "3.26.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1834,7 +1834,14 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione }) {
 // ============================================================
 // COMPONENTE: BOX MANUTENZIONE
 // ============================================================
+// Le migration di questo box sono tarate sui dati della stagione del seed:
+// inseriscono le aperture al 2025-09-01 e correggono scritture con date fisse.
+// Lanciarlo su una stagione nuova e ancora vuota ci riverserebbe dentro le
+// aperture dell'anno sbagliato, quindi il box compare solo dove ha senso.
+const STAGIONE_SEED = "2025-26";
+
 function ManutenzioneBox({ stagione }) {
+  if (stagione !== STAGIONE_SEED) return null;
   const [running, setRunning] = useState(false);
 
   const runMigrationChecks = async () => {
@@ -3201,6 +3208,8 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
   const [salvando, setSalvando] = useState(false);
   const [azzeraSaldi, setAzzeraSaldi] = useState(true);
   const [sostituisci, setSostituisci] = useState(false);
+  const [portaAnagrafiche, setPortaAnagrafiche] = useState(true);
+  const [datiTarget, setDatiTarget] = useState(null);
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -3212,7 +3221,26 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
 
   const apertureEsistenti = useMemo(() => (movimenti || []).filter(isAperturaMov), [movimenti]);
 
-  useEffect(() => { setDatiOrigine(null); setStato("idle"); setErrore(""); }, [origine, stagione]);
+  useEffect(() => { setDatiOrigine(null); setDatiTarget(null); setStato("idle"); setErrore(""); }, [origine, stagione]);
+
+  // Cosa manca nella stagione nuova. La riapertura scrive solo i SALDI: senza
+  // questo passaggio il nuovo esercizio nasce senza piano dei conti, senza
+  // libro cespiti e senza schema di bilancio, perche' nulla li eredita.
+  const anagrafiche = useMemo(() => {
+    if (!datiOrigine || !datiTarget) return null;
+    const giaCodici = new Set((datiTarget.conti || []).map(c => Number(c.codice)));
+    const contiMancanti = (datiOrigine.conti || []).filter(c => !giaCodici.has(Number(c.codice)));
+    // i cespiti dismessi sono usciti dal patrimonio: non passano al nuovo anno
+    const cespitiDaPortare = (datiOrigine.cespiti || []).filter(c => !(c.dismissione && c.dismissione.data));
+    return {
+      contiMancanti,
+      contiGia: giaCodici.size,
+      cespitiDaPortare,
+      cespitiGia: (datiTarget.cespiti || []).length,
+      schemaDaPortare: !!(datiOrigine.schemaBilancio && datiOrigine.schemaBilancio.json) && !(datiTarget.schemaBilancio && datiTarget.schemaBilancio.json),
+      categorieDaPortare: !!datiOrigine.categorieRF && !datiTarget.categorieRF,
+    };
+  }, [datiOrigine, datiTarget]);
 
   const carica = async () => {
     if (!firebaseReady) { setErrore("Firebase non configurato"); setStato("errore"); return; }
@@ -3231,6 +3259,17 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
         saldiIniziali: v.saldiIniziali || {},
         conti: contiOrig.length ? contiOrig : (conti || []),
         cespiti: v.cespiti ? Object.entries(v.cespiti).map(([k, c]) => ({ ...c, _key: k })) : [],
+        // anagrafiche da portare nel nuovo esercizio insieme ai saldi
+        schemaBilancio: v.schemaBilancio || null,
+        categorieRF: v.categorieRF || null,
+      });
+      const tgt = await db.ref(`stagioni/${stagione}`).once("value");
+      const tv = tgt.val() || {};
+      setDatiTarget({
+        conti: tv.conti ? Object.values(tv.conti) : [],
+        cespiti: tv.cespiti ? Object.values(tv.cespiti) : [],
+        schemaBilancio: tv.schemaBilancio || null,
+        categorieRF: tv.categorieRF || null,
       });
       setStato("pronto");
     } catch (e) {
@@ -3297,6 +3336,12 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
       `• DARE totale: ${fmt(totDare)}\n• AVERE totale: ${fmt(totAvere)}\n` +
       (sostituisci && apertureEsistenti.length ? `• Elimino prima le ${apertureEsistenti.length} scritture di apertura già presenti\n` : "") +
       (azzeraSaldi ? "• Azzero i saldi iniziali di liquidità (i saldi arrivano dalla riapertura)\n" : "") +
+      (portaAnagrafiche && anagrafiche ? (
+        (anagrafiche.contiMancanti.length ? `• Copio ${anagrafiche.contiMancanti.length} conti mancanti nel piano dei conti\n` : "") +
+        (anagrafiche.cespitiDaPortare.length && !anagrafiche.cespitiGia ? `• Copio ${anagrafiche.cespitiDaPortare.length} schede cespite (fondo accumulato, quota da ricalcolare)\n` : "") +
+        (anagrafiche.schemaDaPortare ? "• Copio lo schema di bilancio (SP / CE / rendiconto)\n" : "") +
+        (anagrafiche.categorieDaPortare ? "• Copio le categorie del rendiconto\n" : "")
+      ) : "") +
       "\nProcedere?";
     if (!confirm(msg)) return;
     setSalvando(true);
@@ -3313,7 +3358,51 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
       });
       await db.ref(`stagioni/${stagione}/movimenti`).update(upd);
       if (azzeraSaldi) await db.ref(`stagioni/${stagione}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
-      onToast(`Riapertura inserita: ${attive.length} scritture al ${annoY1}-09-01`);
+
+      // --- anagrafiche: piano dei conti, libro cespiti, schema, categorie ---
+      // Non sovrascrivo mai quello che c'e' gia' nella stagione nuova: aggiungo
+      // solo cio' che manca, cosi' il pulsante e' ripetibile senza danni.
+      let riportate = null;
+      if (portaAnagrafiche && anagrafiche) {
+        const a = anagrafiche;
+        if (a.contiMancanti.length) {
+          const cObj = {};
+          a.contiMancanti.forEach(c => { cObj[`c${c.codice}`] = c; });
+          await db.ref(`stagioni/${stagione}/conti`).update(cObj);
+        }
+        if (a.cespitiDaPortare.length && !a.cespitiGia) {
+          const cespObj = {};
+          a.cespitiDaPortare.forEach((c, i) => {
+            const nuovo = { ...c };
+            delete nuovo._key;
+            // Il fondo accumulato si porta avanti; quota e scrittura dell'anno
+            // che si chiude no, altrimenti il nuovo esercizio risulterebbe
+            // gia' ammortizzato e "Proponi scritture" non proporrebbe nulla.
+            // La quota va RIMOSSA, non azzerata: il calcolo del piano usa
+            // `quota_esercizio ?? quotaAnnua` per i cespiti degli anni
+            // precedenti, quindi uno zero bloccherebbe l'ammortamento per
+            // sempre. Senza il campo riparte dalla quota annua piena.
+            delete nuovo.quota_esercizio;
+            delete nuovo.amm_reg;
+            cespObj[`cesp_${annoY1}_${String(i).padStart(4, "0")}`] = nuovo;
+          });
+          await db.ref(`stagioni/${stagione}/cespiti`).update(cespObj);
+        }
+        if (a.schemaDaPortare) {
+          await db.ref(`stagioni/${stagione}/schemaBilancio`)
+            .set({ json: datiOrigine.schemaBilancio.json, aggiornatoIl: now });
+        }
+        if (a.categorieDaPortare) {
+          await db.ref(`stagioni/${stagione}/categorieRF`).set(datiOrigine.categorieRF);
+        }
+        riportate = a;
+      }
+
+      const extra = riportate
+        ? ` · ${riportate.contiMancanti.length} conti, ${(riportate.cespitiDaPortare.length && !riportate.cespitiGia) ? riportate.cespitiDaPortare.length : 0} cespiti` +
+          (riportate.schemaDaPortare ? ", schema" : "") + (riportate.categorieDaPortare ? ", categorie" : "")
+        : "";
+      onToast(`Riapertura inserita: ${attive.length} scritture al ${annoY1}-09-01${extra}`);
       setSostituisci(false);
     } catch (e) { alert("Errore: " + ((e && e.message) || e)); }
     finally { setSalvando(false); }
@@ -3503,6 +3592,41 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
                      onChange={e => setSostituisci(e.target.checked)} />
               Elimina prima le {apertureEsistenti.length} scritture di apertura già presenti in {stagione}
             </label>
+
+            {anagrafiche && (
+              <div style={{border:"1px solid var(--rule)", borderRadius:8, padding:"10px 14px", marginBottom:14,
+                           background:"var(--panel-2)"}}>
+                <label style={{display:"flex", gap:8, alignItems:"center", fontSize:13, fontWeight:600}}>
+                  <input type="checkbox" checked={portaAnagrafiche}
+                         onChange={e => setPortaAnagrafiche(e.target.checked)} />
+                  Porta anche le anagrafiche da {origine}
+                </label>
+                <div style={{fontSize:12, color:"var(--ink-2)", marginTop:6, lineHeight:1.6}}>
+                  La riapertura trasferisce i <strong>saldi</strong>. Tutto il resto non viene ereditato da
+                  nessuna parte: senza questo passaggio {stagione} nasce senza piano dei conti, senza libro
+                  cespiti e senza schema di bilancio.
+                  <ul style={{margin:"6px 0 0", paddingLeft:18}}>
+                    <li>{anagrafiche.contiMancanti.length > 0
+                        ? <><strong>{anagrafiche.contiMancanti.length} conti</strong> da copiare (in {stagione} ce ne sono {anagrafiche.contiGia})</>
+                        : <span style={{color:"var(--ok)"}}>piano dei conti già completo</span>}</li>
+                    <li>{anagrafiche.cespitiGia > 0
+                        ? <span style={{color:"var(--ok)"}}>libro cespiti già presente ({anagrafiche.cespitiGia} schede): non lo tocco</span>
+                        : anagrafiche.cespitiDaPortare.length > 0
+                          ? <><strong>{anagrafiche.cespitiDaPortare.length} schede cespite</strong> da copiare, col fondo accumulato e la quota da ricalcolare</>
+                          : <span style={{color:"var(--ink-3)"}}>nessun cespite da portare</span>}</li>
+                    <li>{anagrafiche.schemaDaPortare
+                        ? <><strong>schema di bilancio</strong> da copiare (voci, sotto-voci, rendiconto)</>
+                        : <span style={{color:"var(--ok)"}}>schema di bilancio già presente</span>}</li>
+                    <li>{anagrafiche.categorieDaPortare
+                        ? <><strong>categorie del rendiconto</strong> da copiare</>
+                        : <span style={{color:"var(--ok)"}}>categorie già presenti</span>}</li>
+                  </ul>
+                  Non sovrascrivo mai ciò che esiste già: aggiungo solo quello che manca, quindi puoi
+                  ripetere l'operazione senza fare danni.
+                </div>
+              </div>
+            )}
+
             <button className="btn accent" onClick={inserisci} disabled={salvando || !attive.length}>
               {salvando ? "Inserimento…" : `Inserisci ${attive.length} scritture di riapertura`}
             </button>
