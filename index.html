@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.17.0";
+const APP_VERSION = "3.18.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -998,6 +998,30 @@ const fmtDate = (iso) => {
   if (isNaN(d)) return iso;
   return d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "numeric" });
 };
+// --- formattazione uniforme per i PDF -----------------------------------
+// I prospetti "ufficiali" (SP, CE, rendiconto, riepilogo BU) passano dal
+// pdfBuilder e sono gia' in formato italiano. Bilancio di verifica, libro
+// cespiti ed elenco movimenti scrivevano invece con toFixed(2) (punto
+// decimale, nessun separatore delle migliaia) e con la data ISO: stesso
+// documento, due convenzioni diverse. Questi helper le riallineano.
+// r2sym arrotonda in modo simmetrico: il mezzo centesimo va sempre lontano
+// dallo zero, cosi' un costo e il saldo che lo compensa non divergono.
+const r2sym = (n) => {
+  const x = Number(n) || 0;
+  return (x < 0 ? -1 : 1) * Math.round(Math.abs(x) * 100) / 100;
+};
+const pdfNum = (n) =>
+  r2sym(n).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Celle vuote al posto degli zeri, come gia' fa il bilancio di verifica.
+const pdfNumVuoto = (n) => (Math.abs(r2sym(n)) < 0.005 ? "" : pdfNum(n));
+// Data in gg/mm/aaaa senza passare da new Date(): nessuno slittamento di fuso.
+const pdfData = (iso) => {
+  if (!iso) return "";
+  const s = String(iso).slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : s;
+};
+
 const todayISO = () => new Date().toISOString().slice(0,10);
 const meseDaData = (iso) => {
   const d = new Date(iso);
@@ -2272,6 +2296,26 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
         motivi.push("Descrizione menziona contributo ma conto ≠ 22");
         suggerito = 22;
       }
+      // --- Coerenza fra conto del piano dei conti e categoria di cassa ---
+      // La categoria pilota il rendiconto finanziario: se non segue il conto,
+      // il flusso finisce nella voce sbagliata (es. una ritenuta dentro le
+      // spese di conto corrente, o una parcella dentro le imposte pagate).
+      const nomeConto = (contiMap[m.contoPdC]?.nome || "").toUpperCase();
+      const COERENZA = [
+        { conto: /RITENUT/,            cat: /RITENUT/,        attesa: "RITENUTE F24" },
+        { conto: /COMMERCIALISTA/,     cat: /COMMERCIALISTA/, attesa: "SPESE COMMERCIALISTA" },
+        { conto: /DIVIDEND/,           cat: /DIVIDEND/,       attesa: "DIVIDENDI" },
+        { conto: /\bIMPOSTE\b/,        cat: /IMPOST|RITENUT/, attesa: "IMPOSTE" },
+        { conto: /ONERI VS BANCA/,     cat: /TENUTA CONTO|COMMISSION|BANC/, attesa: "SPESE TENUTA CONTO" },
+      ];
+      if (nomeConto && cat) {
+        COERENZA.forEach(r => {
+          if (r.conto.test(nomeConto) && !r.cat.test(cat)) {
+            motivi.push(`Conto "${nomeConto}" ma categoria "${m.categoria}": attesa "${r.attesa}" (la categoria decide la voce del rendiconto)`);
+          }
+        });
+      }
+
       if (cat === "ALTRO" && !motivi.length) {
         motivi.push("Categoria libera generica ('ALTRO')");
       }
@@ -2285,7 +2329,7 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
       if (motivi.length > 0) result.push({ ...m, motivi, suggerito });
     });
     return result;
-  }, [movimenti]);
+  }, [movimenti, contiMap]);
 
   // Riepilogo riapertura: verifica che il conto 60 Bilancio di Apertura si azzeri
   const riepilogoApertura = useMemo(() => {
@@ -5910,15 +5954,16 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         String(m.codice).padStart(2,"0"),
         m.nome.trim(),
         m.categoria,
-        m.dare > 0 ? m.dare.toFixed(2) : "",
-        m.avere > 0 ? m.avere.toFixed(2) : "",
-        Math.abs(m.saldo).toFixed(2) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : "")
+        pdfNumVuoto(m.dare),
+        pdfNumVuoto(m.avere),
+        pdfNum(Math.abs(m.saldo)) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : "")
       ]);
       rows.push([
         "", { content: "TOTALI", styles: { fontStyle: "bold" } }, "",
-        { content: dati.totD.toFixed(2), styles: { fontStyle: "bold" } },
-        { content: dati.totA.toFixed(2), styles: { fontStyle: "bold" } },
-        Math.abs(dati.totD - dati.totA) < 0.01 ? "quadra" : (dati.totD - dati.totA).toFixed(2),
+        { content: pdfNum(dati.totD), styles: { fontStyle: "bold" } },
+        { content: pdfNum(dati.totA), styles: { fontStyle: "bold" } },
+        { content: Math.abs(dati.totD - dati.totA) < 0.01 ? "quadra" : pdfNum(dati.totD - dati.totA),
+          styles: { fontStyle: "bold" } },
       ]);
 
       doc.autoTable({
@@ -5952,10 +5997,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setTextColor(0);
 
       const ricaviRows = dati.ceVoci.filter(m => m.categoria === "RICAVI").map(m => [
-        String(m.codice).padStart(2,"0"), m.nome.trim(), (m.avere - m.dare).toFixed(2)
+        String(m.codice).padStart(2,"0"), m.nome.trim(), pdfNum(m.avere - m.dare)
       ]);
       const costiRows = dati.ceVoci.filter(m => ["COSTI","COSTI/RICAVI"].includes(m.categoria)).map(m => [
-        String(m.codice).padStart(2,"0"), m.nome.trim(), (m.dare - m.avere).toFixed(2)
+        String(m.codice).padStart(2,"0"), m.nome.trim(), pdfNum(m.dare - m.avere)
       ]);
 
       doc.setFontSize(11); doc.setFont("helvetica","bold");
@@ -5963,7 +6008,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.autoTable({
         startY: 43,
         head: [["Cod.", "Voce", "Importo"]],
-        body: [...ricaviRows, [{content:"Totale Ricavi", colSpan:2, styles:{fontStyle:"bold"}}, {content: dati.ricavi.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]],
+        body: [...ricaviRows, [{content:"Totale Ricavi", colSpan:2, styles:{fontStyle:"bold"}}, {content: pdfNum(dati.ricavi), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]],
         styles: { fontSize: 9, cellPadding: 2 },
         headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold" },
         columnStyles: { 0: { cellWidth: 14, halign: "center" }, 2: { cellWidth: 32, halign: "right" } },
@@ -5975,7 +6020,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.autoTable({
         startY: y2 + 3,
         head: [["Cod.", "Voce", "Importo"]],
-        body: [...costiRows, [{content:"Totale Costi", colSpan:2, styles:{fontStyle:"bold"}}, {content: dati.costi.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]],
+        body: [...costiRows, [{content:"Totale Costi", colSpan:2, styles:{fontStyle:"bold"}}, {content: pdfNum(dati.costi), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]],
         styles: { fontSize: 9, cellPadding: 2 },
         headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold" },
         columnStyles: { 0: { cellWidth: 14, halign: "center" }, 2: { cellWidth: 32, halign: "right" } },
@@ -5986,7 +6031,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFillColor(26, 26, 26); doc.rect(14, y3 - 5, doc.internal.pageSize.width - 28, 10, "F");
       doc.setTextColor(255);
       doc.text("RISULTATO D'ESERCIZIO", 16, y3 + 2);
-      doc.text(`€ ${dati.utile.toFixed(2)}  (${dati.utile >= 0 ? "Utile" : "Perdita"})`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
+      doc.text(`€ ${pdfNum(dati.utile)}  (${dati.utile >= 0 ? "Utile" : "Perdita"})`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
       doc.setTextColor(0);
 
       doc.save(`Conto_Economico_${stagione}.pdf`);
@@ -6011,10 +6056,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setTextColor(0);
 
       const attive = dati.spVoci.filter(m => m.saldo > 0).map(m => [
-        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, m.saldo.toFixed(2)
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, pdfNum(m.saldo)
       ]);
       const passive = dati.spVoci.filter(m => m.saldo < 0).map(m => [
-        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, (-m.saldo).toFixed(2)
+        String(m.codice).padStart(2,"0"), m.nome.trim(), m.categoria, pdfNum(-m.saldo)
       ]);
 
       doc.setFontSize(11); doc.setFont("helvetica","bold");
@@ -6022,7 +6067,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.autoTable({
         startY: 43,
         head: [["Cod.", "Voce", "Categoria", "Importo"]],
-        body: [...attive, [{content:"Totale Attivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: dati.attivo.toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]],
+        body: [...attive, [{content:"Totale Attivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: pdfNum(dati.attivo), styles:{fontStyle:"bold", fillColor:[230,240,232]}}]],
         styles: { fontSize: 9, cellPadding: 2 },
         headStyles: { fillColor: [45, 94, 62], textColor: 240, fontStyle: "bold" },
         columnStyles: { 0: { cellWidth: 14, halign: "center" }, 3: { cellWidth: 32, halign: "right" } },
@@ -6034,7 +6079,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.autoTable({
         startY: y2 + 3,
         head: [["Cod.", "Voce", "Categoria", "Importo"]],
-        body: [...passive, [{content:"Totale Passivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: dati.passivo.toFixed(2), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]],
+        body: [...passive, [{content:"Totale Passivo", colSpan:3, styles:{fontStyle:"bold"}}, {content: pdfNum(dati.passivo), styles:{fontStyle:"bold", fillColor:[251,236,236]}}]],
         styles: { fontSize: 9, cellPadding: 2 },
         headStyles: { fillColor: [181, 67, 67], textColor: 240, fontStyle: "bold" },
         columnStyles: { 0: { cellWidth: 14, halign: "center" }, 3: { cellWidth: 32, halign: "right" } },
@@ -6045,7 +6090,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFillColor(26, 26, 26); doc.rect(14, y3 - 5, doc.internal.pageSize.width - 28, 10, "F");
       doc.setTextColor(255);
       doc.text("ATTIVO NETTO", 16, y3 + 2);
-      doc.text(`€ ${(dati.attivo - dati.passivo).toFixed(2)}`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
+      doc.text(`€ ${pdfNum(dati.attivo - dati.passivo)}`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
       doc.setTextColor(0);
 
       doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
@@ -6125,19 +6170,19 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         c.classe || "",
         c.n_beni || "",
         c.anno_inizio || "",
-        (c.costo_storico || 0).toFixed(2),
+        pdfNum(c.costo_storico || 0),
         c.aliquota ? ((c.aliquota * 100).toFixed(0) + "%") : "",
-        (c.quota_esercizio || 0).toFixed(2),
-        (c.fondo_ammortamento || 0).toFixed(2),
-        ((c.costo_storico || 0) - (c.fondo_ammortamento || 0)).toFixed(2),
+        pdfNum(c.quota_esercizio || 0),
+        pdfNum(c.fondo_ammortamento || 0),
+        pdfNum((c.costo_storico || 0) - (c.fondo_ammortamento || 0)),
       ]);
       rows.push([
         {content:"TOTALI", colSpan:4, styles:{fontStyle:"bold"}},
-        {content: totCosto.toFixed(2), styles:{fontStyle:"bold"}},
+        {content: pdfNum(totCosto), styles:{fontStyle:"bold"}},
         "",
-        {content: totQuota.toFixed(2), styles:{fontStyle:"bold"}},
-        {content: totFondo.toFixed(2), styles:{fontStyle:"bold"}},
-        {content: (totCosto - totFondo).toFixed(2), styles:{fontStyle:"bold", fillColor:[230,240,232]}},
+        {content: pdfNum(totQuota), styles:{fontStyle:"bold"}},
+        {content: pdfNum(totFondo), styles:{fontStyle:"bold"}},
+        {content: pdfNum(totCosto - totFondo), styles:{fontStyle:"bold", fillColor:[230,240,232]}},
       ]);
 
       doc.autoTable({
@@ -6236,15 +6281,16 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         String(m.codice).padStart(2,"0"),
         m.nome.trim(),
         m.categoria,
-        m.dare > 0 ? m.dare.toFixed(2) : "",
-        m.avere > 0 ? m.avere.toFixed(2) : "",
-        Math.abs(m.saldo).toFixed(2) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : "")
+        pdfNumVuoto(m.dare),
+        pdfNumVuoto(m.avere),
+        pdfNum(Math.abs(m.saldo)) + (m.saldo < 0 ? " A" : m.saldo > 0 ? " D" : "")
       ]);
       bilancioRows.push([
         "", {content:"TOTALI", styles:{fontStyle:"bold"}}, "",
-        {content: dati.totD.toFixed(2), styles:{fontStyle:"bold"}},
-        {content: dati.totA.toFixed(2), styles:{fontStyle:"bold"}},
-        Math.abs(dati.totD - dati.totA) < 0.01 ? "quadra" : (dati.totD - dati.totA).toFixed(2),
+        {content: pdfNum(dati.totD), styles:{fontStyle:"bold"}},
+        {content: pdfNum(dati.totA), styles:{fontStyle:"bold"}},
+        {content: Math.abs(dati.totD - dati.totA) < 0.01 ? "quadra" : pdfNum(dati.totD - dati.totA),
+         styles: {fontStyle:"bold"}},
       ]);
       doc.autoTable({
         startY: 25,
@@ -6347,18 +6393,18 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       const totQuota = cespiti.reduce((s,c) => s + (c.quota_esercizio || 0), 0);
       const cespitiRows = cespiti.map(c => [
         c.conto || "", c.classe || "", c.n_beni || "", c.anno_inizio || "",
-        (c.costo_storico || 0).toFixed(2),
+        pdfNum(c.costo_storico || 0),
         c.aliquota ? ((c.aliquota * 100).toFixed(0) + "%") : "",
-        (c.quota_esercizio || 0).toFixed(2),
-        (c.fondo_ammortamento || 0).toFixed(2),
-        ((c.costo_storico || 0) - (c.fondo_ammortamento || 0)).toFixed(2),
+        pdfNum(c.quota_esercizio || 0),
+        pdfNum(c.fondo_ammortamento || 0),
+        pdfNum((c.costo_storico || 0) - (c.fondo_ammortamento || 0)),
       ]);
       cespitiRows.push([
         {content:"TOTALI", colSpan:4, styles:{fontStyle:"bold"}},
-        {content: totCosto.toFixed(2), styles:{fontStyle:"bold"}}, "",
-        {content: totQuota.toFixed(2), styles:{fontStyle:"bold"}},
-        {content: totFondo.toFixed(2), styles:{fontStyle:"bold"}},
-        {content: (totCosto - totFondo).toFixed(2), styles:{fontStyle:"bold"}}
+        {content: pdfNum(totCosto), styles:{fontStyle:"bold"}}, "",
+        {content: pdfNum(totQuota), styles:{fontStyle:"bold"}},
+        {content: pdfNum(totFondo), styles:{fontStyle:"bold"}},
+        {content: pdfNum(totCosto - totFondo), styles:{fontStyle:"bold"}}
       ]);
       doc.autoTable({
         startY: 22,
@@ -6378,13 +6424,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       const movRows = movimenti
         .sort((a,b) => (a.data || "").localeCompare(b.data || ""))
         .map(m => [
-          m.tipo,
-          m.data || "",
+          m.tipo ? m.tipo.charAt(0).toUpperCase() + m.tipo.slice(1) : "",
+          pdfData(m.data),
           (m.contoLiquidita && contiMap[m.contoLiquidita]?.nome.trim()) || "—",
           m.tipo === "giroconto" ? (contiMap[m.contoLiquiditaDest]?.nome.trim() || "—") : (m.contoPdC ? `${m.contoPdC} ${contiMap[m.contoPdC]?.nome.trim() || ""}` : ""),
           m.categoria || "",
           m.bu || "",
-          m.importo.toFixed(2),
+          pdfNum(m.importo),
           (m.descrizione || "").slice(0, 70),
         ]);
       doc.autoTable({
@@ -7136,6 +7182,11 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
   const contiFondo = useMemo(() => (conti || [])
     .filter(c => (c.categoria || "").toUpperCase().includes("RETTIFICA"))
     .sort((a, b) => a.codice - b.codice), [conti]);
+  // Conti che accolgono il COSTO STORICO dei beni: servono per riconciliare
+  // il libro cespiti con la contabilita' (vedi quadraturaCosti piu' sotto).
+  const contiCespite = useMemo(() => (conti || [])
+    .filter(c => ["IMM. MATERIALI", "IMM. IMMATERIALI"].includes((c.categoria || "").toUpperCase()))
+    .sort((a, b) => a.codice - b.codice), [conti]);
 
   // Abbinamento automatico cespite → conto (per parole chiave del nome)
   const STOPWORDS = ["AMMORTAMENTO", "AMMORTAMENTI", "FONDO", "AMM", "DEL", "DELLA", "DEI", "PER", "CON", "CONTO"];
@@ -7166,6 +7217,7 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
     const importo = Math.round(Math.min(quota, residuo) * 100) / 100;
     const gAmm = c.conto_amm != null ? { codice: Number(c.conto_amm), score: 1 } : abbina(c.conto, contiCosto);
     const gFondo = c.conto_fondo != null ? { codice: Number(c.conto_fondo), score: 1 } : abbina(c.conto, contiFondo);
+    const gCesp = c.conto_cespite != null ? { codice: Number(c.conto_cespite), score: 1 } : abbina(c.conto, contiCespite);
     return {
       key: c._key,
       nome: c.conto,
@@ -7175,12 +7227,14 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
       limitato: quota - importo > 0.005,
       contoAmm: gAmm.codice,
       contoFondo: gFondo.codice,
+      contoCespite: gCesp.codice,
       incerto: gAmm.score < 0.99 || gFondo.score < 0.99,
       bu: c.bu_amm || c.buLedger || "GENERAL",
       giaRegistrato: !!(c.amm_reg && c.amm_reg.scritturaId),
       fondoPrec: Number(c.fondo_ammortamento) || 0,
+      costoStorico: Number(c.costo_storico) || 0,
     };
-  }), [piano, contiCosto, contiFondo]);
+  }), [piano, contiCosto, contiFondo, contiCespite]);
 
   const daRegistrare = proposte.filter(r => !r.giaRegistrato && r.importo > 0.005);
   const registrate = proposte.filter(r => r.giaRegistrato);
@@ -7365,6 +7419,61 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
     return { righe, fuoriQuadratura, senzaConto };
   }, [proposte, piano, contiFondo, mastriniMap, contiMap]);
 
+  // ---------- Quadratura COSTI STORICI: libro cespiti vs contabilita' ----------
+  // Il controllo che mancava. Confronta, conto per conto, il costo storico
+  // scritto nelle schede cespite con il saldo DARE del conto immobilizzazione.
+  // Intercetta i tre casi visti a bilancio:
+  //  - acquisto registrato in contabilita' ma non aggiunto al libro (2a tranche
+  //    gomma piuma: il bene non viene ammortizzato);
+  //  - bene nel libro senza un conto abbinato (pompa palloni);
+  //  - bene svalutato/stornato in contabilita' ma ancora "vivo" nel libro (gazebo).
+  const quadraturaCosti = useMemo(() => {
+    const perConto = {};
+    const senzaConto = [];
+    proposte.forEach(r => {
+      const costo = Number(r.costoStorico) || 0;
+      if (!r.contoCespite) {
+        if (costo > 0.005) senzaConto.push({ nome: r.nome, costo });
+        return;
+      }
+      if (!perConto[r.contoCespite]) perConto[r.contoCespite] = { codice: Number(r.contoCespite), cespiti: [], schede: 0 };
+      perConto[r.contoCespite].cespiti.push(r.nome);
+      perConto[r.contoCespite].schede += costo;
+    });
+    // Conti immobilizzazione movimentati ma senza alcuna scheda abbinata
+    contiCespite.forEach(c => {
+      const mst = mastriniMap[Number(c.codice)];
+      const saldo = mst ? (mst.dare - mst.avere) : 0;
+      if (!perConto[c.codice] && Math.abs(saldo) > 0.005) {
+        perConto[c.codice] = { codice: Number(c.codice), cespiti: [], schede: 0 };
+      }
+    });
+    const righe = Object.values(perConto).map(x => {
+      const mst = mastriniMap[x.codice];
+      const contabile = mst ? (mst.dare - mst.avere) : 0;   // conti attivi: saldo DARE
+      const diff = Math.round((x.schede - contabile) * 100) / 100;
+      return {
+        ...x,
+        nome: contiMap[x.codice]?.nome?.trim() || `Conto ${x.codice}`,
+        contabile,
+        diff,
+        // diff < 0 -> in contabilita' c'e' piu' di quanto risulti in libro:
+        //             manca una scheda (o una tranche) e quel valore non si ammortizza
+        // diff > 0 -> il libro tiene in vita un bene che la contabilita' ha gia' ridotto
+        verso: diff < 0 ? "manca-in-libro" : "manca-in-contabilita",
+      };
+    }).sort((a, b) => a.codice - b.codice);
+    const fuoriQuadratura = righe.filter(r => Math.abs(r.diff) > 0.01);
+    const totSchede = righe.reduce((s, r) => s + r.schede, 0) + senzaConto.reduce((s, r) => s + r.costo, 0);
+    const totContabile = righe.reduce((s, r) => s + r.contabile, 0);
+    return {
+      righe, fuoriQuadratura, senzaConto,
+      totSchede: Math.round(totSchede * 100) / 100,
+      totContabile: Math.round(totContabile * 100) / 100,
+      totDiff: Math.round((totSchede - totContabile) * 100) / 100,
+    };
+  }, [proposte, contiCespite, mastriniMap, contiMap]);
+
   return (
     <div>
       <div className="page-head">
@@ -7424,6 +7533,20 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
             <span>{quadraturaFondi.senzaConto.length} cespit{quadraturaFondi.senzaConto.length === 1 ? "e è" : "i sono"} senza conto fondo abbinato ({quadraturaFondi.senzaConto.map(r => r.nome).join(", ")}).</span>
           )}
           <div style={{marginTop:4, fontSize:12}}>Dettaglio nella tabella "Quadratura fondi" in fondo alla pagina.</div>
+        </div>
+      )}
+
+      {(quadraturaCosti.fuoriQuadratura.length > 0 || quadraturaCosti.senzaConto.length > 0) && (
+        <div style={{padding:"12px 16px", background:"var(--danger-soft)", border:"1px solid var(--danger)", borderRadius:8, fontSize:13, marginBottom:16, color:"var(--danger)"}}>
+          <strong>⚠ Costo storico non allineato.</strong>{" "}
+          <span>Libro cespiti {fmtEuro(quadraturaCosti.totSchede)} · contabilità {fmtEuro(quadraturaCosti.totContabile)} · differenza {fmtEuro(quadraturaCosti.totDiff)}. </span>
+          {quadraturaCosti.fuoriQuadratura.length > 0 && (
+            <span>{quadraturaCosti.fuoriQuadratura.length} cont{quadraturaCosti.fuoriQuadratura.length === 1 ? "o immobilizzazione non quadra" : "i immobilizzazione non quadrano"} ({quadraturaCosti.fuoriQuadratura.map(r => r.nome).join(", ")}). </span>
+          )}
+          {quadraturaCosti.senzaConto.length > 0 && (
+            <span>{quadraturaCosti.senzaConto.length} cespit{quadraturaCosti.senzaConto.length === 1 ? "e è" : "i sono"} nel libro senza un conto immobilizzazione abbinato ({quadraturaCosti.senzaConto.map(r => r.nome).join(", ")}).</span>
+          )}
+          <div style={{marginTop:4, fontSize:12}}>Dettaglio nella tabella "Quadratura costo storico" in fondo alla pagina. Un bene che sta in contabilità ma non nel libro <strong>non viene ammortizzato</strong>.</div>
         </div>
       )}
 
@@ -7579,6 +7702,73 @@ function PageAmmortamenti({ cespiti, movimenti, conti, bu, saldiIniziali, stagio
       </div>
       <div style={{marginTop:10, fontSize:12, color:"var(--ink-3)"}}>
         Confronto fra il <strong>fondo ammortamento scritto sulla scheda cespite</strong> e il <strong>saldo del conto fondo in libro giornale</strong> (avere − dare, aperture comprese). Una differenza segnala un ammortamento registrato a mano senza aggiornare la scheda, uno storno parziale o un abbinamento sbagliato.
+      </div>
+
+      <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:"28px 0 12px"}}>Quadratura costo storico</h3>
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th style={{width:50}}>Cod.</th>
+              <th>Conto immobilizzazione</th>
+              <th>Cespiti abbinati</th>
+              <th className="num" style={{width:130}}>Libro cespiti</th>
+              <th className="num" style={{width:130}}>Saldo contabile</th>
+              <th className="num" style={{width:120}}>Differenza</th>
+              <th style={{width:220}}>Cosa significa</th>
+            </tr>
+          </thead>
+          <tbody>
+            {quadraturaCosti.righe.length === 0 && (
+              <tr><td colSpan={7} style={{color:"var(--ink-3)"}}>Nessun conto immobilizzazione movimentato o abbinato.</td></tr>
+            )}
+            {quadraturaCosti.righe.map(r => {
+              const ko = Math.abs(r.diff) > 0.01;
+              return (
+                <tr key={r.codice} style={ko ? {background:"var(--danger-soft)"} : {}}>
+                  <td className="mono" style={{fontWeight:600}}>{String(r.codice).padStart(2,"0")}</td>
+                  <td>{r.nome}</td>
+                  <td style={{fontSize:12, color:"var(--ink-2)"}}>{r.cespiti.length ? r.cespiti.join(", ") : <span style={{color:"var(--danger)"}}>nessuna scheda abbinata</span>}</td>
+                  <td className="num">{fmt(r.schede)}</td>
+                  <td className="num">{fmt(r.contabile)}</td>
+                  <td className="num" style={{fontWeight: ko ? 700 : 400, color: ko ? "var(--danger)" : "var(--ok)"}}>
+                    {ko ? (r.diff > 0 ? "+" : "") + fmt(r.diff) : "✓"}
+                  </td>
+                  <td style={{fontSize:12, color: ko ? "var(--danger)" : "var(--ink-3)"}}>
+                    {!ko ? "—"
+                      : r.verso === "manca-in-libro"
+                        ? "In contabilità c'è più del libro: manca una scheda o una tranche d'acquisto → quel valore non si ammortizza."
+                        : "Il libro tiene in vita un valore che la contabilità ha già ridotto (svalutazione, storno o vendita non riportata sulla scheda)."}
+                  </td>
+                </tr>
+              );
+            })}
+            {quadraturaCosti.senzaConto.map(r => (
+              <tr key={"nc_cost_" + r.nome} style={{background:"var(--danger-soft)"}}>
+                <td className="mono">—</td>
+                <td style={{color:"var(--danger)"}}>Conto immobilizzazione mancante</td>
+                <td style={{fontSize:12}}>{r.nome}</td>
+                <td className="num">{fmt(r.costo)}</td>
+                <td className="num">—</td>
+                <td className="num" style={{color:"var(--danger)", fontWeight:700}}>?</td>
+                <td style={{fontSize:12, color:"var(--danger)"}}>Bene solo nel libro: nessun conto lo accoglie, quindi non compare nello stato patrimoniale.</td>
+              </tr>
+            ))}
+            <tr style={{fontWeight:700, borderTop:"2px solid var(--rule)"}}>
+              <td></td>
+              <td colSpan={2}>TOTALI</td>
+              <td className="num">{fmt(quadraturaCosti.totSchede)}</td>
+              <td className="num">{fmt(quadraturaCosti.totContabile)}</td>
+              <td className="num" style={{color: Math.abs(quadraturaCosti.totDiff) > 0.01 ? "var(--danger)" : "var(--ok)"}}>
+                {Math.abs(quadraturaCosti.totDiff) > 0.01 ? fmt(quadraturaCosti.totDiff) : "✓"}
+              </td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style={{marginTop:10, fontSize:12, color:"var(--ink-3)"}}>
+        Confronto fra il <strong>costo storico delle schede cespite</strong> e il <strong>saldo dei conti immobilizzazione in libro giornale</strong> (dare − avere, aperture comprese). È il controllo che chiude il cerchio con la quadratura dei fondi: se i due totali non coincidono, il libro cespiti e il bilancio raccontano due storie diverse sul valore dei beni.
       </div>
 
       {modaleConti && (
@@ -12867,8 +13057,10 @@ function normalizzaSchema(s) {
   const out = { sp: s.sp || d.sp, ce: s.ce || d.ce, rf: s.rf || d.rf };
   out.rf.aree = (out.rf.aree || d.rf.aree).map(a => {
     if (a.voci) return { ...a, voci: (a.voci || []).map(v => ({ ...v, categorie: v.categorie || [] })) };
+    // "Categorie" era un nome segnaposto della vecchia migrazione: nel PDF
+    // usciva come "1. Categorie", che non dice nulla. Meglio un nome parlante.
     const voci = (a.categorie && a.categorie.length)
-      ? [{ id: uid(), codice: "", nome: "Categorie", categorie: a.categorie }]
+      ? [{ id: uid(), codice: "", nome: "Altri flussi non classificati", categorie: a.categorie }]
       : [];
     return { id: a.id, codice: a.codice, nome: a.nome, voci };
   });
@@ -12919,6 +13111,7 @@ function proponiMappatura(schema, conti) {
   const riserve = trova("sp", "Riserve");
   const debiti  = trova("sp", "Debiti");
   const altriRic = trova("ce", "Altri ricavi e proventi");
+  const servizi  = trova("ce", "Per servizi");
   const oneriDiv = trova("ce", "Oneri diversi di gestione");
   const ammort   = trova("ce", "Ammortamenti e svalutazioni");
   const finanz   = trova("ce", "Interessi e altri oneri finanziari");
@@ -12950,6 +13143,10 @@ function proponiMappatura(schema, conti) {
     else if (cat === "COSTI") {
       if (nome.startsWith("AMMORTAMENTO")) put(ammort, cod, 1);
       else if (nome.includes("ONERI VS BANCA") || nome.includes("FINANZIAR")) put(finanz, cod, 1);
+      // Le ritenute d'acconto trattenute sui compensi pagati a terzi NON sono
+      // imposte dell'associazione: sono parte del costo del servizio ricevuto.
+      // Vanno quindi fra i costi della produzione, non nella voce 20).
+      else if (nome.includes("RITENUT")) put(servizi || oneriDiv, cod, 1);
       else if (nome.includes("IMPOSTE")) put(imposte, cod, 1);
       else if (nome.includes("SOPRAVVENIEN") || nome.includes("PERDITE DA")) put(straord, cod, 1);
       else put(oneriDiv, cod, 1);
@@ -14064,6 +14261,59 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
   const prospetti = useMemo(() => schema ? calcolaProspetti(schema, mastrini) : null, [schema, mastrini]);
   const controlli = useMemo(() => schema ? controlliSchema(schema, mastrini, esclusi) : null, [schema, mastrini, esclusi]);
+
+  // Avvisi di classificazione: non bloccano nulla, segnalano voci che quadrano
+  // ma raccontano male i numeri. Lo schema e' salvato su Firebase, quindi una
+  // riclassifica va fatta qui a mano: questi avvisi dicono dove guardare.
+  const avvisiClassificazione = useMemo(() => {
+    if (!schema) return [];
+    const out = [];
+    const nomeDi = (c) => (contiMap?.[Number(c)]?.nome || `Conto ${c}`).trim();
+    // 1) Conto economico: cosa sta dentro la voce delle imposte
+    (schema.ce || []).forEach(cl => {
+      if (!/impost/i.test(cl.nome || "")) return;
+      (cl.voci || []).forEach(v => (v.conti || []).forEach(x => {
+        const n = nomeDi(x.c).toUpperCase();
+        if (/RITENUT/.test(n)) {
+          out.push({ grave: true, testo: `${x.c} ${nomeDi(x.c)} è classificato in "${cl.nome} · ${v.nome}". Le ritenute trattenute sui compensi pagati a terzi non sono imposte dell'associazione: fanno parte del costo del servizio (B — Costi della produzione, "Per servizi").` });
+        } else if (!/IMPOST/.test(n)) {
+          out.push({ grave: false, testo: `${x.c} ${nomeDi(x.c)} è nella voce delle imposte ma il nome non parla di imposte: verifica la classificazione.` });
+        }
+      }));
+    });
+    // 2) Rendiconto: sottovoci senza numero, senza categorie, o col nome segnaposto
+    (schema.rf?.aree || []).forEach(a => {
+      const voci = a.voci || [];
+      const conNumero = voci.filter(v => String(v.codice || "").trim() !== "").length;
+      voci.forEach(v => {
+        if (conNumero > 0 && String(v.codice || "").trim() === "") {
+          out.push({ grave: false, testo: `Rendiconto, area ${a.codice || a.nome}: la sottovoce "${v.nome}" è senza numero mentre le altre ce l'hanno. Usa "↻ Rinumera sottovoci".` });
+        }
+        if (/^categorie$/i.test((v.nome || "").trim())) {
+          out.push({ grave: true, testo: `Rendiconto, area ${a.codice || a.nome}: "${v.nome}" è un nome segnaposto ereditato dalla vecchia migrazione. Rinominala con il flusso che contiene (es. "Mezzi propri - Dividendi").` });
+        }
+        if (!(v.categorie || []).length) {
+          out.push({ grave: false, testo: `Rendiconto, area ${a.codice || a.nome}: la sottovoce "${v.nome}" non ha categorie assegnate, quindi esce sempre a zero nel PDF.` });
+        }
+        // 3) Categoria di cassa finita sotto una sottovoce che non la descrive
+        const REGOLE_CAT = [
+          { cat: /COMMERCIALIST/, voce: /commercialist|servizi|fornitor|altri pagament/i, attesa: 'una voce di pagamenti a fornitori/servizi' },
+          { cat: /RITENUT|IMPOST/, voce: /impost|ritenut/i,   attesa: '"Imposte/ritenute pagate"' },
+          { cat: /DIVIDEND/,      voce: /dividend|mezzi propri/i, attesa: '"Mezzi propri - Dividendi"' },
+          { cat: /SPONSOR/,       voce: /sponsor/i,            attesa: '"Incassi da sponsor"' },
+        ];
+        (v.categorie || []).forEach(c => {
+          REGOLE_CAT.forEach(r => {
+            if (r.cat.test(String(c).toUpperCase()) && !r.voce.test(v.nome || "")) {
+              out.push({ grave: true, testo: `Rendiconto, area ${a.codice || a.nome}: la categoria "${c}" è assegnata a "${v.nome}". Attesa ${r.attesa}.` });
+            }
+          });
+        });
+      });
+    });
+    return out;
+  }, [schema, contiMap]);
+
   const rfDir = useMemo(() => schema ? rendicontoDiretto(schema, movimenti, saldiIniziali) : null, [schema, movimenti, saldiIniziali]);
   const rfRicl = useMemo(() => (schema && prospetti) ? rendicontoRiclassificato(schema, prospetti, mastrini, mastriniIniziali, contiMap) : null,
     [schema, prospetti, mastrini, mastriniIniziali, contiMap]);
@@ -14195,8 +14445,23 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         if (!area.voci.some(v => v.nome === nome)) area.voci.push({ id: uid(), codice: "", nome, categorie: [] });
       });
     });
+    rinumeraVociRF(s);
     aggiorna(s);
-    onToast && onToast("Sottovoci consigliate aggiunte: assegna ora le categorie a ciascuna");
+    onToast && onToast("Sottovoci consigliate aggiunte e rinumerate: assegna ora le categorie a ciascuna");
+  };
+  // Rinumera 1..n le sottovoci di ogni area del rendiconto. Senza questo, una
+  // voce aggiunta a mano resta senza codice e nel PDF esce senza numero
+  // in mezzo a voci numerate (era il caso di "Incassi da sponsor").
+  const rinumeraVociRF = (s) => {
+    (s.rf?.aree || []).forEach(a => {
+      (a.voci || []).forEach((v, i) => { v.codice = String(i + 1); });
+    });
+    return s;
+  };
+  const rinumeraVociRFAzione = () => {
+    const s = rinumeraVociRF(clone());
+    aggiorna(s);
+    onToast && onToast("Sottovoci del rendiconto rinumerate 1..n per ogni area");
   };
   const escludiConto = (cod) => aggiorna(statoRef.current.schema, [...new Set([...esclusi, Number(cod)])]);
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
@@ -14298,6 +14563,21 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           ))}
       </div>
 
+      {avvisiClassificazione.length > 0 && ["sp", "ce", "rf", "prospetti"].includes(tab) && (
+        <div style={{ padding: "12px 16px", marginBottom: 16, borderRadius: 8,
+                      background: "#fff8e7", border: "1px solid #f0d860", color: "#7a5d00", fontSize: 13 }}>
+          <strong>Avvisi di classificazione ({avvisiClassificazione.length}).</strong>
+          <div style={{ fontSize: 12, margin: "4px 0 8px" }}>
+            Il bilancio quadra lo stesso: sono voci messe in una casella che non le descrive.
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
+            {avvisiClassificazione.map((a, i) => (
+              <li key={i} style={{ fontWeight: a.grave ? 600 : 400, marginBottom: 3 }}>{a.testo}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {(tab === "sp" || tab === "ce") && (
         <div>
           <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12, lineHeight: 1.55 }}>
@@ -14343,6 +14623,9 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             }}>+ Area</button>
             <button className="btn ghost" onClick={caricaVociConsigliateRF} title="Aggiunge le sottovoci standard di FUTSAL FABBRICO ASD alle 3 aree, senza toccare quelle già presenti">
               + Carica sottovoci consigliate
+            </button>
+            <button className="btn ghost" onClick={rinumeraVociRFAzione} title="Assegna i numeri 1..n alle sottovoci di ogni area, nell'ordine in cui sono elencate: nessuna voce resta senza numero nel PDF">
+              ↻ Rinumera sottovoci
             </button>
           </div>
 
