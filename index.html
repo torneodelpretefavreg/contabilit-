@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.21.0";
+const APP_VERSION = "3.21.1";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -14317,11 +14317,14 @@ function SBEditorClasse({ p, cl, api, contiMap, contiOrdinati, assegnati }) {
           )
         ))}
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn ghost sm" onClick={() => api.addVoce(p, cl.id)}>+ Voce</button>
-          <button className="btn ghost sm" onClick={() => api.addSottosezione(p, cl.id)}
-                  title="Inserisce un sottotitolo nell'elenco: le voci che aggiungi dopo compaiono raggruppate sotto di esso, finché non ne inserisci un'altra">
-            + Sotto-sezione
+          <button className="btn ghost sm" onClick={() => api.addVoce(p, cl.id)}
+                  title="Aggiunge una riga di bilancio a questa macroclasse (I, II, D…): ha conti propri e un totale. Per articolarla, usa '+ Sotto-voce' dentro la voce stessa.">
+            + Voce
           </button>
+          {/* "+ Sotto-sezione" rimosso dall'interfaccia: era un semplice sottotitolo
+              senza importo, e accanto a "+ Voce" e "+ Sotto-voce" confondeva e basta.
+              L'api addSottosezione e la resa restano, così le sotto-sezioni gia'
+              salvate nello schema continuano a funzionare. */}
         </div>
       </div>
     </div>
