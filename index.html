@@ -6500,7 +6500,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   // ============================================================
   // Prospetti e riepiloghi: importi in euro interi (stessa convenzione dei PDF ufficiali).
   // I fogli di dettaglio (movimenti, libro giornale, verifica) restano al centesimo.
-  const XL_MONEY = "#,##0";
+  const XL_MONEY = '#,##0;-#,##0;"-"';   // positivi ; negativi ; zero come trattino
   const XL_STILI = {
     sezione:    { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "2D5E3E" } } },
     sezioneNeg: { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "B54343" } } },
@@ -13179,6 +13179,205 @@ function rendicontoIndiretto(schema, mastriniFin, mastriniIni, contiMap) {
   };
 }
 
+// ---------- RENDICONTO RICLASSIFICATO (gestionale) ----------
+// Parte dal conto economico dello schema, lo riclassifica fino all'EBITDA e poi
+// scende verso la cassa: capitale circolante, investimenti, FCFF, gestione
+// finanziaria, FCFE, rapporti con i soci. La variazione calcolata deve coincidere
+// con la variazione effettiva della liquidita': se non coincide, c'e' un problema
+// di classificazione e lo scarto lo mostra.
+function rendicontoRiclassificato(schema, prospetti, mastriniFin, mastriniIni, contiMap) {
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const somma = l => r2((l || []).reduce((a, x) => a + (x.val || 0), 0));
+
+  // 1) Conto economico riclassificato, voce per voce dallo schema
+  const tipoClasse = (cl) => {
+    const nome = (cl.nome || "").toLowerCase();
+    const cod = String(cl.codice || "").toUpperCase();
+    if (/impost/.test(nome) || cod === "20" || cod === "22") return "imposte";
+    if (/straordinar/.test(nome) || cod === "E") return "straordinari";
+    if (/finanziar/.test(nome) || cod === "C") return "finanziaria";
+    if (/ammortament/.test(nome)) return "da";
+    return cl.segno >= 0 ? "ricavi" : "costi";
+  };
+  const ce = { ricavi: [], costi: [], da: [], finanziaria: [], straordinari: [], imposte: [] };
+  (prospetti?.ce || []).forEach(cl => {
+    const t = tipoClasse(cl);
+    const segno = cl.segno >= 0 ? 1 : -1;
+    (cl.voci || []).forEach(v => {
+      if (v.tipo === "sottosezione") return;
+      const val = r2(segno * (v.valore || 0));      // contributo al risultato
+      if (Math.abs(val) < 0.005) return;
+      let dest = t;
+      if (t === "costi" && /ammortament|svalutaz/i.test(v.nome || "")) dest = "da";
+      ce[dest].push({ nome: `${v.codice ? v.codice + ") " : ""}${v.nome}`, val });
+    });
+  });
+  const ricavi = somma(ce.ricavi), costi = somma(ce.costi);
+  const ebitda = r2(ricavi + costi);
+  const da = somma(ce.da);
+  const ebit = r2(ebitda + da);
+  const finanziaria = somma(ce.finanziaria), straordinari = somma(ce.straordinari), imposte = somma(ce.imposte);
+  const risultato = r2(ebit + finanziaria + straordinari + imposte);
+
+  // 2) Variazioni patrimoniali tra apertura e chiusura, conto per conto
+  const ini = {};
+  (mastriniIni || []).forEach(m => { ini[Number(m.codice)] = m.saldo || 0; });
+  const natMap = (schema && schema.rf && schema.rf.natura) || {};
+  const nat = (cod) => natMap[String(cod)] || naturaAuto(contiMap[cod]);
+  const g = { crediti: [], debiti: [], altroCirc: [], imm: [], fondo: [], patrimonio: [], finanziamento: [] };
+  let deltaEconomico = 0, liqIni = 0, liqFin = 0;
+  (mastriniFin || []).forEach(m => {
+    const cod = Number(m.codice);
+    const n = nat(cod);
+    if (n === "liquidita") { liqIni += ini[cod] || 0; liqFin += m.saldo || 0; return; }
+    const delta = r2((m.saldo || 0) - (ini[cod] || 0));
+    if (Math.abs(delta) < 0.005) return;
+    if (n === "economico") { deltaEconomico += delta; return; }
+    const voce = { codice: cod, nome: (m.nome || contiMap[cod]?.nome || `Conto ${cod}`).trim(), val: r2(-delta) };
+    if (n === "immobilizzazioni") { g.imm.push(voce); return; }
+    if (n === "fondo" || n === "patrimonio" || n === "finanziamento") { g[n].push(voce); return; }
+    const cat = (contiMap[cod]?.categoria || "").toUpperCase();
+    if (cat === "CREDITI") g.crediti.push(voce);
+    else if (cat === "DEBITI") g.debiti.push(voce);
+    else g.altroCirc.push(voce);
+  });
+  Object.values(g).forEach(l => l.sort((a, b) => Math.abs(b.val) - Math.abs(a.val)));
+
+  // conti economici movimentati ma non assegnati nello schema: altrimenti la cassa non quadra
+  const nonClassificato = r2(-deltaEconomico - risultato);
+
+  const varCrediti = somma(g.crediti), varDebiti = somma(g.debiti), varAltro = somma(g.altroCirc);
+  const flussoOperativo = r2(ebitda + varCrediti + varDebiti + varAltro + straordinari + imposte + nonClassificato);
+
+  const investimenti = r2(g.imm.filter(x => x.val < 0).reduce((a, x) => a + x.val, 0));
+  // cessioni, svalutazioni e fondi: al netto degli ammortamenti gia' riaggiunti sono cassa vera solo in caso di vendite
+  const altreImm = r2(g.imm.filter(x => x.val > 0).reduce((a, x) => a + x.val, 0) + somma(g.fondo) + da);
+  const fcff = r2(flussoOperativo + investimenti + altreImm);
+
+  const varFinanziamenti = somma(g.finanziamento);
+  const fcfe = r2(fcff + finanziaria + varFinanziamenti);
+
+  const distribuzioni = r2(g.patrimonio.filter(x => x.val < 0).reduce((a, x) => a + x.val, 0));
+  const apporti = r2(g.patrimonio.filter(x => x.val > 0).reduce((a, x) => a + x.val, 0));
+  const variazione = r2(fcfe + distribuzioni + apporti);
+  const variazioneEffettiva = r2(liqFin - liqIni);
+
+  return {
+    ce, ricavi, costi, ebitda, da, ebit, finanziaria, straordinari, imposte, risultato,
+    risultatoSchema: r2(prospetti?.risultato || 0),
+    dettagli: g, varCrediti, varDebiti, varAltro, nonClassificato,
+    flussoOperativo, investimenti, altreImm, fcff, varFinanziamenti, fcfe,
+    distribuzioni, apporti, variazione,
+    liqIni: r2(liqIni), liqFin: r2(liqFin), variazioneEffettiva,
+    scarto: r2(variazione - variazioneEffettiva),
+  };
+}
+
+// Righe del prospetto riclassificato, condivise tra schermo ed export.
+// tipo: "sez" titolo di sezione · "voce" riga normale · "tot" risultato intermedio ·
+// "fin" risultato finale · "det" dettaglio conto (solo se richiesto)
+function righeRfRiclassificato(R, conDettaglio) {
+  const out = [];
+  const add = (tipo, label, val, extra) => out.push({ tipo, label, val, ...(extra || {}) });
+  const det = (lista) => { if (conDettaglio) (lista || []).forEach(d => add("det", `${d.codice != null ? d.codice + " " : ""}${d.nome}`, d.val)); };
+
+  add("sez", "CONTO ECONOMICO RICLASSIFICATO");
+  add("voce", "Ricavi operativi", R.ricavi); det(R.ce.ricavi);
+  add("voce", "Costi operativi", R.costi); det(R.ce.costi);
+  add("tot", "EBITDA · Margine operativo lordo", R.ebitda);
+  add("voce", "Ammortamenti e svalutazioni", R.da); det(R.ce.da);
+  add("tot", "EBIT · Risultato operativo", R.ebit);
+  add("voce", "Gestione finanziaria", R.finanziaria); det(R.ce.finanziaria);
+  add("voce", "Componenti straordinarie", R.straordinari); det(R.ce.straordinari);
+  add("voce", "Imposte", R.imposte); det(R.ce.imposte);
+  add("fin", "RISULTATO D'ESERCIZIO", R.risultato);
+
+  add("sez", "DALLA REDDITIVITÀ ALLA CASSA");
+  add("tot", "EBITDA", R.ebitda);
+  add("voce", "Variazione crediti", R.varCrediti); det(R.dettagli.crediti);
+  add("voce", "Variazione debiti operativi", R.varDebiti); det(R.dettagli.debiti);
+  add("voce", "Altre variazioni del circolante", R.varAltro); det(R.dettagli.altroCirc);
+  add("voce", "Componenti straordinarie", R.straordinari);
+  add("voce", "Imposte", R.imposte);
+  if (Math.abs(R.nonClassificato) >= 0.5) add("voce", "Componenti economiche non assegnate nello schema", R.nonClassificato);
+  add("tot", "FLUSSO DI CASSA OPERATIVO", R.flussoOperativo);
+  add("voce", "Investimenti", R.investimenti); det(R.dettagli.imm.filter(x => x.val < 0));
+  add("voce", "Disinvestimenti e altre variazioni delle immobilizzazioni", R.altreImm);
+  add("tot", "FREE CASH FLOW OPERATIVO (FCFF)", R.fcff);
+  add("voce", "Gestione finanziaria", R.finanziaria);
+  add("voce", "Finanziamenti accesi / rimborsati", R.varFinanziamenti); det(R.dettagli.finanziamento);
+  add("tot", "FREE CASH FLOW PER I SOCI (FCFE)", R.fcfe);
+  add("voce", "Distribuzioni ai soci", R.distribuzioni); det(R.dettagli.patrimonio.filter(x => x.val < 0));
+  add("voce", "Apporti dei soci", R.apporti); det(R.dettagli.patrimonio.filter(x => x.val > 0));
+  add("fin", "VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", R.variazione);
+  add("voce", "Disponibilità liquide iniziali", R.liqIni);
+  add("voce", "Disponibilità liquide finali", R.liqFin);
+  return out;
+}
+
+// Vista a schermo (componente a livello di modulo, come gli altri editor dello schema)
+function SBRfRiclassificato({ R }) {
+  const [dettaglio, setDettaglio] = useState(false);
+  if (!R) return null;
+  const m0 = (n) => { const r = Math.round(Number(n) || 0); return r === 0 ? "-" : r.toLocaleString("it-IT"); };
+  const righe = righeRfRiclassificato(R, dettaglio);
+  const ok = Math.abs(R.scarto) < 0.5;
+  const okCe = Math.abs(R.risultato - R.risultatoSchema) < 0.5;
+  return (
+    <div className="card" style={{ maxWidth: 640, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+        <div className="card-title" style={{ margin: 0 }}>RF Riclassificato</div>
+        <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
+          <input type="checkbox" checked={dettaglio} onChange={e => setDettaglio(e.target.checked)} />
+          Mostra i conti
+        </label>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--ink-3)", margin: "6px 0 12px", lineHeight: 1.5 }}>
+        Dall'EBITDA al free cash flow. Legge le voci del conto economico dallo schema e le variazioni
+        patrimoniali tra apertura e chiusura, classificate secondo la natura dei conti impostata in Struttura RF.
+      </div>
+      <table style={{ width: "100%" }}>
+        <tbody>
+          {righe.map((r, i) => {
+            if (r.tipo === "sez") return (
+              <tr key={i}><td colSpan={2} style={{ paddingTop: i ? 18 : 4, fontFamily: "'Fraunces',serif", fontSize: 14,
+                                                  borderBottom: "1px solid var(--rule-2)" }}>{r.label}</td></tr>
+            );
+            if (r.tipo === "det") return (
+              <tr key={i}>
+                <td style={{ paddingLeft: 22, fontSize: 11.5, color: "var(--ink-3)" }}>{r.label}</td>
+                <td className="num" style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{m0(r.val)}</td>
+              </tr>
+            );
+            const tot = r.tipo === "tot", fin = r.tipo === "fin";
+            return (
+              <tr key={i} style={tot ? { background: "var(--panel-2)" } : fin ? { background: "var(--ink)", color: "#fff" } : {}}>
+                <td style={{ paddingLeft: tot || fin ? 8 : 12, fontWeight: tot || fin ? 700 : 400 }}>
+                  {r.label}
+                </td>
+                <td className={"num " + (!fin && r.val < -0.5 ? "neg" : "")} style={{ fontWeight: tot || fin ? 700 : 400, paddingRight: 8 }}>
+                  {m0(r.val)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div style={{ marginTop: 14, padding: "8px 12px", borderRadius: 6, fontSize: 12.5,
+                    background: ok ? "#e7f3ea" : "var(--danger-soft)", color: ok ? "var(--accent)" : "var(--danger)" }}>
+        {ok
+          ? `✓ Quadra con la variazione effettiva della liquidità (${m0(R.variazioneEffettiva)})`
+          : `✗ Scarto di ${m0(R.scarto)} rispetto alla variazione effettiva della liquidità (${m0(R.variazioneEffettiva)}): c'è un conto classificato male o una natura da correggere in Struttura RF.`}
+      </div>
+      {!okCe && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}>
+          ⚠ Il risultato riclassificato ({m0(R.risultato)}) non coincide con quello del conto economico ({m0(R.risultatoSchema)}).
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- EDITOR (componenti a livello di modulo: NON ricrearli dentro il
 // render della pagina, altrimenti React rimonta gli input a ogni carattere) ----------
 
@@ -13210,7 +13409,11 @@ function SBPillConto({ x, nome, saldo, onSegno, onRimuovi }) {
 function creaPdfBuilder(stagione, orientamento, docEsistente) {
   const { jsPDF } = window.jspdf;
   const doc = docEsistente || new jsPDF({ orientation: orientamento || "portrait", unit: "mm", format: "a4" });
-  const money = n => Math.round(Number(n) || 0).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+  // Importi interi; lo zero si scrive "-" come nei prospetti di bilancio classici
+  const money = n => {
+    const r = Math.round(Number(n) || 0);
+    return r === 0 ? "-" : r.toLocaleString("it-IT", { maximumFractionDigits: 0 });
+  };
   const oggi = new Date().toLocaleDateString("it-IT");
   const VERDE = [45, 94, 62], ROSSO = [181, 67, 67], NERO = [26, 26, 26];
   const VERDE_CHIARO = [230, 240, 232], ROSSO_CHIARO = [251, 236, 236], GRIGIO_CHIARO = [238, 238, 234];
@@ -13740,7 +13943,7 @@ function SBEditorArea({ area, api, categorieTutte, assegnateAltrove }) {
 // ---------- PAGINA ----------
 
 function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast }) {
-  const [tab, setTab] = useState("sp");   // sp | ce | rf | prospetti | controlli
+  const [tab, setTab] = useState("sp");   // sp | ce | rf | rfr | prospetti | controlli
   const [schema, setSchema] = useState(null);
   const [esclusi, setEsclusi] = useState([]);
   const [caricato, setCaricato] = useState(false);
@@ -13839,6 +14042,8 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const prospetti = useMemo(() => schema ? calcolaProspetti(schema, mastrini) : null, [schema, mastrini]);
   const controlli = useMemo(() => schema ? controlliSchema(schema, mastrini, esclusi) : null, [schema, mastrini, esclusi]);
   const rfDir = useMemo(() => schema ? rendicontoDiretto(schema, movimenti, saldiIniziali) : null, [schema, movimenti, saldiIniziali]);
+  const rfRicl = useMemo(() => (schema && prospetti) ? rendicontoRiclassificato(schema, prospetti, mastrini, mastriniIniziali, contiMap) : null,
+    [schema, prospetti, mastrini, mastriniIniziali, contiMap]);
   const rfInd = useMemo(() => schema ? rendicontoIndiretto(schema, mastrini, mastriniIniziali, contiMap) : null,
     [schema, mastrini, mastriniIniziali, contiMap]);
 
@@ -14062,7 +14267,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       </div>
 
       <div className="filters" style={{ marginBottom: 14, display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {[["sp", "Struttura SP"], ["ce", "Struttura CE"], ["rf", "Struttura RF"],
+        {[["sp", "Struttura SP"], ["ce", "Struttura CE"], ["rf", "Struttura RF"], ["rfr", "RF Riclassificato"],
           ["prospetti", "Anteprima prospetti"],
           ["controlli", `Controlli${controlli.mancanti.length + controlli.doppi.length > 0 ? " ⚠" : ""}`]]
           .map(([k, label]) => (
@@ -14173,6 +14378,8 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           </div>
         </div>
       )}
+
+      {tab === "rfr" && <SBRfRiclassificato R={rfRicl} />}
 
       {tab === "prospetti" && (
         <div style={{ display: "grid", gap: 18 }}>
