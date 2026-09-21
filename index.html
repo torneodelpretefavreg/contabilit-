@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.19.0";
+const APP_VERSION = "3.20.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -13146,6 +13146,92 @@ const REGOLE_CAT_RF = [
   { cat: /SPONSOR/,       voce: /sponsor/i,                    attesa: '"Incassi da sponsor"',        auto: false },
 ];
 
+// Rinumera 1..n le sottovoci di ogni area del rendiconto. Senza questo, una
+// voce aggiunta a mano resta senza codice e nel PDF esce senza numero
+// in mezzo a voci numerate (era il caso di "Incassi da sponsor").
+function rinumeraVociRF(s) {
+  (s.rf?.aree || []).forEach(a => {
+    (a.voci || []).forEach((v, i) => { v.codice = String(i + 1); });
+  });
+  return s;
+}
+
+// Calcola le correzioni di classificazione applicabili allo schema.
+// Funzione pura: restituisce lo schema corretto e l'elenco di cosa cambia,
+// senza scrivere nulla. Serve sia al pulsante (che applica) sia alla UI
+// (che deve sapere in anticipo se c'e' qualcosa da correggere).
+function calcolaCorrezioniSchema(schema, contiMap) {
+  if (!schema) return { schema: null, azioni: [] };
+  const s = JSON.parse(JSON.stringify(schema));
+  const azioni = [];
+  const nomeConto = (c) => (contiMap?.[Number(c)]?.nome || `Conto ${c}`).trim();
+
+
+  // 1) Conto economico: le ritenute escono dalla voce delle imposte.
+  const trovaVoceCE = (re) => {
+    for (const cl of (s.ce || [])) {
+      const v = (cl.voci || []).find(x => re.test(x.nome || ""));
+      if (v) return v;
+    }
+    return null;
+  };
+  const destServizi = trovaVoceCE(/per servizi/i) || trovaVoceCE(/oneri diversi/i);
+  (s.ce || []).forEach(cl => {
+    if (!/impost/i.test(cl.nome || "")) return;
+    (cl.voci || []).forEach(v => {
+      if (v === destServizi) return;
+      const restano = [];
+      (v.conti || []).forEach(x => {
+        if (/RITENUT/.test(nomeConto(x.c).toUpperCase()) && destServizi) {
+          destServizi.conti = destServizi.conti || [];
+          if (!destServizi.conti.some(y => Number(y.c) === Number(x.c))) destServizi.conti.push(x);
+          azioni.push(`CE · conto ${x.c} ${nomeConto(x.c)}: da "${v.nome}" a "${destServizi.nome}"`);
+        } else restano.push(x);
+      });
+      v.conti = restano;
+    });
+  });
+
+  // 2) Rendiconto: ogni categoria va sulla sottovoce che la descrive,
+  //    cercando la destinazione nella stessa area (il flusso non cambia area).
+  (s.rf?.aree || []).forEach(a => {
+    (a.voci || []).forEach(v => {
+      const restano = [];
+      (v.categorie || []).forEach(c => {
+        const r = REGOLE_CAT_RF.find(x => x.auto && x.cat.test(String(c).toUpperCase()) && !x.voce.test(v.nome || ""));
+        const dest = r ? (a.voci || []).find(x => x !== v && r.voce.test(x.nome || "")) : null;
+        if (dest) {
+          dest.categorie = [...new Set([...(dest.categorie || []), c])].sort();
+          azioni.push(`RF · categoria "${c}": da "${v.nome}" a "${dest.nome}"`);
+        } else restano.push(c);
+      });
+      v.categorie = restano;
+    });
+  });
+
+  // 3) Il segnaposto "Categorie": eliminato se ormai vuoto, altrimenti rinominato.
+  (s.rf?.aree || []).forEach(a => {
+    a.voci = (a.voci || []).filter(v => {
+      if (!/^categorie$/i.test((v.nome || "").trim())) return true;
+      if (!(v.categorie || []).length) {
+        azioni.push(`RF · area ${a.codice || a.nome}: rimossa la sottovoce segnaposto "Categorie", ormai vuota`);
+        return false;
+      }
+      azioni.push(`RF · area ${a.codice || a.nome}: "Categorie" rinominata "Altri flussi non classificati"`);
+      v.nome = "Altri flussi non classificati";
+      return true;
+    });
+  });
+
+  // 4) Rinumerazione finale: nessuna voce resta senza numero nel PDF.
+  const primaDeiNumeri = JSON.stringify((s.rf?.aree || []).map(a => (a.voci || []).map(v => v.codice)));
+  rinumeraVociRF(s);
+  if (JSON.stringify((s.rf?.aree || []).map(a => (a.voci || []).map(v => v.codice))) !== primaDeiNumeri) {
+    azioni.push("RF · sottovoci rinumerate 1..n in ogni area");
+  }
+  return { schema: s, azioni };
+}
+
 // Proposta di mappatura automatica: assegna i conti alle voci in base
 // alla categoria del piano dei conti. I fondi ammortamento vanno alla
 // stessa voce del cespite che rettificano.
@@ -14359,7 +14445,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           out.push({ grave: true, testo: `Rendiconto, area ${a.codice || a.nome}: "${v.nome}" è un nome segnaposto ereditato dalla vecchia migrazione. Rinominala con il flusso che contiene (es. "Mezzi propri - Dividendi").` });
         }
         if (!(v.categorie || []).length) {
-          out.push({ grave: false, testo: `Rendiconto, area ${a.codice || a.nome}: la sottovoce "${v.nome}" non ha categorie assegnate, quindi esce sempre a zero nel PDF.` });
+          out.push({ tipo: "nota", testo: `Area ${a.codice || a.nome}: "${v.nome}" non ha categorie assegnate, quindi esce a zero nel PDF.` });
         }
         // 3) Categoria di cassa finita sotto una sottovoce che non la descrive
         (v.categorie || []).forEach(c => {
@@ -14372,8 +14458,18 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         });
       });
     });
-    return out;
+    return out.map(a => ({ tipo: "azione", ...a }));
   }, [schema, contiMap]);
+
+  // Le note informative (sottovoci strutturalmente vuote) non sono errori:
+  // le tengo separate dagli avvisi, altrimenti il banner resta acceso per
+  // sempre su cose che non vanno toccate e si smette di leggerlo.
+  const avvisiAzione = useMemo(() => avvisiClassificazione.filter(a => a.tipo === "azione"), [avvisiClassificazione]);
+  const avvisiNota   = useMemo(() => avvisiClassificazione.filter(a => a.tipo === "nota"), [avvisiClassificazione]);
+
+  // Dry run della correzione automatica: la UI sa in anticipo quante e quali
+  // correzioni verrebbero applicate, così il pulsante compare solo se serve.
+  const correzioniSchema = useMemo(() => calcolaCorrezioniSchema(schema, contiMap), [schema, contiMap]);
 
   const rfDir = useMemo(() => schema ? rendicontoDiretto(schema, movimenti, saldiIniziali) : null, [schema, movimenti, saldiIniziali]);
   const rfRicl = useMemo(() => (schema && prospetti) ? rendicontoRiclassificato(schema, prospetti, mastrini, mastriniIniziali, contiMap) : null,
@@ -14510,15 +14606,6 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     aggiorna(s);
     onToast && onToast("Sottovoci consigliate aggiunte e rinumerate: assegna ora le categorie a ciascuna");
   };
-  // Rinumera 1..n le sottovoci di ogni area del rendiconto. Senza questo, una
-  // voce aggiunta a mano resta senza codice e nel PDF esce senza numero
-  // in mezzo a voci numerate (era il caso di "Incassi da sponsor").
-  const rinumeraVociRF = (s) => {
-    (s.rf?.aree || []).forEach(a => {
-      (a.voci || []).forEach((v, i) => { v.codice = String(i + 1); });
-    });
-    return s;
-  };
   const rinumeraVociRFAzione = () => {
     const s = rinumeraVociRF(clone());
     aggiorna(s);
@@ -14531,79 +14618,13 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   // quindi totali, risultato e quadrature non si muovono. Una sola scrittura
   // dello schema su Firebase, poi l'app si riallinea da sola.
   const correggiSchemaAutomaticamente = () => {
-    const s = clone();
-    const azioni = [];
-    const nomeConto = (c) => (contiMap?.[Number(c)]?.nome || `Conto ${c}`).trim();
-
-    // 1) Conto economico: le ritenute escono dalla voce delle imposte.
-    const trovaVoceCE = (re) => {
-      for (const cl of (s.ce || [])) {
-        const v = (cl.voci || []).find(x => re.test(x.nome || ""));
-        if (v) return v;
-      }
-      return null;
-    };
-    const destServizi = trovaVoceCE(/per servizi/i) || trovaVoceCE(/oneri diversi/i);
-    (s.ce || []).forEach(cl => {
-      if (!/impost/i.test(cl.nome || "")) return;
-      (cl.voci || []).forEach(v => {
-        if (v === destServizi) return;
-        const restano = [];
-        (v.conti || []).forEach(x => {
-          if (/RITENUT/.test(nomeConto(x.c).toUpperCase()) && destServizi) {
-            destServizi.conti = destServizi.conti || [];
-            if (!destServizi.conti.some(y => Number(y.c) === Number(x.c))) destServizi.conti.push(x);
-            azioni.push(`CE · conto ${x.c} ${nomeConto(x.c)}: da "${v.nome}" a "${destServizi.nome}"`);
-          } else restano.push(x);
-        });
-        v.conti = restano;
-      });
-    });
-
-    // 2) Rendiconto: ogni categoria va sulla sottovoce che la descrive,
-    //    cercando la destinazione nella stessa area (il flusso non cambia area).
-    (s.rf?.aree || []).forEach(a => {
-      (a.voci || []).forEach(v => {
-        const restano = [];
-        (v.categorie || []).forEach(c => {
-          const r = REGOLE_CAT_RF.find(x => x.auto && x.cat.test(String(c).toUpperCase()) && !x.voce.test(v.nome || ""));
-          const dest = r ? (a.voci || []).find(x => x !== v && r.voce.test(x.nome || "")) : null;
-          if (dest) {
-            dest.categorie = [...new Set([...(dest.categorie || []), c])].sort();
-            azioni.push(`RF · categoria "${c}": da "${v.nome}" a "${dest.nome}"`);
-          } else restano.push(c);
-        });
-        v.categorie = restano;
-      });
-    });
-
-    // 3) Il segnaposto "Categorie": eliminato se ormai vuoto, altrimenti rinominato.
-    (s.rf?.aree || []).forEach(a => {
-      a.voci = (a.voci || []).filter(v => {
-        if (!/^categorie$/i.test((v.nome || "").trim())) return true;
-        if (!(v.categorie || []).length) {
-          azioni.push(`RF · area ${a.codice || a.nome}: rimossa la sottovoce segnaposto "Categorie", ormai vuota`);
-          return false;
-        }
-        azioni.push(`RF · area ${a.codice || a.nome}: "Categorie" rinominata "Altri flussi non classificati"`);
-        v.nome = "Altri flussi non classificati";
-        return true;
-      });
-    });
-
-    // 4) Rinumerazione finale: nessuna voce resta senza numero nel PDF.
-    const primaDeiNumeri = JSON.stringify((s.rf?.aree || []).map(a => (a.voci || []).map(v => v.codice)));
-    rinumeraVociRF(s);
-    if (JSON.stringify((s.rf?.aree || []).map(a => (a.voci || []).map(v => v.codice))) !== primaDeiNumeri) {
-      azioni.push("RF · sottovoci rinumerate 1..n in ogni area");
-    }
-
+    const { schema: corretto, azioni } = correzioniSchema;
     if (!azioni.length) {
       onToast && onToast("Niente da correggere: la classificazione è già coerente");
       return;
     }
     if (!confirm(`Applicare ${azioni.length} correzion${azioni.length === 1 ? "e" : "i"} allo schema?\n\n${azioni.join("\n")}\n\nNessun importo viene modificato: cambia solo la voce in cui ciascun saldo viene esposto. Risultato d'esercizio, totali e quadrature restano identici.`)) return;
-    aggiorna(s);
+    aggiorna(corretto);
     onToast && onToast(`${azioni.length} correzion${azioni.length === 1 ? "e applicata" : "i applicate"} allo schema`);
   };
   const escludiConto = (cod) => aggiorna(statoRef.current.schema, [...new Set([...esclusi, Number(cod)])]);
@@ -14706,30 +14727,50 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           ))}
       </div>
 
-      {avvisiClassificazione.length > 0 && ["sp", "ce", "rf", "prospetti"].includes(tab) && (
+      {avvisiAzione.length > 0 && ["sp", "ce", "rf", "prospetti"].includes(tab) && (
         <div style={{ padding: "12px 16px", marginBottom: 16, borderRadius: 8,
                       background: "#fff8e7", border: "1px solid #f0d860", color: "#7a5d00", fontSize: 13 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: 260 }}>
-              <strong>Avvisi di classificazione ({avvisiClassificazione.length}).</strong>
+              <strong>Da sistemare ({avvisiAzione.length}).</strong>
               <div style={{ fontSize: 12, marginTop: 4 }}>
                 Il bilancio quadra lo stesso: sono voci messe in una casella che non le descrive.
               </div>
             </div>
-            <button className="btn accent" onClick={correggiSchemaAutomaticamente}
-                    title="Sposta conti e categorie nella voce corretta, rinomina il segnaposto e rinumera le sottovoci. Gli importi non cambiano.">
-              🔧 Correggi automaticamente
-            </button>
+            {correzioniSchema.azioni.length > 0 && (
+              <button className="btn accent" onClick={correggiSchemaAutomaticamente}
+                      title={correzioniSchema.azioni.join("\n")}>
+                🔧 Correggi automaticamente ({correzioniSchema.azioni.length})
+              </button>
+            )}
           </div>
           <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.5 }}>
-            {avvisiClassificazione.map((a, i) => (
+            {avvisiAzione.map((a, i) => (
               <li key={i} style={{ fontWeight: a.grave ? 600 : 400, marginBottom: 3 }}>{a.testo}</li>
             ))}
           </ul>
-          <div style={{ fontSize: 11.5, marginTop: 8, opacity: 0.85 }}>
-            Le sottovoci senza categorie non vengono toccate: sono la struttura civilistica del rendiconto e stanno a zero per scelta.
-          </div>
+          {correzioniSchema.azioni.length < avvisiAzione.length && (
+            <div style={{ fontSize: 11.5, marginTop: 8, opacity: 0.85 }}>
+              Il pulsante ne sistema {correzioniSchema.azioni.length}: il resto richiede una scelta tua.
+            </div>
+          )}
         </div>
+      )}
+
+      {avvisiAzione.length === 0 && avvisiNota.length > 0 && ["sp", "ce", "rf", "prospetti"].includes(tab) && (
+        <details style={{ marginBottom: 16, fontSize: 12.5, color: "var(--ink-2)",
+                          background: "var(--accent-soft)", border: "1px solid #c8d8ce", borderRadius: 8, padding: "10px 14px" }}>
+          <summary style={{ cursor: "pointer", color: "var(--accent-ink)", fontWeight: 600 }}>
+            ✓ Classificazione coerente · {avvisiNota.length} sottovoci vuote per scelta
+          </summary>
+          <div style={{ fontSize: 12, margin: "8px 0 6px" }}>
+            Sono la struttura civilistica del rendiconto: restano a zero finché non c'è un movimento di quel tipo.
+            Nessuna azione richiesta. Se sai di non usarle mai, puoi eliminarle qui sotto.
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
+            {avvisiNota.map((a, i) => <li key={i} style={{ marginBottom: 2 }}>{a.testo}</li>)}
+          </ul>
+        </details>
       )}
 
       {(tab === "sp" || tab === "ce") && (
