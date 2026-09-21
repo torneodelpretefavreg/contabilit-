@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.23.0";
+const APP_VERSION = "3.24.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -13819,41 +13819,62 @@ function rendicontoRiclassificato(schema, prospetti, mastriniFin, mastriniIni, c
 // "fin" risultato finale · "det" dettaglio conto (solo se richiesto)
 function righeRfRiclassificato(R, conDettaglio) {
   const out = [];
-  const add = (tipo, label, val, extra) => out.push({ tipo, label, val, ...(extra || {}) });
+  // add restituisce l'indice della riga, così i totali possono dichiarare da
+  // quali righe sono composti (campo `parti`). Serve solo per verificare se
+  // gli arrotondamenti all'unità producono una colonna che non somma a vista.
+  const add = (tipo, label, val, extra) => { out.push({ tipo, label, val, ...(extra || {}) }); return out.length - 1; };
   const det = (lista) => { if (conDettaglio) (lista || []).forEach(d => add("det", `${d.codice != null ? d.codice + " " : ""}${d.nome}`, d.val)); };
 
   add("sez", "CONTO ECONOMICO RICLASSIFICATO");
-  add("voce", "Ricavi operativi", R.ricavi); det(R.ce.ricavi);
-  add("voce", "Costi operativi", R.costi); det(R.ce.costi);
-  add("tot", "EBITDA · Margine operativo lordo", R.ebitda);
-  add("voce", "Ammortamenti e svalutazioni", R.da); det(R.ce.da);
-  add("tot", "EBIT · Risultato operativo", R.ebit);
-  add("voce", "Gestione finanziaria", R.finanziaria); det(R.ce.finanziaria);
-  add("voce", "Componenti straordinarie", R.straordinari); det(R.ce.straordinari);
-  add("voce", "Imposte", R.imposte); det(R.ce.imposte);
-  add("fin", "RISULTATO D'ESERCIZIO", R.risultato);
+  const iRic = add("voce", "Ricavi operativi", R.ricavi); det(R.ce.ricavi);
+  const iCos = add("voce", "Costi operativi", R.costi); det(R.ce.costi);
+  const iEbitda = add("tot", "EBITDA · Margine operativo lordo", R.ebitda, { parti: [iRic, iCos] });
+  const iDa = add("voce", "Ammortamenti e svalutazioni", R.da); det(R.ce.da);
+  const iEbit = add("tot", "EBIT · Risultato operativo", R.ebit, { parti: [iEbitda, iDa] });
+  const iFin = add("voce", "Gestione finanziaria", R.finanziaria); det(R.ce.finanziaria);
+  const iStr = add("voce", "Componenti straordinarie", R.straordinari); det(R.ce.straordinari);
+  const iImp = add("voce", "Imposte", R.imposte); det(R.ce.imposte);
+  add("fin", "RISULTATO D'ESERCIZIO", R.risultato, { parti: [iEbit, iFin, iStr, iImp] });
 
   add("sez", "DALLA REDDITIVITÀ ALLA CASSA");
-  add("tot", "EBITDA", R.ebitda);
-  add("voce", "Variazione crediti", R.varCrediti); det(R.dettagli.crediti);
-  add("voce", "Variazione debiti operativi", R.varDebiti); det(R.dettagli.debiti);
-  add("voce", "Altre variazioni del circolante", R.varAltro); det(R.dettagli.altroCirc);
-  add("voce", "Componenti straordinarie", R.straordinari);
-  add("voce", "Imposte", R.imposte);
-  if (Math.abs(R.nonClassificato) >= 0.5) add("voce", "Componenti economiche non assegnate nello schema", R.nonClassificato);
-  add("tot", "FLUSSO DI CASSA OPERATIVO", R.flussoOperativo);
-  add("voce", "Investimenti", R.investimenti); det(R.dettagli.imm.filter(x => x.val < 0));
-  add("voce", "Disinvestimenti e altre variazioni delle immobilizzazioni", R.altreImm);
-  add("tot", "FREE CASH FLOW OPERATIVO (FCFF)", R.fcff);
-  add("voce", "Gestione finanziaria", R.finanziaria);
-  add("voce", "Finanziamenti accesi / rimborsati", R.varFinanziamenti); det(R.dettagli.finanziamento);
-  add("tot", "FREE CASH FLOW PER I SOCI (FCFE)", R.fcfe);
-  add("voce", "Distribuzioni ai soci", R.distribuzioni); det(R.dettagli.patrimonio.filter(x => x.val < 0));
-  add("voce", "Apporti dei soci", R.apporti); det(R.dettagli.patrimonio.filter(x => x.val > 0));
-  add("fin", "VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", R.variazione);
+  const iEbitda2 = add("tot", "EBITDA", R.ebitda);
+  const pOp = [iEbitda2];
+  pOp.push(add("voce", "Variazione crediti", R.varCrediti)); det(R.dettagli.crediti);
+  pOp.push(add("voce", "Variazione debiti operativi", R.varDebiti)); det(R.dettagli.debiti);
+  pOp.push(add("voce", "Altre variazioni del circolante", R.varAltro)); det(R.dettagli.altroCirc);
+  pOp.push(add("voce", "Componenti straordinarie", R.straordinari));
+  pOp.push(add("voce", "Imposte", R.imposte));
+  if (Math.abs(R.nonClassificato) >= 0.5) pOp.push(add("voce", "Componenti economiche non assegnate nello schema", R.nonClassificato));
+  const iFlusso = add("tot", "FLUSSO DI CASSA OPERATIVO", R.flussoOperativo, { parti: pOp });
+  const iInv = add("voce", "Investimenti", R.investimenti); det(R.dettagli.imm.filter(x => x.val < 0));
+  const iAltreImm = add("voce", "Disinvestimenti e altre variazioni delle immobilizzazioni", R.altreImm);
+  const iFcff = add("tot", "FREE CASH FLOW OPERATIVO (FCFF)", R.fcff, { parti: [iFlusso, iInv, iAltreImm] });
+  const iFin2 = add("voce", "Gestione finanziaria", R.finanziaria);
+  const iVarFin = add("voce", "Finanziamenti accesi / rimborsati", R.varFinanziamenti); det(R.dettagli.finanziamento);
+  const iFcfe = add("tot", "FREE CASH FLOW PER I SOCI (FCFE)", R.fcfe, { parti: [iFcff, iFin2, iVarFin] });
+  const iDist = add("voce", "Distribuzioni ai soci", R.distribuzioni); det(R.dettagli.patrimonio.filter(x => x.val < 0));
+  const iApp = add("voce", "Apporti dei soci", R.apporti); det(R.dettagli.patrimonio.filter(x => x.val > 0));
+  add("fin", "VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", R.variazione, { parti: [iFcfe, iDist, iApp] });
   add("voce", "Disponibilità liquide iniziali", R.liqIni);
   add("voce", "Disponibilità liquide finali", R.liqFin);
   return out;
+}
+
+// Gli importi sono esposti in unità di euro: ogni riga viene arrotondata per
+// conto suo, quindi una colonna può non tornare di ±1 anche quando i valori
+// reali quadrano al centesimo. Qui verifico se succede davvero, per mettere la
+// nota di arrotondamento solo quando serve.
+// Forzare la somma non è un'opzione: lo scarto andrebbe scaricato su una riga
+// (gestione finanziaria, imposte, ammortamenti) che nel conto economico è
+// esposta con il suo valore arrotondato vero, e si creerebbe una discrepanza
+// peggiore fra due prospetti dello stesso documento.
+function scartiDiArrotondamento(righe) {
+  const r0 = n => { const x = Number(n) || 0; return (x < 0 ? -1 : 1) * Math.round(Math.abs(x)); };
+  return (righe || []).some(r => {
+    if (!r.parti || !r.parti.length) return false;
+    const somma = r.parti.reduce((s, i) => s + r0(righe[i].val), 0);
+    return somma !== r0(r.val);
+  });
 }
 
 // Sezione PDF del rendiconto riclassificato. Usa esattamente le righe della
@@ -13893,9 +13914,18 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
     margin: { left: (W - 160) / 2 },
   });
 
+  const righeRf = righeRfRiclassificato(R, !!conDettaglio);
+  if (scartiDiArrotondamento(righeRf)) {
+    const yN = doc.lastAutoTable.finalY + 5;
+    doc.setFont("helvetica", "italic"); doc.setFontSize(7.5); doc.setTextColor(120);
+    doc.text("Importi in unità di euro: ogni riga è arrotondata singolarmente, quindi una somma può differire di 1 dal totale esposto. I valori reali quadrano al centesimo.",
+             (W - 160) / 2, yN);
+    doc.setFont("helvetica", "normal"); doc.setTextColor(0);
+  }
+
   // La riga di controllo resta solo quando c'e' davvero uno scarto da spiegare.
   if (Math.abs(R.scarto) >= 0.5) {
-    const y = doc.lastAutoTable.finalY + 8;
+    const y = doc.lastAutoTable.finalY + (scartiDiArrotondamento(righeRf) ? 14 : 8);
     doc.setFillColor(181, 67, 67); doc.rect(14, y - 5, W - 28, 10, "F");
     doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(9);
     doc.text(`SCARTO DI ${money(R.scarto)} RISPETTO ALLA VARIAZIONE EFFETTIVA DELLA LIQUIDITÀ`, 16, y + 2);
@@ -13951,6 +13981,12 @@ function SBRfRiclassificato({ R }) {
           })}
         </tbody>
       </table>
+      {scartiDiArrotondamento(righe) && (
+        <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--ink-3)", fontStyle: "italic", lineHeight: 1.5 }}>
+          Importi in unità di euro: ogni riga è arrotondata singolarmente, quindi una somma può differire
+          di 1 dal totale esposto. I valori reali quadrano al centesimo.
+        </div>
+      )}
       <div style={{ marginTop: 14, padding: "8px 12px", borderRadius: 6, fontSize: 12.5,
                     background: ok ? "#e7f3ea" : "var(--danger-soft)", color: ok ? "var(--accent)" : "var(--danger)" }}>
         {ok
