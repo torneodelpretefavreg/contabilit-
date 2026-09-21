@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.21.1";
+const APP_VERSION = "3.22.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -5939,6 +5939,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     [schemaBilancio, movimenti, saldiIniziali]);
   const rfIndSchema = useMemo(() => schemaBilancio ? rendicontoIndiretto(schemaBilancio, dati.mastrini, mastriniIniziali, contiMap) : null,
     [schemaBilancio, dati.mastrini, mastriniIniziali, contiMap]);
+  const rfRiclSchema = useMemo(() => (schemaBilancio && prospettiSchema)
+    ? rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap) : null,
+    [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap]);
 
   // Prospetti "ufficiali": stessi dati e stessa grafica della pagina Schema di Bilancio.
   // Sostituiscono i vecchi export semplici di SP, CE e RF (il resto della pagina non cambia).
@@ -6286,9 +6289,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         "2.  Stato Patrimoniale",
         "3.  Conto Economico",
         "4.  Rendiconto Finanziario",
-        "5.  Riepilogo per Business Unit",
-        "6.  Libro Cespiti",
-        "7.  Elenco Movimenti",
+        "5.  Rendiconto Riclassificato",
+        "6.  Riepilogo per Business Unit",
+        "7.  Libro Cespiti",
+        "8.  Elenco Movimenti",
       ];
       indice.forEach((s, i) => doc.text(s, 35, 125 + i * 7));
 
@@ -6369,9 +6373,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       passivoRowsPk.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
                            { content: bSP.money(prospettiSchema.totPassivo), styles: { fontStyle: "bold", fillColor: bSP.ROSSO_CHIARO } }]);
       y_sp2 = bSP.tabellaColorata(passivoRowsPk, "PASSIVO E PATRIMONIO NETTO", y_sp2 + 8, bSP.ROSSO);
-      const okSPpk = Math.abs(prospettiSchema.sbilancio) < 0.01;
-      bSP.barraFinale(y_sp2 + 6, okSPpk ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                       okSPpk ? "-" : bSP.money(prospettiSchema.sbilancio), okSPpk ? bSP.VERDE : bSP.ROSSO);
+      // Barra di quadratura solo quando c'e' uno sbilancio da segnalare: un
+      // "QUADRATURA: OK" con accanto un trattino non dice niente a chi legge
+      // il bilancio, mentre lo sbilancio va visto subito.
+      if (Math.abs(prospettiSchema.sbilancio) >= 0.01) {
+        bSP.barraFinale(y_sp2 + 6, "SBILANCIO ATTIVO / PASSIVO",
+                         bSP.money(prospettiSchema.sbilancio), bSP.ROSSO);
+      }
 
       // === 3. CONTO ECONOMICO ===
       doc.addPage();
@@ -6432,13 +6440,20 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       });
 
 
-      // === 5. RIEPILOGO PER BUSINESS UNIT (landscape) ===
-      generaPdfRiepilogoBU(datiBU, stagione, doc, "5. Riepilogo per Business Unit");
+      // === 5. RENDICONTO RICLASSIFICATO (portrait) ===
+      // Stesso prospetto della pagina Schema di Bilancio, tab "RF Riclassificato".
+      if (rfRiclSchema) {
+        doc.addPage("a4", "portrait");
+        generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, "5. Rendiconto Riclassificato", false);
+      }
 
-      // === 6. CESPITI (landscape) ===
+      // === 6. RIEPILOGO PER BUSINESS UNIT (landscape) ===
+      generaPdfRiepilogoBU(datiBU, stagione, doc, "6. Riepilogo per Business Unit");
+
+      // === 7. CESPITI (landscape) ===
       doc.addPage("a4", "landscape");
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("6. Libro Cespiti", 14, 14);
+      doc.text("7. Libro Cespiti", 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const totCosto = cespiti.reduce((s,c) => s + (c.costo_storico || 0), 0);
@@ -6468,10 +6483,10 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         columnStyles: { 4:{halign:"right"}, 5:{halign:"center"}, 6:{halign:"right"}, 7:{halign:"right"}, 8:{halign:"right"} },
       });
 
-      // === 7. ELENCO MOVIMENTI ===
+      // === 8. ELENCO MOVIMENTI ===
       doc.addPage("a4", "landscape");
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("7. Elenco Movimenti", 14, 14);
+      doc.text("8. Elenco Movimenti", 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const movRows = movimenti
@@ -6697,8 +6712,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       riga([labelTot, "", "", valTot], "totale");
       riga([]);
     });
-    const ok = Math.abs(P.sbilancio) < 0.01;
-    riga([ok ? "QUADRATURA ATTIVO / PASSIVO: OK" : "SBILANCIO ATTIVO / PASSIVO", "", "", ok ? 0 : P.sbilancio], "finale");
+    if (Math.abs(P.sbilancio) >= 0.01) {
+      riga(["SBILANCIO ATTIVO / PASSIVO", "", "", P.sbilancio], "finale");
+    }
     return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
   };
 
@@ -6758,7 +6774,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.chiusura, ""], null, 1));
     const scarto = Math.round((R.chiusura - R.apertura - R.variazione) * 100) / 100;
     riga([]);
-    riga([Math.abs(scarto) < 0.01 ? "QUADRATURA CON LE DISPONIBILITÀ LIQUIDE: OK" : "SCARTO DI QUADRATURA", "", scarto], "finale");
+    if (Math.abs(scarto) >= 0.01) riga(["SCARTO DI QUADRATURA CON LE DISPONIBILITÀ LIQUIDE", "", scarto], "finale");
     return xlFoglio(aoa, { cols: [36, 13, 13], moneyCols: [1, 2], kind, livelli });
   };
 
@@ -13705,6 +13721,53 @@ function righeRfRiclassificato(R, conDettaglio) {
   return out;
 }
 
+// Sezione PDF del rendiconto riclassificato. Usa esattamente le righe della
+// vista a schermo (righeRfRiclassificato), così carta e video non possono
+// divergere: se cambia il prospetto, cambiano entrambi insieme.
+// `doc` e' il documento su cui appendere; `titolo` l'intestazione di sezione.
+function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
+  if (!R) return;
+  const W = doc.internal.pageSize.width;
+  doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+  doc.text(titolo, 14, 18);
+  doc.setDrawColor(26, 26, 26); doc.line(14, 21, W - 14, 21);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(110);
+  doc.text("Dall'EBITDA al free cash flow: voci del conto economico dello schema e variazioni patrimoniali fra apertura e chiusura.",
+           14, 26);
+  doc.setTextColor(0);
+
+  // Stessa formattazione degli altri prospetti del documento: importi interi,
+  // lo zero scritto "-". Prendo money() dal builder cosi' non puo' divergere.
+  const { money, NERO, GRIGIO_CHIARO: GRIGIO } = creaPdfBuilder(stagione, "portrait", doc);
+  const body = righeRfRiclassificato(R, !!conDettaglio).map(r => {
+    const imp = money(r.val);
+    if (r.tipo === "sez") return [{ content: r.label, colSpan: 2, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } }];
+    if (r.tipo === "det") return [{ content: `      ${r.label}`, styles: { fontSize: 7, textColor: [130, 130, 130] } },
+                                  { content: imp, styles: { fontSize: 7, textColor: [130, 130, 130] } }];
+    if (r.tipo === "tot") return [{ content: `  ${r.label}`, styles: { fontStyle: "bold", fillColor: GRIGIO } },
+                                  { content: imp, styles: { fontStyle: "bold", fillColor: GRIGIO } }];
+    if (r.tipo === "fin") return [{ content: `  ${r.label}`, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } },
+                                  { content: imp, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } }];
+    return [`     ${r.label}`, imp];
+  });
+  doc.autoTable({
+    startY: 30, head: [["Voce", "Importo"]], body, theme: "plain",
+    styles: { fontSize: 8.5, cellPadding: 1.6 },
+    headStyles: { fillColor: NERO, textColor: 240, fontStyle: "bold" },
+    columnStyles: { 0: { cellWidth: 126 }, 1: { cellWidth: 34, halign: "right" } },
+    margin: { left: (W - 160) / 2 },
+  });
+
+  // La riga di controllo resta solo quando c'e' davvero uno scarto da spiegare.
+  if (Math.abs(R.scarto) >= 0.5) {
+    const y = doc.lastAutoTable.finalY + 8;
+    doc.setFillColor(181, 67, 67); doc.rect(14, y - 5, W - 28, 10, "F");
+    doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(9);
+    doc.text(`SCARTO DI ${money(R.scarto)} RISPETTO ALLA VARIAZIONE EFFETTIVA DELLA LIQUIDITÀ`, 16, y + 2);
+    doc.setTextColor(0);
+  }
+}
+
 // Vista a schermo (componente a livello di modulo, come gli altri editor dello schema)
 function SBRfRiclassificato({ R }) {
   const [dettaglio, setDettaglio] = useState(false);
@@ -13882,9 +13945,9 @@ function generaPdfSP(prospetti, stagione) {
   passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
                      { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
   y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
-  const ok = Math.abs(prospetti.sbilancio) < 0.01;
-  b.barraFinale(y + 6, ok ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                ok ? "-" : b.money(prospetti.sbilancio), ok ? b.VERDE : b.ROSSO);
+  if (Math.abs(prospetti.sbilancio) >= 0.01) {
+    b.barraFinale(y + 6, "SBILANCIO ATTIVO / PASSIVO", b.money(prospetti.sbilancio), b.ROSSO);
+  }
   b.doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
 }
 
@@ -14099,9 +14162,9 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
   passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
                      { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
   y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
-  const okSP = Math.abs(prospetti.sbilancio) < 0.01;
-  b.barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                okSP ? "-" : b.money(prospetti.sbilancio), okSP ? b.VERDE : b.ROSSO);
+  if (Math.abs(prospetti.sbilancio) >= 0.01) {
+    b.barraFinale(y + 6, "SBILANCIO ATTIVO / PASSIVO", b.money(prospetti.sbilancio), b.ROSSO);
+  }
 
   // --- Conto Economico ---
   b.doc.addPage(); b.intestazioneP("Conto Economico");
