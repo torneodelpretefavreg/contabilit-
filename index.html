@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.24.2";
+const APP_VERSION = "3.25.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -3001,6 +3001,189 @@ function generaRiapertura(movimenti, saldiIniziali, conti, annoY1) {
 }
 
 // ============================================================
+// CORREZIONI DI CHIUSURA
+// Prima di riaprire, cerca nella stagione che si chiude gli errori tipici che
+// spostano i saldi o il libro cespiti, e prepara per ciascuno le modifiche da
+// scrivere su Firebase. Ogni correzione e' riconosciuta da una regola generale
+// (non da un id fisso), quindi vale anche per le chiusure degli anni futuri.
+//   auto: true  -> applicabile con un clic
+//   auto: false -> va verificata a mano (si segnala e basta)
+// ============================================================
+function rilevaCorrezioniChiusura(dati, origine) {
+  const out = [];
+  if (!dati) return out;
+  const movs = dati.movimenti || [];
+  const cespiti = dati.cespiti || [];
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const cm = {};
+  (dati.conti || []).forEach(c => { cm[c.codice] = c; });
+  CONTI_LIQUIDITA.forEach(c => { if (!cm[c.codice]) cm[c.codice] = { codice: c.codice, nome: c.nome }; });
+  const nome = cod => (cm[cod]?.nome || `Conto ${cod}`).trim();
+  const cat = cod => (cm[cod]?.categoria || "").toUpperCase();
+  const norm = x => String(x || "").toUpperCase().replace(/\s+/g, " ").trim();
+  const giorno = iso => new Date(String(iso || "").slice(0, 10) + "T00:00:00").getTime();
+  const y1 = Number(String(origine).slice(0, 4));
+  const fineISO = `${y1 + 1}-08-31`;
+  const now = new Date().toISOString();
+
+  const saldi = {};
+  calcolaMastrini(generaLibroGiornale(movs, dati.saldiIniziali || {}, cm))
+    .forEach(m => { saldi[Number(m.codice)] = r2(m.saldo); });
+
+  const categorieUscite = [...new Set(movs.filter(m => m.tipo === "uscita").map(m => m.categoria).filter(Boolean))];
+  const trovaCat = (re) => categorieUscite.find(c => re.test(String(c)));
+
+  // 1) Rimborso a un socio pagato come nuovo costo invece che a chiusura del debito
+  const debitiSoci = Object.values(cm).filter(c => /DEBITI.*SOCI/i.test(c.nome || "")).map(c => Number(c.codice));
+  const usati = new Set();
+  movs.forEach(m => {
+    if (m.tipo !== "uscita" || !m.contoLiquidita || !/RIMBORS.*SOCI/i.test(nome(m.contoPdC))) return;
+    const debito = movs.find(x =>
+      !usati.has(x._id) && x.scritturaComposta && x.tipo === "entrata" && debitiSoci.includes(Number(x.contoPdC)) &&
+      Math.abs(r2(x.importo) - r2(m.importo)) < 0.005 && Math.abs(giorno(x.data) - giorno(m.data)) <= 7 * 86400000);
+    if (!debito) return;
+    usati.add(debito._id);
+    out.push({
+      id: "rimb_" + m._id, auto: true, risultato: true,
+      titolo: `Rimborso del ${fmtDate(m.data)} da ${fmtEuro(m.importo)} contato due volte come costo`,
+      dettaglio: `"${m.descrizione || ""}" è sul conto ${m.contoPdC} ${nome(m.contoPdC)}, ma la spesa era già a costo con la scrittura del ${fmtDate(debito.data)}: il pagamento deve chiudere il debito, conto ${debito.contoPdC} ${nome(debito.contoPdC)}.`,
+      updates: { [`movimenti/${m._id}/contoPdC`]: Number(debito.contoPdC), [`movimenti/${m._id}/modificatoIl`]: now },
+    });
+  });
+
+  // 2) Categorie di cassa che non seguono il conto
+  const catInv = trovaCat(/^INVESTIMENTI$/i) || trovaCat(/INVESTIMENT/i);
+  const catRit = trovaCat(/^RITENUTE F24$/i) || trovaCat(/RITENUT/i);
+  const daCat = [];
+  movs.forEach(m => {
+    if (m.tipo !== "uscita" || !m.contoLiquidita || m.nonMonetario || m.scritturaComposta || isAperturaMov(m)) return;
+    const c = String(m.categoria || "");
+    if (catInv && cat(m.contoPdC).startsWith("IMM.") && !/INVESTIMENT/i.test(c)) daCat.push([m, catInv]);
+    else if (catRit && /RITENUT/i.test(nome(m.contoPdC)) && !/RITENUT/i.test(c)) daCat.push([m, catRit]);
+  });
+  if (daCat.length) {
+    const upd = {};
+    daCat.forEach(([m, nuova]) => { upd[`movimenti/${m._id}/categoria`] = nuova; upd[`movimenti/${m._id}/modificatoIl`] = now; });
+    out.push({
+      id: "categorie", auto: true, risultato: false,
+      titolo: `${daCat.length} moviment${daCat.length === 1 ? "o" : "i"} con la categoria di cassa sbagliata`,
+      dettaglio: daCat.map(([m, nuova]) => `${fmtDate(m.data)} ${(m.descrizione || "").slice(0, 38)} (${fmtEuro(m.importo)}): ${m.categoria} → ${nuova}`).join(" · "),
+      updates: upd,
+    });
+  }
+
+  // 3) Libro cespiti contro conti di immobilizzazione (abbinamento per nome esatto)
+  const vivi = cespiti.filter(c => !(c.dismissione && c.dismissione.data));
+  const contiImm = Object.values(cm).filter(c => String(c.categoria || "").toUpperCase().startsWith("IMM."));
+  contiImm.forEach(conto => {
+    const cod = Number(conto.codice);
+    const beni = vivi.filter(c => norm(c.conto) === norm(conto.nome));
+    if (!beni.length) return;
+    const libro = r2(beni.reduce((a, c) => a + (Number(c.costo_storico) || 0), 0));
+    const contabile = saldi[cod] || 0;
+    const gap = r2(contabile - libro);
+    if (Math.abs(gap) < 0.01) return;
+
+    // 3a) bene uscito dal patrimonio (conto a zero dopo una scrittura di scarico)
+    if (Math.abs(contabile) < 0.01) {
+      const scarichi = movs.filter(m => Number(m.contoPdC) === cod && m.tipo === "entrata" && !isAperturaMov(m))
+        .sort((a, b) => String(b.data).localeCompare(String(a.data)));
+      if (scarichi.length) {
+        const s0 = scarichi[0];
+        const upd = {};
+        beni.forEach(b => {
+          const costo = Number(b.costo_storico) || 0, fondo = Number(b.fondo_ammortamento) || 0;
+          upd[`cespiti/${b._key}/dismissione`] = {
+            data: s0.data, motivo: /svalut/i.test(s0.descrizione || "") ? "Svalutazione" : "Dismissione",
+            costoAllUscita: costo, fondoAllUscita: fondo, nettoScaricato: r2(costo - fondo), registratoIl: now,
+          };
+        });
+        out.push({
+          id: "dism_" + cod, auto: true, risultato: false,
+          titolo: `${conto.nome.trim()}: bene già scaricato in contabilità ma ancora vivo nel libro`,
+          dettaglio: `Il conto ${cod} è a zero dal ${fmtDate(s0.data)} ("${s0.descrizione || ""}"): il cespite viene segnato come dismesso a quella data, senza nuove scritture.`,
+          updates: upd,
+        });
+        return;
+      }
+    }
+
+    // 3b) acquisto in contabilità che manca nel libro: nuovo cespite + quota dell'esercizio
+    if (gap > 0) {
+      const acquisti = movs.filter(m => Number(m.contoPdC) === cod && m.tipo === "uscita" && !isAperturaMov(m));
+      const giaNelLibro = (m) => beni.some(b => Math.abs((Number(b.costo_storico) || 0) - r2(m.importo)) < 0.005);
+      const mancante = acquisti.find(m => Math.abs(r2(m.importo) - gap) < 0.005 && !giaNelLibro(m));
+      const modello = beni.find(b => b.conto_amm != null && b.conto_fondo != null) || beni[0];
+      if (mancante && modello) {
+        const costo = r2(mancante.importo);
+        const aliquota = Number(modello.aliquota) || 0;
+        const giorni = Math.max(0, Math.min(365, Math.round((giorno(fineISO) - giorno(mancante.data)) / 86400000) + 1));
+        const quota = r2(Math.min(costo, costo * aliquota * giorni / 365));
+        const kCesp = db.ref(`stagioni/${origine}/cespiti`).push().key;
+        const upd = {};
+        const nuovo = {
+          conto: modello.conto, classe: modello.classe || "IMMOBILIZZAZIONI MATERIALI",
+          n_beni: 1, costo_unitario: costo, costo_storico: costo, anno_inizio: y1 + 1,
+          aliquota, quota_esercizio: 0, fondo_ammortamento: 0, data_inizio: String(mancante.data).slice(0, 10),
+        };
+        let conQuota = false;
+        if (quota > 0.005 && modello.conto_amm != null && modello.conto_fondo != null) {
+          conQuota = true;
+          const scritturaId = "scr_amm_" + Date.now().toString(36) + "_chiusura_" + Math.random().toString(36).slice(2, 7);
+          const bu = modello.bu_amm || mancante.bu || "GENERAL";
+          const comune = {
+            data: fineISO, contoLiquidita: null, contoLiquiditaDest: null, categoria: "AMMORTAMENTI", bu,
+            descrizione: `Ammortamento esercizio · ${modello.conto}`, mese: meseDaData(fineISO),
+            nonMonetario: true, scritturaComposta: true, scritturaId, importo: quota, creatoIl: now, modificatoIl: now,
+          };
+          const k1 = db.ref(`stagioni/${origine}/movimenti`).push().key;
+          const k2 = db.ref(`stagioni/${origine}/movimenti`).push().key;
+          upd[`movimenti/${k1}`] = { ...comune, tipo: "uscita", contoPdC: Number(modello.conto_amm), dare: quota, avere: 0 };
+          upd[`movimenti/${k2}`] = { ...comune, tipo: "entrata", contoPdC: Number(modello.conto_fondo), dare: 0, avere: quota };
+          Object.assign(nuovo, {
+            quota_esercizio: quota, fondo_ammortamento: quota,
+            conto_amm: Number(modello.conto_amm), conto_fondo: Number(modello.conto_fondo), bu_amm: bu,
+            amm_reg: { scritturaId, importo: quota, data: fineISO, registratoIl: now },
+          });
+        }
+        upd[`cespiti/${kCesp}`] = nuovo;
+        out.push({
+          id: "cesp_" + cod, auto: true, risultato: conQuota,
+          titolo: `${conto.nome.trim()}: acquisto del ${fmtDate(mancante.data)} da ${fmtEuro(costo)} assente dal libro cespiti`,
+          dettaglio: conQuota
+            ? `Aggiungo il cespite (aliquota ${Math.round(aliquota * 100)}% come l'altro ${modello.conto}) e registro la quota ${fmtEuro(quota)}, ragguagliata a ${giorni} giorni fino al ${fmtDate(fineISO)}.`
+            : `Aggiungo il cespite con aliquota ${Math.round(aliquota * 100)}%; la quota va poi registrata da Ammortamenti.`,
+          updates: upd,
+        });
+        return;
+      }
+    }
+
+    // 3c) differenza senza una spiegazione univoca: solo segnalazione
+    out.push({
+      id: "ver_" + cod, auto: false, risultato: false,
+      titolo: `${conto.nome.trim()}: libro ${fmtEuro(libro)} contro contabilità ${fmtEuro(contabile)}`,
+      dettaglio: gap < 0
+        ? `Il libro ha ${fmtEuro(-gap)} di beni che in contabilità non risultano: o manca un acquisto, o il costo nel libro è sbagliato.`
+        : `In contabilità ci sono ${fmtEuro(gap)} che nel libro non trovano un acquisto corrispondente.`,
+      updates: {},
+    });
+  });
+
+  // cespiti senza alcun conto di immobilizzazione con lo stesso nome
+  vivi.forEach(c => {
+    if (contiImm.some(x => norm(x.nome) === norm(c.conto))) return;
+    out.push({
+      id: "senza_" + c._key, auto: false, risultato: false,
+      titolo: `${c.conto}: cespite da ${fmtEuro(c.costo_storico)} senza un conto di immobilizzazione`,
+      dettaglio: "Nessun conto con questo nome e nessun acquisto registrato: verifica se il bene esiste davvero o se è compreso in un altro conto.",
+      updates: {},
+    });
+  });
+  return out;
+}
+
+// ============================================================
 // PAGINA: RIAPERTURA CONTI
 // Propone la scrittura di riapertura del nuovo esercizio a partire dai saldi
 // finali della stagione precedente: ogni conto patrimoniale torna dal suo lato
@@ -3047,6 +3230,7 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
         movimenti: movs,
         saldiIniziali: v.saldiIniziali || {},
         conti: contiOrig.length ? contiOrig : (conti || []),
+        cespiti: v.cespiti ? Object.entries(v.cespiti).map(([k, c]) => ({ ...c, _key: k })) : [],
       });
       setStato("pronto");
     } catch (e) {
@@ -3069,6 +3253,33 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
 
   const codiceDi = (m) => (m.contoLiquidita != null ? m.contoLiquidita : m.contoPdC);
   const nomeDi = (m) => (contiMap[codiceDi(m)]?.nome || `Conto ${codiceDi(m)}`).trim();
+
+  // ---- correzioni di chiusura sulla stagione di origine ----
+  const correzioni = useMemo(() => rilevaCorrezioniChiusura(datiOrigine, origine), [datiOrigine, origine]);
+  const [escluse, setEscluse] = useState({});
+  const [correggendo, setCorreggendo] = useState(false);
+  useEffect(() => { setEscluse({}); }, [datiOrigine]);
+  const daApplicare = correzioni.filter(c => c.auto && !escluse[c.id]);
+
+  const applicaCorrezioni = async () => {
+    if (!daApplicare.length) return;
+    const tocca = daApplicare.some(c => c.risultato);
+    const NL = String.fromCharCode(10);
+    if (!confirm(
+      `Applico ${daApplicare.length} correzion${daApplicare.length === 1 ? "e" : "i"} alla stagione ${origine}:` + NL + NL +
+      daApplicare.map(c => "• " + c.titolo).join(NL) +
+      (tocca ? NL + NL + `Alcune spostano il risultato di ${origine}: la proposta di riapertura viene ricalcolata subito dopo.` : "") +
+      NL + NL + "Procedere?")) return;
+    setCorreggendo(true);
+    try {
+      const updates = {};
+      daApplicare.forEach(c => Object.assign(updates, c.updates));
+      await db.ref(`stagioni/${origine}`).update(updates);
+      onToast(`${daApplicare.length} correzion${daApplicare.length === 1 ? "e applicata" : "i applicate"} a ${origine}`);
+      await carica();                 // ricalcolo saldi e proposta sui dati corretti
+    } catch (e) { alert("Errore: " + ((e && e.message) || e)); }
+    finally { setCorreggendo(false); }
+  };
 
   const attive = righe.filter(r => r.includi && Math.abs(Number(r.importo) || 0) > 0.005);
   const totDare  = attive.filter(r => r.tipo === "entrata").reduce((s, r) => s + (Number(r.importo) || 0), 0);
@@ -3147,6 +3358,37 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
           </div>
         )}
       </div>
+
+      {proposta && correzioni.length > 0 && (
+        <div className="card" style={{marginBottom:18, background:"#fdf5e6", borderColor:"#e6d5a8"}}>
+          <h3 className="card-title" style={{color:"#7a5a1d"}}>
+            Prima di riaprire · {correzioni.length} {correzioni.length === 1 ? "cosa da sistemare" : "cose da sistemare"} in {origine}
+          </h3>
+          <div style={{display:"grid", gap:10, margin:"4px 0 14px"}}>
+            {correzioni.map(c => (
+              <label key={c.id} style={{display:"flex", gap:10, alignItems:"flex-start", fontSize:13, cursor: c.auto ? "pointer" : "default"}}>
+                {c.auto
+                  ? <input type="checkbox" checked={!escluse[c.id]} style={{marginTop:3}}
+                           onChange={e => setEscluse(x => ({ ...x, [c.id]: !e.target.checked }))} />
+                  : <span style={{width:13, marginTop:1, color:"var(--ink-3)"}}>ⓘ</span>}
+                <span>
+                  <strong>{c.titolo}</strong>
+                  {c.risultato && <span className="pill" style={{marginLeft:6, fontSize:9.5}}>sposta il risultato</span>}
+                  {!c.auto && <span className="pill" style={{marginLeft:6, fontSize:9.5}}>da verificare a mano</span>}
+                  <div style={{fontSize:12, color:"var(--ink-2)", marginTop:2, lineHeight:1.45}}>{c.dettaglio}</div>
+                </span>
+              </label>
+            ))}
+          </div>
+          <button className="btn accent" onClick={applicaCorrezioni} disabled={correggendo || !daApplicare.length}>
+            {correggendo ? "Applico…" : `Applica ${daApplicare.length} correzion${daApplicare.length === 1 ? "e" : "i"}`}
+          </button>
+          <div style={{fontSize:11.5, color:"var(--ink-3)", marginTop:8}}>
+            Le modifiche vanno sulla stagione {origine}; subito dopo saldi e proposta qui sotto vengono ricalcolati.
+            Le voci "da verificare a mano" non cambiano i saldi di riapertura: riguardano solo il libro cespiti.
+          </div>
+        </div>
+      )}
 
       {proposta && (
         <>
