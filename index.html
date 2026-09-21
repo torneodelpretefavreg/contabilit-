@@ -14500,37 +14500,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             </table>
           </div>
 
-          <div className="card">
-            <div className="card-title">Rendiconto Finanziario · metodo indiretto</div>
-            <table style={{ width: "100%", marginTop: 10 }}>
-              <tbody>
-                <tr><td>Risultato d'esercizio</td><td className="num">{fmt(rfInd.risultato, 0)}</td></tr>
-                <tr><td>Ammortamenti e rettifiche non monetarie</td><td className="num">{fmt(rfInd.ammortamenti, 0)}</td></tr>
-                <tr><td>Variazione del capitale circolante</td><td className="num">{fmt(rfInd.varCircolante, 0)}</td></tr>
-                <tr style={{ background: "var(--panel-2)" }}>
-                  <td style={{ fontWeight: 700 }}>A) Flusso della gestione operativa</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.operativo, 0)}</td>
-                </tr>
-                <tr style={{ background: "var(--panel-2)" }}>
-                  <td style={{ fontWeight: 700 }}>B) Flusso dell'attività di investimento</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.investimenti, 0)}</td>
-                </tr>
-                <tr style={{ background: "var(--panel-2)" }}>
-                  <td style={{ fontWeight: 700 }}>C) Flusso dell'attività di finanziamento</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(rfInd.finanziamenti, 0)}</td>
-                </tr>
-                <tr style={{ borderTop: "2px solid var(--ink)" }}>
-                  <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE (A+B+C)</td>
-                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfInd.variazione, 0)}</td>
-                </tr>
-              </tbody>
-            </table>
-            <div style={{ fontSize: 12, marginTop: 10, color: Math.abs(diffRF) < 0.01 ? "var(--accent)" : "var(--danger)" }}>
-              {Math.abs(diffRF) < 0.01
-                ? `Riscontro col metodo diretto: coincidono entrambi a ${fmtEuro(rfDir.variazione)}.`
-                : `⚠ Il metodo indiretto dà ${fmtEuro(rfInd.variazione)}, il diretto ${fmtEuro(rfDir.variazione)}: differenza ${fmtEuro(diffRF)}.`}
-            </div>
-          </div>
+          {/* Il metodo indiretto "puro" e' superato dall'RF Riclassificato, che parte
+              dall'EBITDA e arriva alla variazione di liquidita' con piu' dettaglio. Il calcolo
+              indiretto resta solo come controllo, nella scheda Controlli. */}
+          <SBRfRiclassificato R={rfRicl} />
         </div>
       )}
 
