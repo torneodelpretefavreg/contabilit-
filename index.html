@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.18.0";
+const APP_VERSION = "3.19.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2248,6 +2248,7 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
       if (m.tipo === "giroconto") return;
       const motivi = [];
       let suggerito = null;
+      let catSuggerita = null;
       const cat = (m.categoria || "").toUpperCase();
       const desc = m.descrizione || "";
 
@@ -2306,12 +2307,23 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
         { conto: /COMMERCIALISTA/,     cat: /COMMERCIALISTA/, attesa: "SPESE COMMERCIALISTA" },
         { conto: /DIVIDEND/,           cat: /DIVIDEND/,       attesa: "DIVIDENDI" },
         { conto: /\bIMPOSTE\b/,        cat: /IMPOST|RITENUT/, attesa: "IMPOSTE" },
-        { conto: /ONERI VS BANCA/,     cat: /TENUTA CONTO|COMMISSION|BANC/, attesa: "SPESE TENUTA CONTO" },
+        // "SPESE C/C" e "SPESE TENUTA CONTO" sono due nomi per la stessa cosa:
+        // accetto entrambi, non e' un errore di classificazione.
+        { conto: /ONERI VS BANCA/,     cat: /TENUTA CONTO|COMMISSION|BANC|C\/C/, attesa: "SPESE TENUTA CONTO" },
       ];
-      if (nomeConto && cat) {
+      // Le scritture composte e non monetarie portano una categoria di servizio
+      // ("SCRITTURA COMPOSTA", "AMMORTAMENTI", "APERTURA") che non deve seguire
+      // il conto: non sono movimenti di cassa e nel rendiconto non entrano.
+      const diServizio = m.scritturaComposta || m.nonMonetario ||
+                         ["SCRITTURA COMPOSTA", "AMMORTAMENTI", "APERTURA", "GIROCONTO"].includes(cat);
+      if (nomeConto && cat && !diServizio) {
         COERENZA.forEach(r => {
           if (r.conto.test(nomeConto) && !r.cat.test(cat)) {
             motivi.push(`Conto "${nomeConto}" ma categoria "${m.categoria}": attesa "${r.attesa}" (la categoria decide la voce del rendiconto)`);
+            // Propongo la categoria solo se esiste gia' fra quelle in uso:
+            // non invento nomi nuovi che poi resterebbero fuori dal rendiconto.
+            const esistente = (categorie || []).find(c => String(c).toUpperCase() === r.attesa);
+            if (esistente) catSuggerita = esistente;
           }
         });
       }
@@ -2326,10 +2338,36 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
         motivi.push("Descrizione vuota");
       }
 
-      if (motivi.length > 0) result.push({ ...m, motivi, suggerito });
+      if (motivi.length > 0) result.push({ ...m, motivi, suggerito, catSuggerita });
     });
     return result;
-  }, [movimenti, contiMap]);
+  }, [movimenti, contiMap, categorie]);
+
+  // Movimenti la cui categoria puo' essere corretta senza ambiguita'
+  const daCorreggereCat = useMemo(
+    () => anomalie.filter(m => m.catSuggerita && m.catSuggerita !== m.categoria && m._id),
+    [anomalie]);
+
+  // Correzione in blocco: una sola update multi-path, cosi' l'app si riallinea
+  // da sola al prossimo render senza dover toccare i movimenti uno per uno.
+  const correggiCategorie = async () => {
+    if (!daCorreggereCat.length) return;
+    if (!firebaseReady) return alert("Firebase non disponibile");
+    const elenco = daCorreggereCat
+      .map(m => `• ${fmtDate(m.data)} ${(m.descrizione || "").slice(0, 40)} — ${fmtEuro(m.importo || 0)}\n   ${m.categoria || "—"}  →  ${m.catSuggerita}`)
+      .join("\n");
+    if (!confirm(`Correggere la categoria di ${daCorreggereCat.length} moviment${daCorreggereCat.length === 1 ? "o" : "i"}?\n\n${elenco}\n\nGli importi non cambiano: cambia solo la voce del rendiconto in cui confluiscono.`)) return;
+    try {
+      const now = new Date().toISOString();
+      const updates = {};
+      daCorreggereCat.forEach(m => {
+        updates[`${m._id}/categoria`] = m.catSuggerita;
+        updates[`${m._id}/modificatoIl`] = now;
+      });
+      await db.ref(`stagioni/${stagione}/movimenti`).update(updates);
+      onToast(`${daCorreggereCat.length} categori${daCorreggereCat.length === 1 ? "a corretta" : "e corrette"}`);
+    } catch (e) { alert("Errore: " + e.message); }
+  };
 
   // Riepilogo riapertura: verifica che il conto 60 Bilancio di Apertura si azzeri
   const riepilogoApertura = useMemo(() => {
@@ -2567,6 +2605,21 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
               <div style={{marginBottom:14, padding:"12px 16px", background:"#fdf5e6", border:"1px solid #e6d5a8", borderRadius:8, fontSize:12.5, color:"#7a5a1d"}}>
                 <strong>💡 Come funziona.</strong> Sono elencati i movimenti che mostrano possibili incongruenze tra descrizione, categoria e conto P.d.C. Per ciascuno trovi il <strong>motivo</strong> e, dove possibile, un <strong>conto suggerito</strong>: clicca ✓ per applicarlo direttamente, oppure ✎ per aprire il form di modifica completo.
               </div>
+
+              {daCorreggereCat.length > 0 && (
+                <div style={{marginBottom:14, padding:"12px 16px", background:"var(--accent-soft)", border:"1px solid #c8d8ce", borderRadius:8,
+                             display:"flex", alignItems:"center", gap:14, flexWrap:"wrap"}}>
+                  <div style={{fontSize:12.5, color:"var(--ink-2)", flex:1, minWidth:260}}>
+                    <strong style={{color:"var(--accent-ink)"}}>Correzione automatica disponibile.</strong>{" "}
+                    {daCorreggereCat.length} moviment{daCorreggereCat.length === 1 ? "o ha una categoria" : "i hanno una categoria"} che non segue il conto
+                    ({daCorreggereCat.map(m => `${m.categoria || "—"} → ${m.catSuggerita}`).filter((v, i, a) => a.indexOf(v) === i).join(", ")}).
+                    Gli importi non cambiano: cambia solo la voce del rendiconto in cui finiscono.
+                  </div>
+                  <button className="btn accent" onClick={correggiCategorie}>
+                    🔧 Correggi categorie ({daCorreggereCat.length})
+                  </button>
+                </div>
+              )}
 
               <div className="tbl-wrap">
                 <table className="tbl">
@@ -13080,6 +13133,19 @@ function naturaAuto(conto) {
   return "circolante";
 }
 
+// Regole di coerenza fra categoria di cassa e sottovoce del rendiconto.
+// Usate sia dagli avvisi (che le segnalano) sia dalla correzione automatica
+// (che le applica): una sola fonte, cosi' non possono divergere.
+// auto:false = la regola segnala ma non sposta niente da sola. E' il caso degli
+// sponsor: "SPONSORIZZAZIONI SOCIAL" e' un costo, e una regola cieca sul nome
+// lo sposterebbe dentro gli incassi. Quel caso lo decide una persona.
+const REGOLE_CAT_RF = [
+  { cat: /COMMERCIALIST/, voce: /commercialist|servizi|fornitor|altri pagament/i, attesa: 'una voce di pagamenti a fornitori/servizi', auto: true },
+  { cat: /RITENUT/,       voce: /impost|ritenut/i,             attesa: '"Imposte/ritenute pagate"',   auto: true },
+  { cat: /DIVIDEND/,      voce: /dividend|mezzi propri/i,      attesa: '"Mezzi propri - Dividendi"',  auto: true },
+  { cat: /SPONSOR/,       voce: /sponsor/i,                    attesa: '"Incassi da sponsor"',        auto: false },
+];
+
 // Proposta di mappatura automatica: assegna i conti alle voci in base
 // alla categoria del piano dei conti. I fondi ammortamento vanno alla
 // stessa voce del cespite che rettificano.
@@ -14296,16 +14362,11 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           out.push({ grave: false, testo: `Rendiconto, area ${a.codice || a.nome}: la sottovoce "${v.nome}" non ha categorie assegnate, quindi esce sempre a zero nel PDF.` });
         }
         // 3) Categoria di cassa finita sotto una sottovoce che non la descrive
-        const REGOLE_CAT = [
-          { cat: /COMMERCIALIST/, voce: /commercialist|servizi|fornitor|altri pagament/i, attesa: 'una voce di pagamenti a fornitori/servizi' },
-          { cat: /RITENUT|IMPOST/, voce: /impost|ritenut/i,   attesa: '"Imposte/ritenute pagate"' },
-          { cat: /DIVIDEND/,      voce: /dividend|mezzi propri/i, attesa: '"Mezzi propri - Dividendi"' },
-          { cat: /SPONSOR/,       voce: /sponsor/i,            attesa: '"Incassi da sponsor"' },
-        ];
         (v.categorie || []).forEach(c => {
-          REGOLE_CAT.forEach(r => {
+          REGOLE_CAT_RF.forEach(r => {
             if (r.cat.test(String(c).toUpperCase()) && !r.voce.test(v.nome || "")) {
-              out.push({ grave: true, testo: `Rendiconto, area ${a.codice || a.nome}: la categoria "${c}" è assegnata a "${v.nome}". Attesa ${r.attesa}.` });
+              out.push({ grave: true, testo: `Rendiconto, area ${a.codice || a.nome}: la categoria "${c}" è assegnata a "${v.nome}". Attesa ${r.attesa}.`
+                + (r.auto ? "" : " Da spostare a mano: la correzione automatica lascia stare questo caso.") });
             }
           });
         });
@@ -14463,6 +14524,88 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     aggiorna(s);
     onToast && onToast("Sottovoci del rendiconto rinumerate 1..n per ogni area");
   };
+
+  // ---------- Correzione automatica degli avvisi di classificazione ----------
+  // Sposta le voci nella casella che le descrive. Nessun importo viene toccato:
+  // conti e categorie restano gli stessi, cambia solo dove vengono esposti,
+  // quindi totali, risultato e quadrature non si muovono. Una sola scrittura
+  // dello schema su Firebase, poi l'app si riallinea da sola.
+  const correggiSchemaAutomaticamente = () => {
+    const s = clone();
+    const azioni = [];
+    const nomeConto = (c) => (contiMap?.[Number(c)]?.nome || `Conto ${c}`).trim();
+
+    // 1) Conto economico: le ritenute escono dalla voce delle imposte.
+    const trovaVoceCE = (re) => {
+      for (const cl of (s.ce || [])) {
+        const v = (cl.voci || []).find(x => re.test(x.nome || ""));
+        if (v) return v;
+      }
+      return null;
+    };
+    const destServizi = trovaVoceCE(/per servizi/i) || trovaVoceCE(/oneri diversi/i);
+    (s.ce || []).forEach(cl => {
+      if (!/impost/i.test(cl.nome || "")) return;
+      (cl.voci || []).forEach(v => {
+        if (v === destServizi) return;
+        const restano = [];
+        (v.conti || []).forEach(x => {
+          if (/RITENUT/.test(nomeConto(x.c).toUpperCase()) && destServizi) {
+            destServizi.conti = destServizi.conti || [];
+            if (!destServizi.conti.some(y => Number(y.c) === Number(x.c))) destServizi.conti.push(x);
+            azioni.push(`CE · conto ${x.c} ${nomeConto(x.c)}: da "${v.nome}" a "${destServizi.nome}"`);
+          } else restano.push(x);
+        });
+        v.conti = restano;
+      });
+    });
+
+    // 2) Rendiconto: ogni categoria va sulla sottovoce che la descrive,
+    //    cercando la destinazione nella stessa area (il flusso non cambia area).
+    (s.rf?.aree || []).forEach(a => {
+      (a.voci || []).forEach(v => {
+        const restano = [];
+        (v.categorie || []).forEach(c => {
+          const r = REGOLE_CAT_RF.find(x => x.auto && x.cat.test(String(c).toUpperCase()) && !x.voce.test(v.nome || ""));
+          const dest = r ? (a.voci || []).find(x => x !== v && r.voce.test(x.nome || "")) : null;
+          if (dest) {
+            dest.categorie = [...new Set([...(dest.categorie || []), c])].sort();
+            azioni.push(`RF · categoria "${c}": da "${v.nome}" a "${dest.nome}"`);
+          } else restano.push(c);
+        });
+        v.categorie = restano;
+      });
+    });
+
+    // 3) Il segnaposto "Categorie": eliminato se ormai vuoto, altrimenti rinominato.
+    (s.rf?.aree || []).forEach(a => {
+      a.voci = (a.voci || []).filter(v => {
+        if (!/^categorie$/i.test((v.nome || "").trim())) return true;
+        if (!(v.categorie || []).length) {
+          azioni.push(`RF · area ${a.codice || a.nome}: rimossa la sottovoce segnaposto "Categorie", ormai vuota`);
+          return false;
+        }
+        azioni.push(`RF · area ${a.codice || a.nome}: "Categorie" rinominata "Altri flussi non classificati"`);
+        v.nome = "Altri flussi non classificati";
+        return true;
+      });
+    });
+
+    // 4) Rinumerazione finale: nessuna voce resta senza numero nel PDF.
+    const primaDeiNumeri = JSON.stringify((s.rf?.aree || []).map(a => (a.voci || []).map(v => v.codice)));
+    rinumeraVociRF(s);
+    if (JSON.stringify((s.rf?.aree || []).map(a => (a.voci || []).map(v => v.codice))) !== primaDeiNumeri) {
+      azioni.push("RF · sottovoci rinumerate 1..n in ogni area");
+    }
+
+    if (!azioni.length) {
+      onToast && onToast("Niente da correggere: la classificazione è già coerente");
+      return;
+    }
+    if (!confirm(`Applicare ${azioni.length} correzion${azioni.length === 1 ? "e" : "i"} allo schema?\n\n${azioni.join("\n")}\n\nNessun importo viene modificato: cambia solo la voce in cui ciascun saldo viene esposto. Risultato d'esercizio, totali e quadrature restano identici.`)) return;
+    aggiorna(s);
+    onToast && onToast(`${azioni.length} correzion${azioni.length === 1 ? "e applicata" : "i applicate"} allo schema`);
+  };
   const escludiConto = (cod) => aggiorna(statoRef.current.schema, [...new Set([...esclusi, Number(cod)])]);
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
@@ -14566,15 +14709,26 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       {avvisiClassificazione.length > 0 && ["sp", "ce", "rf", "prospetti"].includes(tab) && (
         <div style={{ padding: "12px 16px", marginBottom: 16, borderRadius: 8,
                       background: "#fff8e7", border: "1px solid #f0d860", color: "#7a5d00", fontSize: 13 }}>
-          <strong>Avvisi di classificazione ({avvisiClassificazione.length}).</strong>
-          <div style={{ fontSize: 12, margin: "4px 0 8px" }}>
-            Il bilancio quadra lo stesso: sono voci messe in una casella che non le descrive.
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 260 }}>
+              <strong>Avvisi di classificazione ({avvisiClassificazione.length}).</strong>
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                Il bilancio quadra lo stesso: sono voci messe in una casella che non le descrive.
+              </div>
+            </div>
+            <button className="btn accent" onClick={correggiSchemaAutomaticamente}
+                    title="Sposta conti e categorie nella voce corretta, rinomina il segnaposto e rinumera le sottovoci. Gli importi non cambiano.">
+              🔧 Correggi automaticamente
+            </button>
           </div>
-          <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
+          <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.5 }}>
             {avvisiClassificazione.map((a, i) => (
               <li key={i} style={{ fontWeight: a.grave ? 600 : 400, marginBottom: 3 }}>{a.testo}</li>
             ))}
           </ul>
+          <div style={{ fontSize: 11.5, marginTop: 8, opacity: 0.85 }}>
+            Le sottovoci senza categorie non vengono toccate: sono la struttura civilistica del rendiconto e stanno a zero per scelta.
+          </div>
         </div>
       )}
 
