@@ -801,7 +801,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.26.0";
+const APP_VERSION = "3.27.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -990,6 +990,13 @@ const SEED_CESPITI = [{"conto": "PALLONI TORNEO", "classe": "IMMOBILIZZAZIONI MA
 const fmt = (n, dec = 2) => {
   if (n === null || n === undefined || isNaN(n)) return "—";
   return Number(n).toLocaleString("it-IT", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+};
+// Come fmt(), ma con la convenzione dei prospetti di bilancio: i negativi fra parentesi.
+const fmtP = (n, dec = 2) => {
+  if (n === null || n === undefined || isNaN(n)) return "—";
+  const x = Number(n);
+  const s = Math.abs(x).toLocaleString("it-IT", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  return (x < 0 && Math.abs(x) >= Math.pow(10, -dec) / 2) ? "(" + s + ")" : s;
 };
 const fmtEuro = (n) => "€ " + fmt(n);
 const fmtDate = (iso) => {
@@ -6553,7 +6560,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.text(`Generato il ${new Date().toLocaleDateString("it-IT")}`, 148, 25, { align: "center" });
       doc.setTextColor(0);
 
-      const fmtCell = (v) => (v || v === 0) ? Number(v).toLocaleString("it-IT", {minimumFractionDigits:2, maximumFractionDigits:2}) : "";
+      // Negativi fra parentesi, come negli altri prospetti
+      const fmtCell = (v) => {
+        if (!(v || v === 0)) return "";
+        const n = Number(v);
+        const s = Math.abs(n).toLocaleString("it-IT", {minimumFractionDigits:2, maximumFractionDigits:2});
+        return (n < 0 && Math.abs(n) >= 0.005) ? "(" + s + ")" : s;
+      };
       const fmtPctCell = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
       const body = rendicontoMatrix(dati.rf).map(r => {
         if (r.type === "header") {
@@ -6711,7 +6724,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.text("Dati di sintesi", 30, 185);
       doc.setFontSize(9); doc.setFont("helvetica","normal");
       const int0 = (n) => { const x = Number(n) || 0; const r = Math.sign(x) * Math.round(Math.abs(x));
-                            return r === 0 ? "-" : r.toLocaleString("it-IT", { maximumFractionDigits: 0 }); };
+                            if (r === 0) return "-";
+                            const s = Math.abs(r).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+                            return r < 0 ? "(" + s + ")" : s; };
       // Stessa fonte dei prospetti delle pagine seguenti: il frontespizio non puo' contraddirli
       const P = prospettiSchema;
       const ricaviCE = (P.ce || []).filter(c => c.segno >= 0).reduce((a, c) => a + c.totale, 0);
@@ -14311,7 +14326,8 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
     const y = doc.lastAutoTable.finalY + (scartiDiArrotondamento(righeRf) ? 14 : 8);
     doc.setFillColor(181, 67, 67); doc.rect(14, y - 5, W - 28, 10, "F");
     doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(9);
-    doc.text(`SCARTO DI ${money(R.scarto)} RISPETTO ALLA VARIAZIONE EFFETTIVA DELLA LIQUIDITÀ`, 16, y + 2);
+    // Riga discorsiva: qui il segno si scrive col meno, la parentesi serve solo nelle colonne di importi
+    doc.text(`SCARTO DI ${R.scarto < 0 ? "-" : ""}${money(Math.abs(R.scarto))} RISPETTO ALLA VARIAZIONE EFFETTIVA DELLA LIQUIDITÀ`, 16, y + 2);
     doc.setTextColor(0);
   }
 }
@@ -14320,7 +14336,10 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
 function SBRfRiclassificato({ R }) {
   const [dettaglio, setDettaglio] = useState(false);
   if (!R) return null;
-  const m0 = (n) => { const r = Math.round(Number(n) || 0); return r === 0 ? "-" : r.toLocaleString("it-IT"); };
+  // m0: colonne di importi → negativi fra parentesi. m0s: righe discorsive → segno meno.
+  const m0 = (n) => { const r = Math.round(Number(n) || 0); if (r === 0) return "-";
+                      const s = Math.abs(r).toLocaleString("it-IT"); return r < 0 ? "(" + s + ")" : s; };
+  const m0s = (n) => { const r = Math.round(Number(n) || 0); return r === 0 ? "-" : r.toLocaleString("it-IT"); };
   const righe = righeRfRiclassificato(R, dettaglio);
   const ok = Math.abs(R.scarto) < 0.5;
   const okCe = Math.abs(R.risultato - R.risultatoSchema) < 0.5;
@@ -14373,12 +14392,12 @@ function SBRfRiclassificato({ R }) {
       <div style={{ marginTop: 14, padding: "8px 12px", borderRadius: 6, fontSize: 12.5,
                     background: ok ? "#e7f3ea" : "var(--danger-soft)", color: ok ? "var(--accent)" : "var(--danger)" }}>
         {ok
-          ? `✓ Quadra con la variazione effettiva della liquidità (${m0(R.variazioneEffettiva)})`
-          : `✗ Scarto di ${m0(R.scarto)} rispetto alla variazione effettiva della liquidità (${m0(R.variazioneEffettiva)}): c'è un conto classificato male o una natura da correggere in Struttura RF.`}
+          ? `✓ Quadra con la variazione effettiva della liquidità (${m0s(R.variazioneEffettiva)})`
+          : `✗ Scarto di ${m0s(R.scarto)} rispetto alla variazione effettiva della liquidità (${m0s(R.variazioneEffettiva)}): c'è un conto classificato male o una natura da correggere in Struttura RF.`}
       </div>
       {!okCe && (
         <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}>
-          ⚠ Il risultato riclassificato ({m0(R.risultato)}) non coincide con quello del conto economico ({m0(R.risultatoSchema)}).
+          ⚠ Il risultato riclassificato ({m0s(R.risultato)}) non coincide con quello del conto economico ({m0s(R.risultatoSchema)}).
         </div>
       )}
     </div>
@@ -14417,10 +14436,13 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
   const { jsPDF } = window.jspdf;
   const doc = docEsistente || new jsPDF({ orientation: orientamento || "portrait", unit: "mm", format: "a4" });
   // Importi interi; lo zero si scrive "-" come nei prospetti di bilancio classici
+  // I negativi si scrivono fra parentesi tonde: -1.726 → (1.726)
   const money = n => {
     const x = Number(n) || 0;
     const r = Math.sign(x) * Math.round(Math.abs(x));   // simmetrico: -676,50 → -677
-    return r === 0 ? "-" : r.toLocaleString("it-IT", { maximumFractionDigits: 0 });
+    if (r === 0) return "-";
+    const s = Math.abs(r).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+    return r < 0 ? "(" + s + ")" : s;
   };
   const oggi = new Date().toLocaleDateString("it-IT");
   const VERDE = [45, 94, 62], ROSSO = [181, 67, 67], NERO = [26, 26, 26];
@@ -15423,7 +15445,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         <span className="mono">{String(d.c).padStart(2, "0")}</span> {d.nome}
         {d.valore < 0 && <span style={{ color: "var(--danger)" }}> (in rettifica)</span>}
       </td>
-      <td className="num">{fmt(d.valore)}</td>
+      <td className="num">{fmtP(d.valore)}</td>
     </tr>
   );
   const rigaVoce = (v) => {
@@ -15438,7 +15460,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             {v.codice ? v.codice + ". " : ""}{v.nome}
             {v.speciale === "risultato" && <span style={{ color: "var(--ink-3)", fontSize: 11 }}> (da CE)</span>}
           </td>
-          <td className="num">{fmt(v.valore, 0)}</td>
+          <td className="num">{fmtP(v.valore, 0)}</td>
         </tr>
         {/* le sotto-voci restano sempre visibili col loro subtotale: sono parte
             del prospetto, non un dettaglio da aprire. I conti sotto, invece, si
@@ -15449,7 +15471,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
               <td style={{ paddingLeft: 44, color: "var(--ink-2)" }}>
                 {x.codice ? x.codice + ") " : ""}{x.nome}
               </td>
-              <td className="num" style={{ color: "var(--ink-2)" }}>{fmt(x.valore, 0)}</td>
+              <td className="num" style={{ color: "var(--ink-2)" }}>{fmtP(x.valore, 0)}</td>
             </tr>
             {espansi[v.id] && (x.dettaglio || []).map(d => rigaConto(d, 68))}
           </React.Fragment>
@@ -15666,7 +15688,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                   <tr key={m.codice}>
                     <td className="mono">{String(m.codice).padStart(2, "0")}</td>
                     <td>{(m.nome || "").trim()}</td>
-                    <td className="num">{fmt(m.saldo)}</td>
+                    <td className="num">{fmtP(m.saldo)}</td>
                     <td>
                       <select value={(schema.rf?.natura || {})[String(m.codice)] || naturaAuto(contiMap[m.codice])}
                               onChange={e => api.setNatura(m.codice, e.target.value)}
@@ -15699,7 +15721,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       <React.Fragment key={cl.id}>
                         <tr style={{ background: "var(--panel-2)" }}>
                           <td style={{ fontWeight: 700 }}>{cl.codice ? cl.codice + ") " : ""}{cl.nome}</td>
-                          <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale, 0)}</td>
+                          <td className="num" style={{ fontWeight: 700 }}>{fmtP(cl.totale, 0)}</td>
                         </tr>
                         {righeVociConSottosezioni(cl.voci)}
                       </React.Fragment>
@@ -15709,7 +15731,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                         {lato === "attivo" ? "TOTALE ATTIVO" : "TOTALE PASSIVO E PN"}
                       </td>
                       <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>
-                        {fmt((lato === "attivo" ? prospetti.totAttivo : prospetti.totPassivo), 0)}
+                        {fmtP((lato === "attivo" ? prospetti.totAttivo : prospetti.totPassivo), 0)}
                       </td>
                     </tr>
                   </tbody>
@@ -15734,7 +15756,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                         {cl.codice ? cl.codice + ") " : ""}{cl.nome}
                         <span style={{ color: "var(--ink-3)", fontWeight: 400, fontSize: 11 }}> {cl.segno >= 0 ? "(+)" : "(−)"}</span>
                       </td>
-                      <td className="num" style={{ fontWeight: 700 }}>{fmt(cl.totale, 0)}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{fmtP(cl.totale, 0)}</td>
                     </tr>
                     {righeVociConSottosezioni(cl.voci)}
                   </React.Fragment>
@@ -15742,7 +15764,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
                   <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>RISULTATO D'ESERCIZIO</td>
                   <td className="num" style={{ fontWeight: 700, fontSize: 14, color: prospetti.risultato >= 0 ? "var(--accent)" : "var(--danger)" }}>
-                    {fmt(prospetti.risultato, 0)}
+                    {fmtP(prospetti.risultato, 0)}
                   </td>
                 </tr>
               </tbody>
@@ -15757,7 +15779,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                   <React.Fragment key={a.id}>
                     <tr style={{ background: "var(--panel-2)" }}>
                       <td style={{ fontWeight: 700 }}>{a.codice ? a.codice + ") " : ""}{a.nome}</td>
-                      <td className="num" style={{ fontWeight: 700 }}>{fmt(a.totale, 0)}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{fmtP(a.totale, 0)}</td>
                     </tr>
                     {(a.voci || []).map(v => (
                       <React.Fragment key={v.id}>
@@ -15766,12 +15788,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                                        color: v.virtuale ? "var(--danger)" : "inherit" }}>
                             {v.codice ? v.codice + ". " : ""}{v.nome}
                           </td>
-                          <td className="num" style={{ fontWeight: 600 }}>{fmt(v.totale, 0)}</td>
+                          <td className="num" style={{ fontWeight: 600 }}>{fmtP(v.totale, 0)}</td>
                         </tr>
                         {(v.righe || []).map(r => (
                           <tr key={r.cat}>
                             <td style={{ paddingLeft: 34, fontSize: 12.5, color: "var(--ink-2)" }}>{r.cat}</td>
-                            <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmt(r.val, 0)}</td>
+                            <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmtP(r.val, 0)}</td>
                           </tr>
                         ))}
                       </React.Fragment>
@@ -15783,20 +15805,20 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 ))}
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
                   <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE</td>
-                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmt(rfDir.variazione, 0)}</td>
+                  <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmtP(rfDir.variazione, 0)}</td>
                 </tr>
-                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmt(rfDir.apertura, 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmtP(rfDir.apertura, 0)}</td></tr>
                 {rfDir.dettaglioLiquidita.map(d => (
                   <tr key={"ini-" + d.nome}>
                     <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
-                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.apertura, 0)}</td>
+                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmtP(d.apertura, 0)}</td>
                   </tr>
                 ))}
-                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmt(rfDir.chiusura, 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmtP(rfDir.chiusura, 0)}</td></tr>
                 {rfDir.dettaglioLiquidita.map(d => (
                   <tr key={"fin-" + d.nome}>
                     <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
-                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmt(d.chiusura, 0)}</td>
+                    <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmtP(d.chiusura, 0)}</td>
                   </tr>
                 ))}
               </tbody>
