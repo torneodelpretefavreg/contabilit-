@@ -5918,7 +5918,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         "", { content: "TOTALI", styles: { fontStyle: "bold" } }, "",
         { content: dati.totD.toFixed(2), styles: { fontStyle: "bold" } },
         { content: dati.totA.toFixed(2), styles: { fontStyle: "bold" } },
-        Math.abs(dati.totD - dati.totA) < 0.01 ? "✓" : (dati.totD - dati.totA).toFixed(2),
+        Math.abs(dati.totD - dati.totA) < 0.01 ? "quadra" : (dati.totD - dati.totA).toFixed(2),
       ]);
 
       doc.autoTable({
@@ -6198,13 +6198,21 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFontSize(11); doc.setFont("helvetica","bold");
       doc.text("Dati di sintesi", 30, 185);
       doc.setFontSize(9); doc.setFont("helvetica","normal");
-      const int0 = (n) => Math.round(Number(n) || 0).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+      const int0 = (n) => { const x = Number(n) || 0; const r = Math.sign(x) * Math.round(Math.abs(x));
+                            return r === 0 ? "-" : r.toLocaleString("it-IT", { maximumFractionDigits: 0 }); };
+      // Stessa fonte dei prospetti delle pagine seguenti: il frontespizio non puo' contraddirli
+      const P = prospettiSchema;
+      const ricaviCE = (P.ce || []).filter(c => c.segno >= 0).reduce((a, c) => a + c.totale, 0);
+      const costiCE  = (P.ce || []).filter(c => c.segno < 0).reduce((a, c) => a + c.totale, 0);
+      const pnCl = (P.sp || []).find(c => c.lato === "passivo" && /patrimonio/i.test(c.nome || ""));
+      const pn = pnCl ? pnCl.totale : 0;
       const kpi = [
-        ["Ricavi", int0(dati.ricavi)],
-        ["Costi", int0(dati.costi)],
-        ["Utile/Perdita d'esercizio", int0(dati.utile)],
-        ["Attività totali", int0(dati.attivo)],
-        ["Passività totali", int0(dati.passivo)],
+        ["Valore della produzione e altri proventi", int0(ricaviCE)],
+        ["Costi e oneri", int0(costiCE)],
+        ["Risultato d'esercizio", int0(P.risultato)],
+        ["Totale attivo", int0(P.totAttivo)],
+        ["Patrimonio netto", int0(pn)],
+        ["Debiti e altre passività", int0(P.totPassivo - pn)],
         ["N. movimenti registrati", `${movimenti.length}`],
         ["N. conti movimentati", `${dati.mastrini.filter(m => m.dare > 0 || m.avere > 0).length}`],
       ];
@@ -6236,7 +6244,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         "", {content:"TOTALI", styles:{fontStyle:"bold"}}, "",
         {content: dati.totD.toFixed(2), styles:{fontStyle:"bold"}},
         {content: dati.totA.toFixed(2), styles:{fontStyle:"bold"}},
-        Math.abs(dati.totD - dati.totA) < 0.01 ? "✓" : (dati.totD - dati.totA).toFixed(2),
+        Math.abs(dati.totD - dati.totA) < 0.01 ? "quadra" : (dati.totD - dati.totA).toFixed(2),
       ]);
       doc.autoTable({
         startY: 25,
@@ -6264,7 +6272,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       y_sp2 = bSP.tabellaColorata(passivoRowsPk, "PASSIVO E PATRIMONIO NETTO", y_sp2 + 8, bSP.ROSSO);
       const okSPpk = Math.abs(prospettiSchema.sbilancio) < 0.01;
       bSP.barraFinale(y_sp2 + 6, okSPpk ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                       okSPpk ? "0" : bSP.money(prospettiSchema.sbilancio), okSPpk ? bSP.VERDE : bSP.ROSSO);
+                       okSPpk ? "-" : bSP.money(prospettiSchema.sbilancio), okSPpk ? bSP.VERDE : bSP.ROSSO);
 
       // === 3. CONTO ECONOMICO ===
       doc.addPage();
@@ -13411,7 +13419,8 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
   const doc = docEsistente || new jsPDF({ orientation: orientamento || "portrait", unit: "mm", format: "a4" });
   // Importi interi; lo zero si scrive "-" come nei prospetti di bilancio classici
   const money = n => {
-    const r = Math.round(Number(n) || 0);
+    const x = Number(n) || 0;
+    const r = Math.sign(x) * Math.round(Math.abs(x));   // simmetrico: -676,50 → -677
     return r === 0 ? "-" : r.toLocaleString("it-IT", { maximumFractionDigits: 0 });
   };
   const oggi = new Date().toLocaleDateString("it-IT");
@@ -13487,7 +13496,7 @@ function generaPdfSP(prospetti, stagione) {
   y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
   const ok = Math.abs(prospetti.sbilancio) < 0.01;
   b.barraFinale(y + 6, ok ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                ok ? "0" : b.money(prospetti.sbilancio), ok ? b.VERDE : b.ROSSO);
+                ok ? "-" : b.money(prospetti.sbilancio), ok ? b.VERDE : b.ROSSO);
   b.doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
 }
 
@@ -13605,8 +13614,22 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
 
   // Dettaglio di ogni BU: conti economici, conti patrimoniali e flussi di cassa
   (datiBU || []).forEach(x => {
-    const eco = (x.conti || []).filter(c => c.tipo !== "Patrimoniale");
-    const pat = (x.conti || []).filter(c => c.tipo === "Patrimoniale");
+    // conti economici che nel periodo si sono compensati a zero: nessuna informazione, fuori
+    const eco = (x.conti || []).filter(c => c.tipo !== "Patrimoniale"
+                                         && (Math.abs(c.ricavi) >= 0.5 || Math.abs(c.costi) >= 0.5));
+    // patrimoniali: le liquidita' in un'unica riga (i giroconti tra cassa e banche dentro la
+    // stessa BU producono saldi "negativi" di cassa privi di significato), e il conto 60
+    // rinominato per quello che rappresenta qui: la posizione di apertura attribuita alla BU
+    const patTutti = (x.conti || []).filter(c => c.tipo === "Patrimoniale");
+    const isLiq = (c) => (c.categoria || "").toUpperCase() === "DISP. LIQUIDE";
+    const liq = patTutti.filter(isLiq);
+    const pat = patTutti.filter(c => !isLiq(c)).map(c =>
+      Number(c.codice) === 60 ? { ...c, nome: "Posizione di apertura attribuita alla BU" } : c);
+    if (liq.length) {
+      const d = liq.reduce((a, c) => a + c.dare, 0), av = liq.reduce((a, c) => a + c.avere, 0);
+      pat.unshift({ codice: "", nome: "Disponibilità liquide (tutti i conti)", categoria: "DISP. LIQUIDE",
+                    dare: d, avere: av, saldoDA: d - av });
+    }
     if (!eco.length && !pat.length) return;
     let y = doc.lastAutoTable.finalY + 12;
     if (y > H - 50) { doc.addPage("a4", "landscape"); y = 18; }
@@ -13627,7 +13650,7 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
               { content: b.money(x.ricavi), styles: { fontStyle: "bold", halign: "right" } },
               { content: b.money(x.costi), styles: { fontStyle: "bold", halign: "right" } },
               { content: b.money(x.margine), styles: { fontStyle: "bold", halign: "right" } }]],
-      theme: "plain",
+      theme: "plain", showFoot: "lastPage",
       styles: { fontSize: 8, cellPadding: 1.4 },
       headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
       footStyles: { fillColor: b.GRIGIO_CHIARO, textColor: 20 },
@@ -13656,7 +13679,7 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
                 { content: b.money(totAvere), styles: { fontStyle: "bold", halign: "right" } },
                 { content: b.money(Math.abs(totDare - totAvere)), styles: { fontStyle: "bold", halign: "right" } },
                 { content: Math.abs(totDare - totAvere) < 0.5 ? "" : (totDare > totAvere ? "D" : "A"), styles: { fontStyle: "bold" } }]],
-        theme: "plain",
+        theme: "plain", showFoot: "lastPage",
         styles: { fontSize: 8, cellPadding: 1.4 },
         headStyles: { fillColor: b.NERO, textColor: 240, fontStyle: "bold" },
         footStyles: { fillColor: b.GRIGIO_CHIARO, textColor: 20 },
@@ -13690,7 +13713,7 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
   y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
   const okSP = Math.abs(prospetti.sbilancio) < 0.01;
   b.barraFinale(y + 6, okSP ? "QUADRATURA: OK" : "SBILANCIO ATTIVO / PASSIVO",
-                okSP ? "0" : b.money(prospetti.sbilancio), okSP ? b.VERDE : b.ROSSO);
+                okSP ? "-" : b.money(prospetti.sbilancio), okSP ? b.VERDE : b.ROSSO);
 
   // --- Conto Economico ---
   b.doc.addPage(); b.intestazioneP("Conto Economico");
