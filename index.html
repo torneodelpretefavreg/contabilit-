@@ -357,6 +357,7 @@
     font-weight: 500;
   }
   .form-row .req { color: var(--danger); }
+  .form-row > * { min-width: 0; }
   input[type=text], input[type=number], input[type=date], input[type=password], select, textarea {
     width: 100%;
     padding: 8px 11px;
@@ -375,7 +376,8 @@
 
   .tipo-switch {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
     gap: 0;
     border: 1px solid var(--rule-2);
     border-radius: var(--radius);
@@ -714,7 +716,47 @@
     }
 
     /* Tipo switch */
-    .tipo-switch button { font-size: 12px; padding: 9px 6px; }
+    .tipo-switch button { font-size: 12.5px; padding: 10px 6px; line-height: 1.25; }
+    /* Nuovo movimento: 4 tipi in griglia 2x2, righe divisorie dal gap */
+    .tipo-switch.tipo-switch-4 {
+      grid-auto-flow: row;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--rule);
+    }
+    .tipo-switch.tipo-switch-4 button {
+      border-right: none;
+      padding: 12px 8px;
+      font-size: 14px;
+    }
+
+    /* Campi: altezza da dito, date che non escono dalla card */
+    .form-grid { gap: 16px; }
+    .form-row label { font-size: 13px; }
+    .form-row input[type=text], .form-row input[type=number], .form-row input[type=date],
+    .form-row input[type=password], .form-row select {
+      min-height: 46px;
+    }
+    input[type=date] {
+      -webkit-appearance: none;
+      appearance: none;
+      display: block;
+      min-width: 0;
+      max-width: 100%;
+      text-align: left;
+    }
+    input[type=date]::-webkit-date-and-time-value { text-align: left; margin: 0; }
+    select { text-overflow: ellipsis; }
+
+    /* Pulsanti del form: sempre a portata, larghi quanto la card */
+    .form-actions {
+      position: sticky;
+      bottom: 0;
+      z-index: 5;
+      background: var(--panel);
+      padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+    }
+    .form-actions .btn { flex: 1; padding: 13px 14px; font-size: 15px; }
 
     /* Filtri: full-width stack */
     .filters {
@@ -1361,7 +1403,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
     <form onSubmit={submit} className="form-grid">
       <div className="form-row">
         <label>Tipo movimento <span className="req">*</span></label>
-        <div className="tipo-switch">
+        <div className="tipo-switch tipo-switch-4">
           <button type="button" className={tipo === "entrata" ? "active entrata" : ""} onClick={() => setTipo("entrata")}>↓ Entrata</button>
           <button type="button" className={tipo === "uscita" ? "active uscita" : ""} onClick={() => setTipo("uscita")}>↑ Uscita</button>
           <button type="button" className={tipo === "giroconto" ? "active giroconto" : ""} onClick={() => setTipo("giroconto")}>⇄ Giroconto</button>
@@ -1499,7 +1541,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
             )}
           </div>
 
-          <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+          <div className="form-actions" style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
             <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
             <button type="submit" className="btn accent" disabled={!quadra}
                     style={!quadra ? {opacity:0.5, cursor:"not-allowed"} : {}}>
@@ -1512,7 +1554,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
       <div className="form-row">
         <label>{tipo === "giroconto" ? "Conto origine" : "Conto liquidità"} {tipo === "giroconto" ? <span className="req">*</span> : <span style={{color:"var(--ink-3)",fontSize:11}}>(opzionale)</span>}</label>
         <select value={contoLiquidita} onChange={e => setContoLiquidita(e.target.value)} required={tipo === "giroconto"}>
-          <option value="">{tipo === "giroconto" ? "— seleziona —" : "— nessuno (movimento non monetario) —"}</option>
+          <option value="">{tipo === "giroconto" ? "— seleziona —" : "— nessuno (non monetario) —"}</option>
           {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome}</option>)}
         </select>
       </div>
@@ -1607,7 +1649,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
         <label>Descrizione</label>
         <textarea value={descrizione} onChange={e => setDescrizione(e.target.value)} placeholder="Motivo / dettaglio operazione" />
       </div>
-      <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
+      <div className="form-actions" style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12, paddingTop:14, borderTop:"1px solid var(--rule)"}}>
         <button type="button" className="btn ghost" onClick={onCancel}>Annulla</button>
         <button type="submit" className="btn accent">Salva movimento</button>
       </div>
