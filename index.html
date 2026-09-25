@@ -835,6 +835,8 @@
   .rf-compact table.tbl td.num, .rf-compact table.tbl th.num { font-size: 10.5px; }
   .rf-table .rf-sez-label { position: sticky; left: 7px; display: inline-block; }
   .rf-table td.num, .rf-table th.num { white-space: nowrap; }
+  .rf-table tr.rf-sep > td { border-top: 1.5px solid var(--ink); }
+  .rf-table tr.rf-sep-2 > td { border-top-width: 2px; }
   @media (max-width: 768px) {
     /* La tabella occupa la larghezza dello schermo e cresce solo se servono
        davvero più colonne (un mese per colonna): prima la colonna Voce si
@@ -852,6 +854,106 @@
     }
     .rf-table th:first-child { z-index: 3; }
     .rf-table th.num { min-width: 64px !important; }
+  }
+  /* === ANALISI: dashboard personalizzate === */
+  .an-tabs { display: inline-flex; border: 1px solid var(--rule-2); border-radius: var(--radius); overflow: hidden; margin-bottom: 16px; }
+  .an-tabs button { border: none; background: var(--panel); color: var(--ink-2); padding: 8px 16px; font-size: 13px; font-weight: 500; }
+  .an-tabs button + button { border-left: 1px solid var(--rule); }
+  .an-tabs button.on { background: var(--ink); color: #f0eee7; }
+  .an-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .an-dash-sel { max-width: 280px; font-weight: 600; }
+  .an-menu-bg { position: fixed; inset: 0; z-index: 29; }
+  .an-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; background: var(--panel); border: 1px solid var(--rule-2);
+    border-radius: 8px; box-shadow: var(--shadow-md); min-width: 230px; padding: 4px; }
+  .an-menu button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 9px 10px; font-size: 13px; border-radius: 5px; color: var(--ink); }
+  .an-menu button:hover { background: var(--panel-2); }
+  .an-stagioni { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+  .an-chip { border: 1px solid var(--rule-2); background: var(--panel); border-radius: 999px; padding: 3px 10px; font-size: 12px;
+    cursor: pointer; color: var(--ink-2); user-select: none; white-space: nowrap; }
+  .an-chip.on { background: var(--ink); color: #f0eee7; border-color: var(--ink); }
+  .an-selbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px; background: var(--accent-soft);
+    border: 1px solid #c8d8ce; border-radius: 8px; margin-bottom: 14px; font-size: 12px; min-height: 40px; }
+  .an-selbar.vuota { background: var(--panel-2); border-color: var(--rule); color: var(--ink-3); }
+  .an-sel { background: var(--accent); color: #fff; border-radius: 999px; padding: 3px 4px 3px 10px; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+  .an-sel button { background: rgba(255,255,255,.22); border: none; color: #fff; border-radius: 999px; width: 20px; height: 20px; line-height: 20px; padding: 0; font-size: 13px; flex: 0 0 auto; }
+  .an-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; grid-auto-flow: row dense; }
+  .an-w { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--radius-lg); display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+  .an-edit .an-w { border-style: dashed; border-color: var(--rule-2); }
+  .an-w3 { grid-column: span 3; } .an-w4 { grid-column: span 4; } .an-w6 { grid-column: span 6; } .an-w8 { grid-column: span 8; } .an-w12 { grid-column: span 12; }
+  .an-h1 { height: 132px; } .an-h2 { height: 300px; } .an-h3 { height: 440px; }
+  .an-w-head { display: flex; align-items: center; gap: 6px; padding: 10px 12px 0; min-height: 30px; }
+  .an-w-title { font-size: 12px; font-weight: 600; color: var(--ink-2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .an-w-tools { display: inline-flex; gap: 3px; flex: 0 0 auto; }
+  .an-w-tools button { border: 1px solid var(--rule); background: var(--panel-2); border-radius: 5px; font-size: 11.5px; padding: 2px 6px; color: var(--ink-2); line-height: 1.3; }
+  .an-w-tools button:disabled { opacity: .35; cursor: default; }
+  .an-w-body { flex: 1; min-height: 0; padding: 8px 12px 12px; overflow: auto; position: relative; }
+  .an-w-body-chart { overflow: hidden; }
+  .an-chart { position: relative; height: 100%; width: 100%; }
+  .an-vuoto { color: var(--ink-3); font-size: 12px; padding: 10px 0; }
+  .an-kpi-val { font-family: 'Fraunces', serif; font-size: 27px; line-height: 1.15; font-weight: 500; }
+  .an-kpi-sub { font-size: 11px; color: var(--ink-3); margin-top: 5px; display: flex; flex-wrap: wrap; gap: 2px 12px; }
+  .an-kpi-sub b { color: var(--ink-2); font-weight: 600; }
+  .an-cl { cursor: pointer; }
+  .an-filtro { display: flex; flex-direction: column; gap: 2px; }
+  .an-cerca { margin-bottom: 6px; padding: 6px 9px !important; font-size: 12.5px; }
+  .an-filtro-item { display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px; border-radius: 5px; cursor: pointer; font-size: 12.5px; border: 1px solid transparent; }
+  .an-filtro-item:hover { border-color: var(--rule-2); }
+  .an-filtro-item.sel { background: var(--accent); color: #fff; }
+  .an-filtro-item.poss { background: var(--panel); }
+  .an-filtro-item.escl { background: #efeee9; color: var(--ink-3); }
+  .an-filtro-n { font-size: 11px; opacity: .7; font-variant-numeric: tabular-nums; }
+  .an-tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--rule); border-radius: 6px; }
+  .an-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .an-tbl th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--ink-3); padding: 5px 8px;
+    border-bottom: 1px solid var(--rule-2); position: sticky; top: 0; background: var(--panel); white-space: nowrap; z-index: 1; }
+  .an-tbl td { padding: 5px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  .an-tbl .n { text-align: right; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .an-tbl tr.tot td { font-weight: 700; background: var(--panel-2); border-top: 1.5px solid var(--ink); }
+  .an-tbl .cl { cursor: pointer; }
+  .an-tbl .cl:hover { text-decoration: underline; color: var(--accent); }
+  .an-mini { padding: 3px 6px !important; font-size: 11.5px !important; min-height: 0 !important; }
+  .an-editor { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  .an-editor > div:last-child { position: sticky; top: 0; }
+  .an-grid-anteprima .an-w { grid-column: span 12; }
+  .an-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; min-width: 0; }
+  .an-field > label { font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
+  .an-row { display: flex; gap: 8px; align-items: flex-start; }
+  .an-row > * { flex: 1; min-width: 0; }
+  .an-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 12px; }
+  .an-check input { width: auto; }
+  .an-swatch { flex: 0 0 24px !important; width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; box-shadow: 0 0 0 1px var(--rule-2) inset; }
+  .an-swatch.on { border-color: var(--ink); }
+  .an-swatch-auto { display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--ink-3); background: var(--panel-2); }
+  .an-filtro-fisso { border: 1px solid var(--rule); border-radius: 6px; padding: 8px; margin-bottom: 6px; background: var(--panel-2); }
+  .an-valori { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; max-height: 130px; overflow: auto; }
+  .an-nota { font-size: 11.5px; color: var(--ink-3); line-height: 1.45; }
+  .an-sez-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .an-sez-head h3 { font-family: 'Fraunces', serif; font-weight: 500; margin: 0; font-size: 18px; }
+  .an-lista-tab { display: grid; gap: 10px; }
+  .an-tab-card { padding: 14px 16px; }
+  .an-tab-top { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .an-tab-nome { font-weight: 600; font-size: 14px; }
+  .an-tab-az { display: flex; flex-wrap: wrap; gap: 6px; }
+  .an-campi { display: flex; flex-wrap: wrap; gap: 4px; }
+  .an-campo { font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--rule); color: var(--ink-2); }
+  .an-campo.num { background: #f4ebd7; border-color: #e6d5a8; color: #7a5a1d; }
+  .an-benvenuto p { color: var(--ink-2); font-size: 13.5px; }
+  .an-aggiungi { width: 100%; margin-top: 12px; border-style: dashed; justify-content: center; }
+  @media (max-width: 900px) {
+    .an-editor { grid-template-columns: 1fr; }
+    .an-editor > div:last-child { position: static; }
+  }
+  @media (max-width: 768px) {
+    .an-grid { gap: 10px; }
+    .an-grid .an-w { grid-column: span 12; }
+    .an-grid .an-w.an-kpi { grid-column: span 6; }
+    .an-h1 { height: auto; min-height: 112px; }
+    .an-h2 { height: 290px; } .an-h3 { height: 390px; }
+    .an-kpi-val { font-size: 21px; }
+    .an-dash-sel { max-width: 100%; flex: 1 1 100%; }
+    .an-tabs { display: flex; }
+    .an-tabs button { flex: 1; }
+    .an-w-tools button { padding: 4px 7px; font-size: 12.5px; }
   }
 </style>
 </head>
@@ -1050,15 +1152,24 @@ const SEED_CESPITI = [{"conto": "PALLONI TORNEO", "classe": "IMMOBILIZZAZIONI MA
 // ============================================================
 // HELPERS
 // ============================================================
+// Numero all'italiana con il punto delle migliaia SEMPRE (anche 3.197,53):
+// il formato "it-IT" di Safari/Chrome lo omette sotto le 10.000, quindi lo aggiungo a mano.
+const numIT = (x, dec = 2) => {
+  let s = Number(x).toLocaleString("it-IT", { minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: false });
+  const neg = s.startsWith("-") || s.startsWith("−");
+  if (neg) s = s.slice(1);
+  const [intPart, decPart] = s.split(",");
+  return (neg ? "-" : "") + intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".") + (decPart !== undefined ? "," + decPart : "");
+};
 const fmt = (n, dec = 2) => {
   if (n === null || n === undefined || isNaN(n)) return "—";
-  return Number(n).toLocaleString("it-IT", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  return numIT(n, dec);
 };
 // Come fmt(), ma con la convenzione dei prospetti di bilancio: i negativi fra parentesi.
 const fmtP = (n, dec = 2) => {
   if (n === null || n === undefined || isNaN(n)) return "—";
   const x = Number(n);
-  const s = Math.abs(x).toLocaleString("it-IT", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  const s = numIT(Math.abs(x), dec);
   return (x < 0 && Math.abs(x) >= Math.pow(10, -dec) / 2) ? "(" + s + ")" : s;
 };
 const fmtEuro = (n) => "€ " + fmt(n);
@@ -1081,7 +1192,7 @@ const r2sym = (n) => {
   return (x < 0 ? -1 : 1) * Math.round(Math.abs(x) * 100) / 100;
 };
 const pdfNum = (n) =>
-  r2sym(n).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  numIT(r2sym(n), 2);
 // Celle vuote al posto degli zeri, come gia' fa il bilancio di verifica.
 const pdfNumVuoto = (n) => (Math.abs(r2sym(n)) < 0.005 ? "" : pdfNum(n));
 // Data in gg/mm/aaaa senza passare da new Date(): nessuno slittamento di fuso.
@@ -4923,7 +5034,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
   const mesiVis = mostraMesi ? (mesiAttivi.length ? mesiAttivi : MESI) : [];
   const nCols = mesiVis.length + 2;
 
-  const fmtPct = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
+  const fmtPct = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1).replace(".", ",") + "%";
 
   const apriDrill = (sezione, categoria, mese) => {
     const movs = filtered.filter(m => {
@@ -4974,10 +5085,10 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
   );
 
   const RigaTotale = ({ label, perMese, tot, strong, classCol }) => (
-    <tr style={strong ? {fontWeight:700, background:"var(--panel-2)", borderTop:"1.5px solid var(--ink)"} : {fontWeight:600}}>
+    <tr className={strong ? "rf-sep" : ""} style={strong ? {fontWeight:700, background:"var(--panel-2)"} : {fontWeight:600}}>
       <td style={{position:"sticky", left:0, background:"var(--panel-2)", fontFamily: strong ? "'Fraunces',serif" : undefined}}>{label}</td>
       {mostraMesi && mesiVis.map(m => <td key={m} className={"num " + (classCol||"")}>{perMese[m] ? fmt(perMese[m]) : ""}</td>)}
-      <td className="num">{fmt(tot)}</td>
+      <td className={"num " + (classCol||"")}>{fmt(tot)}</td>
     </tr>
   );
 
@@ -4993,7 +5104,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
 
   // ===== Export personalizzato del Rendiconto (rispetta filtri correnti + opzioni scelte) =====
   const catTot = (data, cat) => MESI.reduce((s, m) => s + ((data[cat] || {})[m] || 0), 0);
-  const money2 = (v) => Number(v || 0).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money2 = (v) => numIT(v || 0, 2);
   const buildExpModel = () => {
     const mesi = expOpts.mensile ? mesiVis : [];
     const headers = ["Voce", ...mesi.map(m => m.charAt(0).toUpperCase() + m.slice(1, 3)), "Totale"];
@@ -5209,7 +5320,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
             <RigaTotale label="TOTALE INVESTIMENTI" perMese={rf.totInvest} tot={rf.grandInvest} classCol="neg" />
 
             {/* DISP. FINALI */}
-            <tr style={{fontWeight:700, background:"var(--panel-2)", borderTop:"2px solid var(--ink)"}}>
+            <tr className="rf-sep rf-sep-2" style={{fontWeight:700, background:"var(--panel-2)"}}>
               <td style={{position:"sticky", left:0, background:"var(--panel-2)", fontFamily:"'Fraunces',serif"}}>DISP. FINALI</td>
               {mostraMesi && mesiVis.map(m => <td key={m} className="num">{fmt(rf.dispFin[m])}</td>)}
               <td className="num">{fmt(rf.closing)}</td>
@@ -6725,7 +6836,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       const fmtCell = (v) => {
         if (!(v || v === 0)) return "";
         const n = Number(v);
-        const s = Math.abs(n).toLocaleString("it-IT", {minimumFractionDigits:2, maximumFractionDigits:2});
+        const s = numIT(Math.abs(n), 2);
         return (n < 0 && Math.abs(n) >= 0.005) ? "(" + s + ")" : s;
       };
       const fmtPctCell = (v) => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
@@ -6886,7 +6997,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFontSize(9); doc.setFont("helvetica","normal");
       const int0 = (n) => { const x = Number(n) || 0; const r = Math.sign(x) * Math.round(Math.abs(x));
                             if (r === 0) return "-";
-                            const s = Math.abs(r).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+                            const s = numIT(Math.abs(r), 0);
                             return r < 0 ? "(" + s + ")" : s; };
       // Stessa fonte dei prospetti delle pagine seguenti: il frontespizio non puo' contraddirli
       const P = prospettiSchema;
@@ -14602,7 +14713,7 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
     const x = Number(n) || 0;
     const r = Math.sign(x) * Math.round(Math.abs(x));   // simmetrico: -676,50 → -677
     if (r === 0) return "-";
-    const s = Math.abs(r).toLocaleString("it-IT", { maximumFractionDigits: 0 });
+    const s = numIT(Math.abs(r), 0);
     return r < 0 ? "(" + s + ")" : s;
   };
   const oggi = new Date().toLocaleDateString("it-IT");
@@ -16153,6 +16264,1394 @@ function stagionePrecedenteDi(key) {
   return `${y}-${String(y + 1).slice(2)}`;
 }
 
+// ============================================================
+// ANALISI — dashboard personalizzate in stile Qlik Sense
+// ------------------------------------------------------------
+// Fonti: movimenti, scritture contabili, cespiti e budget di una o più
+// stagioni, più le tabelle importate da Excel/CSV (analisi/tabelle).
+// Le dashboard si salvano in analisi/dashboards.
+// Selezioni associative: toccando un valore (una barra, una riga, una voce
+// di un filtro) si seleziona quel valore sul suo campo, e la selezione filtra
+// TUTTE le fonti che hanno un campo con lo stesso nome, come in Qlik.
+// ============================================================
+const AN_PALETTE = ["#2d5e3e", "#b54343", "#b8954b", "#3b4a5a", "#7c3aed", "#0e7490", "#c2410c", "#4d7c0f", "#be185d", "#78716c"];
+const AN_VUOTO = "(vuoto)";
+const anKey = (s) => String(s || "").trim().toLowerCase();
+const anVal = (v) => (v === null || v === undefined || v === "") ? AN_VUOTO : String(v);
+const anCap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+const AN_MESI_CAP = MESI.map(anCap);
+const anPulisci = (o) => JSON.parse(JSON.stringify(o));
+const anNuovoId = (p = "w") => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+const AN_AGG = [["somma", "Somma"], ["media", "Media"], ["min", "Minimo"], ["max", "Massimo"], ["conteggio", "Conteggio righe"], ["distinti", "Valori distinti"]];
+const AN_TIPI = [["kpi", "KPI"], ["barre", "Barre"], ["barreO", "Barre orizzontali"], ["linee", "Linee"], ["torta", "Torta"],
+  ["tabella", "Tabella"], ["pivot", "Tabella pivot"], ["filtro", "Pannello filtro"]];
+const AN_GRAFICI = ["barre", "barreO", "linee", "torta"];
+const AN_LARGHEZZE = [[3, "1/4"], [4, "1/3"], [6, "Metà"], [8, "2/3"], [12, "Intera"]];
+const AN_ALTEZZE = [[1, "Bassa"], [2, "Media"], [3, "Alta"]];
+
+// ---------- campi delle fonti dell'app ----------
+// tipo: testo | data | mese | numero. euro: la misura è un importo.
+const AN_CAMPI = {
+  mov: [["Stagione", "testo"], ["Data", "data"], ["Anno-mese", "testo"], ["Mese", "mese"], ["Tipo", "testo"], ["Conto", "testo"],
+    ["Categoria conto", "testo"], ["Prospetto", "testo"], ["Categoria", "testo"], ["BU", "testo"], ["Conto liquidità", "testo"],
+    ["Descrizione", "testo"], ["Movimento di cassa", "testo"], ["Apertura", "testo"],
+    ["Importo", "numero", 1], ["Entrate", "numero", 1], ["Uscite", "numero", 1], ["Flusso netto", "numero", 1]],
+  scr: [["Stagione", "testo"], ["Data", "data"], ["Anno-mese", "testo"], ["Mese", "mese"], ["Conto", "testo"], ["Categoria conto", "testo"],
+    ["Prospetto", "testo"], ["BU", "testo"], ["Descrizione", "testo"], ["Apertura", "testo"],
+    ["Dare", "numero", 1], ["Avere", "numero", 1], ["Saldo (Dare − Avere)", "numero", 1], ["Saldo (Avere − Dare)", "numero", 1]],
+  cesp: [["Stagione", "testo"], ["Bene", "testo"], ["Classe", "testo"], ["Anno inizio", "testo"],
+    ["N. beni", "numero"], ["Aliquota %", "numero"], ["Costo storico", "numero", 1], ["Quota esercizio", "numero", 1], ["Fondo ammortamento", "numero", 1]],
+  bud: [["Stagione", "testo"], ["Budget", "testo"], ["BU", "testo"], ["Voce", "testo"], ["Natura", "testo"], ["Realizzata", "testo"],
+    ["Importo budget", "numero", 1], ["Importo effettivo", "numero", 1]],
+};
+const AN_FONTI_APP = {
+  mov: ["Movimenti", "Entrate, uscite e giroconti come li registri. Entrate e Uscite contano solo i movimenti di cassa, come il Rendiconto."],
+  scr: ["Scritture contabili", "Le righe in partita doppia del Libro Giornale, conto per conto: servono per costi, ricavi e saldi."],
+  cesp: ["Cespiti", "Il libro cespiti di ogni stagione."],
+  bud: ["Budget", "Le voci dei budget salvati, con importo previsto ed effettivo."],
+};
+
+const anCampiDef = (arr) => arr.map(([nome, tipo, euro]) => ({ nome, tipo, euro: !!euro }));
+const anMappa = (campi) => { const m = {}; campi.forEach(c => { m[anKey(c.nome)] = c.nome; }); return m; };
+
+// ---------- lettura di numeri e date da file ----------
+function anNumero(v) {
+  if (typeof v === "number") return isFinite(v) ? v : null;
+  if (v instanceof Date || v === null || v === undefined) return null;
+  let s = String(v).replace(/[€\s\u00a0]/g, "");
+  if (!s) return null;
+  let neg = false;
+  if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1); }
+  if (s.includes(",") && s.includes(".")) {
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (s.includes(",")) {
+    if ((s.match(/,/g) || []).length > 1) return null;
+    s = s.replace(",", ".");
+  } else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  if (!/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(s)) return null;
+  const n = Number(s);
+  return isFinite(n) ? (neg ? -n : n) : null;
+}
+function anDataISO(v) {
+  if (v instanceof Date) {
+    if (isNaN(v)) return null;
+    // Excel lavora in ora locale: riporto al giorno di calendario più vicino
+    const t = v.getTime() - v.getTimezoneOffset() * 60000;
+    return new Date(Math.round(t / 86400000) * 86400000).toISOString().slice(0, 10);
+  }
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  let y, mo, d;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else {
+    m = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2}|\d{4})$/.exec(s);
+    if (!m) return null;
+    d = +m[1]; mo = +m[2]; y = +m[3]; if (y < 100) y += 2000;
+  }
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+function anParseCSV(testo) {
+  const txt = String(testo || "").replace(/^\uFEFF/, "");
+  const prima = txt.split(/\r?\n/)[0] || "";
+  const conta = (ch) => prima.split(ch).length - 1;
+  const sep = [";", ",", "\t"].sort((a, b) => conta(b) - conta(a))[0];
+  const righe = [];
+  let riga = [], campo = "", inQ = false;
+  for (let i = 0; i < txt.length; i++) {
+    const c = txt[i];
+    if (inQ) {
+      if (c === '"') { if (txt[i + 1] === '"') { campo += '"'; i++; } else inQ = false; }
+      else campo += c;
+    } else if (c === '"') inQ = true;
+    else if (c === sep) { riga.push(campo); campo = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && txt[i + 1] === "\n") i++;
+      riga.push(campo); righe.push(riga); riga = []; campo = "";
+    } else campo += c;
+  }
+  if (campo !== "" || riga.length) { riga.push(campo); righe.push(riga); }
+  return righe;
+}
+function anTipoColonna(valori) {
+  const pieni = valori.filter(v => v !== "" && v !== null && v !== undefined);
+  if (!pieni.length) return "testo";
+  if (pieni.every(v => anDataISO(v) !== null)) return "data";
+  const num = pieni.filter(v => anNumero(v) !== null).length;
+  return num / pieni.length >= 0.9 ? "numero" : "testo";
+}
+
+// ---------- costruzione delle fonti ----------
+function anCostruisciFonti(perStagione, tabelle) {
+  const mov = [], scr = [], cesp = [], bud = [];
+  Object.entries(perStagione).forEach(([s, d]) => {
+    if (!d || d.loading) return;
+    const cM = {}; (d.conti || []).forEach(c => { if (c) cM[c.codice] = c; });
+    const nomeC = (cod) => (cod === null || cod === undefined || cod === "") ? ""
+      : `${String(cod).padStart(2, "0")} · ${String((cM[cod] && cM[cod].nome) || ("Conto " + cod)).trim()}`;
+    const range = intervalloStagione(s);
+    const movs = (d.movimenti || []).filter(m => m && (!range || !m.data || (m.data >= range.da && m.data <= range.a)));
+    movs.forEach(m => {
+      const ap = isAperturaMov(m);
+      const cassa = !ap && !m.nonMonetario && (m.tipo === "entrata" || m.tipo === "uscita");
+      const imp = Number(m.importo) || 0;
+      const entr = cassa && m.tipo === "entrata" ? imp : 0;
+      const usc = cassa && m.tipo === "uscita" ? imp : 0;
+      const c = cM[m.contoPdC] || {};
+      mov.push({
+        "Stagione": s, "Data": m.data || "", "Anno-mese": (m.data || "").slice(0, 7), "Mese": anCap(m.mese || meseDaData(m.data)),
+        "Tipo": anCap(m.tipo || ""), "Conto": nomeC(m.contoPdC), "Categoria conto": c.categoria || "", "Prospetto": c.prospetto || "",
+        "Categoria": m.categoria || "", "BU": m.bu || "", "Conto liquidità": m.contoLiquidita ? nomeC(m.contoLiquidita) : "",
+        "Descrizione": m.descrizione || "", "Movimento di cassa": cassa ? "Sì" : "No", "Apertura": ap ? "Sì" : "No",
+        "Importo": imp, "Entrate": entr, "Uscite": usc, "Flusso netto": entr - usc,
+      });
+    });
+    let scritture = [];
+    try { scritture = generaLibroGiornale(movs, d.saldiIniziali || {}, cM); } catch (e) { scritture = []; }
+    scritture.forEach(sc => (sc.righe || []).forEach(r => {
+      const c = cM[r.codice] || {};
+      const dare = Number(r.dare) || 0, avere = Number(r.avere) || 0;
+      const ap = !!sc.apertura || sc.origine === "apertura";
+      // la scrittura dei saldi iniziali ha una data fissa: la porto al primo giorno della sua stagione
+      const data = sc.origine === "apertura" && range ? range.da : (sc.data || "");
+      scr.push({
+        "Stagione": s, "Data": data, "Anno-mese": data.slice(0, 7), "Mese": anCap(meseDaData(data)),
+        "Conto": nomeC(r.codice), "Categoria conto": c.categoria || "", "Prospetto": c.prospetto || "",
+        "BU": sc.bu || "", "Descrizione": sc.descrizione || "", "Apertura": ap ? "Sì" : "No",
+        "Dare": dare, "Avere": avere, "Saldo (Dare − Avere)": dare - avere, "Saldo (Avere − Dare)": avere - dare,
+      });
+    }));
+    (d.cespiti || []).forEach(k => {
+      if (!k) return;
+      cesp.push({
+        "Stagione": s, "Bene": k.conto || "", "Classe": k.classe || "", "Anno inizio": k.anno_inizio ? String(k.anno_inizio) : "",
+        "N. beni": Number(k.n_beni) || 0, "Aliquota %": Number(k.aliquota) || 0, "Costo storico": Number(k.costo_storico) || 0,
+        "Quota esercizio": Number(k.quota_esercizio) || 0, "Fondo ammortamento": Number(k.fondo_ammortamento) || 0,
+      });
+    });
+    Object.values(d.budgets || {}).forEach(b => {
+      if (!b) return;
+      const voci = Array.isArray(b.voci) ? b.voci : Object.values(b.voci || {});
+      voci.forEach(v => {
+        if (!v) return;
+        bud.push({
+          "Stagione": s, "Budget": b.nome || "", "BU": b.bu && b.bu !== "ALL" ? b.bu : "", "Voce": v.descrizione || "",
+          "Natura": anCap(v.natura || ""), "Realizzata": v.realizzato ? "Sì" : "No",
+          "Importo budget": Number(v.importo) || 0,
+          "Importo effettivo": v.realizzato ? (Number(v.importoEffettivo ?? v.importo) || 0) : 0,
+        });
+      });
+    });
+  });
+  const fonti = {};
+  const aggiungi = (id, nome, descr, campi, righe, importata) => { fonti[id] = { id, nome, descr, campi, righe, mappa: anMappa(campi), importata: !!importata }; };
+  aggiungi("mov", AN_FONTI_APP.mov[0], AN_FONTI_APP.mov[1], anCampiDef(AN_CAMPI.mov), mov);
+  aggiungi("scr", AN_FONTI_APP.scr[0], AN_FONTI_APP.scr[1], anCampiDef(AN_CAMPI.scr), scr);
+  aggiungi("cesp", AN_FONTI_APP.cesp[0], AN_FONTI_APP.cesp[1], anCampiDef(AN_CAMPI.cesp), cesp);
+  aggiungi("bud", AN_FONTI_APP.bud[0], AN_FONTI_APP.bud[1], anCampiDef(AN_CAMPI.bud), bud);
+  Object.entries(tabelle || {}).forEach(([id, t]) => {
+    if (!t) return;
+    const colonne = (Array.isArray(t.colonne) ? t.colonne : Object.values(t.colonne || {})).filter(Boolean);
+    const grezze = Array.isArray(t.righe) ? t.righe : Object.values(t.righe || {});
+    const campi = colonne.map(c => ({ nome: c.nome, tipo: c.tipo === "numero" ? "numero" : c.tipo === "data" ? "data" : "testo", euro: false }));
+    const nomi = new Set(campi.map(c => anKey(c.nome)));
+    const colData = colonne.find(c => c.tipo === "data");
+    const derivati = [];
+    if (colData) {
+      if (!nomi.has("stagione")) derivati.push({ nome: "Stagione", tipo: "testo", euro: false, calcola: (d) => d ? stagioneDaData(d) : "" });
+      if (!nomi.has("mese")) derivati.push({ nome: "Mese", tipo: "mese", euro: false, calcola: (d) => d ? anCap(meseDaData(d)) : "" });
+      if (!nomi.has("anno-mese")) derivati.push({ nome: "Anno-mese", tipo: "testo", euro: false, calcola: (d) => d ? d.slice(0, 7) : "" });
+    }
+    const iData = colData ? colonne.indexOf(colData) : -1;
+    const righe = grezze.filter(Boolean).map(r => {
+      const o = {};
+      colonne.forEach((c, i) => { const v = r[i]; o[c.nome] = (v === undefined || v === null) ? "" : v; });
+      derivati.forEach(dv => { o[dv.nome] = dv.calcola(iData >= 0 ? r[iData] : ""); });
+      return o;
+    });
+    const tuttiCampi = [...campi, ...derivati.map(({ calcola, ...x }) => x)];
+    aggiungi("tab:" + id, t.nome || "Tabella", `Importata${t.file ? " da " + t.file : ""}${derivati.length ? " · Stagione, Mese e Anno-mese ricavati dalla colonna " + colData.nome : ""}`, tuttiCampi, righe, true);
+  });
+  return fonti;
+}
+
+// ---------- motore di calcolo ----------
+function anFiltra(fonte, filtri, selezioni, escludiKey) {
+  const mappa = fonte.mappa;
+  const fissi = (filtri || []).filter(f => f && f.campo && f.valori && f.valori.length && mappa[anKey(f.campo)])
+    .map(f => ({ campo: mappa[anKey(f.campo)], valori: f.valori }));
+  const sel = Object.entries(selezioni || {}).filter(([k, s]) => k !== escludiKey && mappa[k] && s && s.valori && s.valori.length)
+    .map(([k, s]) => ({ campo: mappa[k], valori: s.valori }));
+  if (!fissi.length && !sel.length) return fonte.righe;
+  return fonte.righe.filter(r => fissi.every(f => f.valori.includes(anVal(r[f.campo]))) && sel.every(f => f.valori.includes(anVal(r[f.campo]))));
+}
+function anAggrega(righe, m) {
+  const agg = (m && m.agg) || "somma";
+  if (agg === "conteggio") return righe.length;
+  if (!m || !m.campo) return 0;
+  if (agg === "distinti") return new Set(righe.map(r => anVal(r[m.campo]))).size;
+  let n = 0, sum = 0, min = Infinity, max = -Infinity;
+  righe.forEach(r => {
+    const v = r[m.campo];
+    if (v === "" || v === null || v === undefined) return;
+    const x = Number(v); if (isNaN(x)) return;
+    n++; sum += x; if (x < min) min = x; if (x > max) max = x;
+  });
+  if (agg === "media") return n ? sum / n : 0;
+  if (agg === "min") return n ? min : 0;
+  if (agg === "max") return n ? max : 0;
+  return Math.round(sum * 100) / 100;
+}
+function anGruppi(righe, campo) {
+  const g = new Map();
+  righe.forEach(r => { const k = anVal(r[campo]); let a = g.get(k); if (!a) { a = []; g.set(k, a); } a.push(r); });
+  return g;
+}
+const anTipoCampo = (fonte, nome) => { const c = fonte.campi.find(x => x.nome === nome); return c ? c.tipo : "testo"; };
+const anHaCampo = (fonte, nome) => !!nome && fonte.campi.some(c => c.nome === nome);
+function anOrdinaVal(vals, tipo) {
+  const vuoti = vals.filter(v => v === AN_VUOTO);
+  const resto = vals.filter(v => v !== AN_VUOTO);
+  if (tipo === "mese") resto.sort((a, b) => AN_MESI_CAP.indexOf(a) - AN_MESI_CAP.indexOf(b));
+  else if (tipo === "numero") resto.sort((a, b) => Number(a) - Number(b));
+  else resto.sort((a, b) => a.localeCompare(b, "it", { numeric: true }));
+  return [...resto, ...vuoti];
+}
+const anNomeAgg = (agg) => (AN_AGG.find(a => a[0] === agg) || [0, agg])[1];
+const anEtichettaMisura = (m) => !m ? "" : m.agg === "conteggio" ? "N. righe" : m.agg === "distinti" ? `${m.campo} (distinti)`
+  : (m.agg || "somma") === "somma" ? m.campo : `${m.campo} (${anNomeAgg(m.agg).toLowerCase()})`;
+function anFormatoMisura(m, fonte, formato) {
+  if (formato && formato !== "auto") return formato;
+  if (!m || m.agg === "conteggio" || m.agg === "distinti") return "numero";
+  const c = fonte && fonte.campi.find(x => x.nome === m.campo);
+  return c && c.euro ? "euro" : "numero";
+}
+const anFormatta = (v, formato) => {
+  const n = Number(v) || 0;
+  if (formato === "euro") return "€ " + numIT(n, 2);
+  return numIT(n, Number.isInteger(n) ? 0 : 2);
+};
+const anCompatto = (v) => {
+  const a = Math.abs(v);
+  if (a >= 1e6) return numIT(v / 1e6, 1) + " M";
+  if (a >= 1e4) return numIT(v / 1e3, 0) + "k";
+  return numIT(v, Number.isInteger(v) ? 0 : 1);
+};
+function anTitoloAuto(w) {
+  const m = (w.misure || [])[0];
+  const mis = anEtichettaMisura(m);
+  if (w.tipo === "kpi") return mis || "KPI";
+  if (w.tipo === "filtro") return w.dim || "Filtro";
+  if (w.tipo === "tabella") return (w.dims || []).filter(Boolean).join(" · ") || "Tabella";
+  if (w.tipo === "pivot") return `${mis}: ${w.dim || "?"} × ${w.dim2 || "?"}`;
+  return `${mis} per ${w.dim || "?"}${w.dim2 && w.tipo !== "torta" ? " e " + w.dim2 : ""}`;
+}
+
+function anDatiWidget(w, fonte, sel) {
+  if (!fonte) return { errore: "Fonte dati non trovata: la tabella potrebbe essere stata eliminata." };
+  if (w.tipo === "filtro") {
+    if (!anHaCampo(fonte, w.dim)) return { errore: "Scegli il campo del filtro." };
+    const k = anKey(w.dim);
+    const base = anFiltra(fonte, w.filtri, {}, null);
+    const poss = anFiltra(fonte, w.filtri, sel, k);
+    const cnt = new Map();
+    poss.forEach(r => { const v = anVal(r[w.dim]); cnt.set(v, (cnt.get(v) || 0) + 1); });
+    const tutti = anOrdinaVal([...new Set(base.map(r => anVal(r[w.dim])))], anTipoCampo(fonte, w.dim));
+    const selV = (sel[k] && sel[k].valori) || [];
+    return { valori: tutti.map(v => ({ v, n: cnt.get(v) || 0, stato: selV.includes(v) ? "sel" : (cnt.has(v) ? "poss" : "escl") })) };
+  }
+  const righe = anFiltra(fonte, w.filtri, sel, null);
+  const m0 = (w.misure || [])[0] || { agg: "conteggio" };
+  if (m0.agg !== "conteggio" && !anHaCampo(fonte, m0.campo)) return { errore: "Scegli la misura." };
+  if (w.tipo === "kpi") {
+    const valore = anAggrega(righe, m0);
+    let perStag = null;
+    if (w.perStagione !== false && anHaCampo(fonte, "Stagione")) {
+      const g = anGruppi(righe, "Stagione");
+      if (g.size > 1) perStag = anOrdinaVal([...g.keys()], "testo").map(s => ({ s, v: anAggrega(g.get(s), m0) }));
+    }
+    return { valore, perStag };
+  }
+  if (w.tipo === "tabella") {
+    const dims = (w.dims || []).filter(d => anHaCampo(fonte, d));
+    const mis = (w.misure || []).filter(m => m && (m.agg === "conteggio" || anHaCampo(fonte, m.campo)));
+    if (!dims.length && !mis.length) return { errore: "Scegli almeno una dimensione o una misura." };
+    const g = new Map();
+    righe.forEach(r => {
+      const vals = dims.map(d => anVal(r[d]));
+      const k = vals.join("\u0001");
+      let a = g.get(k); if (!a) { a = { vals, righe: [] }; g.set(k, a); }
+      a.righe.push(r);
+    });
+    let rows = [...g.values()].map(x => ({ vals: x.vals, mis: mis.map(m => anAggrega(x.righe, m)) }));
+    if (w.nascondiZeri !== false && mis.length) rows = rows.filter(r => r.mis.some(v => Math.abs(v) > 1e-7));
+    const tipo0 = dims.length ? anTipoCampo(fonte, dims[0]) : "testo";
+    const ord = w.ordine && w.ordine !== "auto" ? w.ordine
+      : (!mis.length || ["mese", "data"].includes(tipo0) || /stagione|anno|mese|data/i.test(dims[0] || "") ? "etichetta" : "desc");
+    if (ord === "etichetta") {
+      const pos = dims.map(d => { const o = anOrdinaVal([...new Set(rows.map(r => r.vals[dims.indexOf(d)]))], anTipoCampo(fonte, d)); const mp = new Map(); o.forEach((v, i) => mp.set(v, i)); return mp; });
+      rows.sort((a, b) => { for (let i = 0; i < dims.length; i++) { const d = pos[i].get(a.vals[i]) - pos[i].get(b.vals[i]); if (d) return d; } return 0; });
+    } else rows.sort((a, b) => ord === "desc" ? (b.mis[0] || 0) - (a.mis[0] || 0) : (a.mis[0] || 0) - (b.mis[0] || 0));
+    if (w.limite > 0) rows = rows.slice(0, w.limite);
+    return { dims, mis, rows, totale: mis.map(m => anAggrega(righe, m)) };
+  }
+  if (!anHaCampo(fonte, w.dim)) return { errore: "Scegli la dimensione." };
+  if (w.tipo === "pivot") {
+    if (!anHaCampo(fonte, w.dim2)) return { errore: "Scegli il campo delle colonne." };
+    const g = anGruppi(righe, w.dim);
+    let colVals = anOrdinaVal([...new Set(righe.map(r => anVal(r[w.dim2])))], anTipoCampo(fonte, w.dim2));
+    let rowVals = [...g.keys()];
+    const celle = new Map(), totR = new Map(), totC = new Map();
+    rowVals.forEach(rv => {
+      const g2 = anGruppi(g.get(rv), w.dim2);
+      colVals.forEach(cv => { if (g2.has(cv)) celle.set(rv + "\u0001" + cv, anAggrega(g2.get(cv), m0)); });
+      totR.set(rv, anAggrega(g.get(rv), m0));
+    });
+    const gc = anGruppi(righe, w.dim2);
+    colVals.forEach(cv => totC.set(cv, anAggrega(gc.get(cv) || [], m0)));
+    if (w.nascondiZeri !== false) {
+      rowVals = rowVals.filter(rv => colVals.some(cv => Math.abs(celle.get(rv + "\u0001" + cv) || 0) > 1e-7));
+      colVals = colVals.filter(cv => rowVals.some(rv => Math.abs(celle.get(rv + "\u0001" + cv) || 0) > 1e-7));
+    }
+    const tipoR = anTipoCampo(fonte, w.dim);
+    const ord = w.ordine && w.ordine !== "auto" ? w.ordine : (["mese", "data"].includes(tipoR) || /stagione|anno|mese|data/i.test(w.dim) ? "etichetta" : "desc");
+    if (ord === "etichetta") rowVals = anOrdinaVal(rowVals, tipoR);
+    else rowVals.sort((a, b) => ord === "desc" ? totR.get(b) - totR.get(a) : totR.get(a) - totR.get(b));
+    if (w.limite > 0) rowVals = rowVals.slice(0, w.limite);
+    return { rowVals, colVals, celle, totR, totC, tot: anAggrega(righe, m0) };
+  }
+  // grafici
+  const tipoDim = anTipoCampo(fonte, w.dim);
+  const g = anGruppi(righe, w.dim);
+  const usaSerie = w.tipo !== "torta" && anHaCampo(fonte, w.dim2);
+  const serieNomi = usaSerie ? anOrdinaVal([...new Set(righe.map(r => anVal(r[w.dim2])))], anTipoCampo(fonte, w.dim2)) : [anEtichettaMisura(m0)];
+  const valori = {};
+  let etichette = [...g.keys()];
+  etichette.forEach(et => {
+    const rr = g.get(et);
+    if (usaSerie) { const g2 = anGruppi(rr, w.dim2); valori[et] = serieNomi.map(s => g2.has(s) ? anAggrega(g2.get(s), m0) : 0); }
+    else valori[et] = [anAggrega(rr, m0)];
+  });
+  const tot = (et) => valori[et].reduce((a, b) => a + b, 0);
+  if (w.nascondiZeri !== false) etichette = etichette.filter(et => valori[et].some(v => Math.abs(v) > 1e-7));
+  const ord = w.ordine && w.ordine !== "auto" ? w.ordine
+    : (["mese", "data"].includes(tipoDim) || /stagione|anno|mese|data/i.test(w.dim) || w.tipo === "linee" ? "etichetta" : "desc");
+  if (ord === "etichetta") etichette = anOrdinaVal(etichette, tipoDim);
+  else etichette.sort((a, b) => ord === "desc" ? tot(b) - tot(a) : tot(a) - tot(b));
+  if (w.limite > 0) etichette = etichette.slice(0, w.limite);
+  return { etichette, serie: serieNomi.map((nome, i) => ({ nome, valori: etichette.map(et => valori[et][i]) })) };
+}
+
+// Dati di un oggetto come tabella semplice (per Excel e PDF)
+function anTabellare(w, dati, fonte) {
+  if (!dati || dati.errore) return { intestazioni: ["Nota"], righe: [[dati ? dati.errore : "Nessun dato"]] };
+  const m0 = (w.misure || [])[0];
+  if (w.tipo === "kpi") {
+    const r = [[anEtichettaMisura(m0) || "Valore", dati.valore]];
+    (dati.perStag || []).forEach(x => r.push(["Stagione " + x.s, x.v]));
+    return { intestazioni: ["Misura", "Valore"], righe: r };
+  }
+  if (w.tipo === "filtro") return { intestazioni: [w.dim, "Righe", "Stato"], righe: dati.valori.map(x => [x.v, x.n, x.stato === "sel" ? "Selezionato" : x.stato === "poss" ? "Possibile" : "Escluso"]) };
+  if (w.tipo === "tabella") {
+    const r = dati.rows.map(x => [...x.vals, ...x.mis]);
+    if (dati.mis.length && dati.dims.length) r.push(["Totale", ...dati.dims.slice(1).map(() => ""), ...dati.totale]);
+    return { intestazioni: [...dati.dims, ...dati.mis.map(anEtichettaMisura)], righe: r };
+  }
+  if (w.tipo === "pivot") {
+    const r = dati.rowVals.map(rv => [rv, ...dati.colVals.map(cv => dati.celle.get(rv + "\u0001" + cv) || 0), dati.totR.get(rv) || 0]);
+    r.push(["Totale", ...dati.colVals.map(cv => dati.totC.get(cv) || 0), dati.tot]);
+    return { intestazioni: [`${w.dim} \\ ${w.dim2}`, ...dati.colVals, "Totale"], righe: r };
+  }
+  return { intestazioni: [w.dim, ...dati.serie.map(s => s.nome)], righe: dati.etichette.map((et, i) => [et, ...dati.serie.map(s => s.valori[i])]) };
+}
+
+// ---------- grafico (Chart.js) ----------
+function AnGrafico({ w, dati, formato, onEtichetta, registra }) {
+  const ref = useRef(null);
+  const cbRef = useRef(onEtichetta);
+  cbRef.current = onEtichetta;
+  useEffect(() => {
+    if (!ref.current || !window.Chart) return;
+    const tipo = w.tipo === "torta" ? "doughnut" : w.tipo === "linee" ? "line" : "bar";
+    const multi = dati.serie.length > 1;
+    const orizz = w.tipo === "barreO";
+    const datasets = dati.serie.map((s, i) => {
+      const col = multi ? AN_PALETTE[i % AN_PALETTE.length] : (w.colore || AN_PALETTE[0]);
+      if (tipo === "doughnut") return { label: s.nome, data: s.valori, backgroundColor: dati.etichette.map((_, j) => AN_PALETTE[j % AN_PALETTE.length]), borderColor: "#fff", borderWidth: 1 };
+      if (tipo === "line") return { label: s.nome, data: s.valori, borderColor: col, backgroundColor: col + "22", fill: !multi, tension: 0.25, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2 };
+      return { label: s.nome, data: s.valori, backgroundColor: col, borderRadius: 3, maxBarThickness: 46 };
+    });
+    const tronca = function (v) { const l = String(this.getLabelForValue(v)); return l.length > 18 ? l.slice(0, 17) + "…" : l; };
+    const asseV = { beginAtZero: true, ticks: { font: { size: 10 }, callback: (v) => anCompatto(v) }, grid: { color: "#efede7" } };
+    const asseC = { ticks: { font: { size: 10 }, autoSkip: true, maxRotation: 45, callback: tronca }, grid: { display: false } };
+    const chart = new window.Chart(ref.current.getContext("2d"), {
+      type: tipo,
+      data: { labels: dati.etichette, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 200 },
+        indexAxis: orizz ? "y" : "x",
+        interaction: { mode: tipo === "line" ? "index" : "nearest", intersect: tipo !== "line" },
+        onClick: (evt, els) => { if (els && els.length && cbRef.current) cbRef.current(dati.etichette[els[0].index]); },
+        onHover: (evt, els) => { const t = evt && evt.native && evt.native.target; if (t) t.style.cursor = els && els.length ? "pointer" : "default"; },
+        plugins: {
+          legend: { display: multi || tipo === "doughnut", position: "bottom", labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
+          tooltip: { callbacks: { label: (ctx) => {
+            const v = tipo === "doughnut" ? ctx.parsed : (orizz ? ctx.parsed.x : ctx.parsed.y);
+            return `${(multi || tipo === "doughnut") ? (tipo === "doughnut" ? ctx.label : ctx.dataset.label) + ": " : ""}${anFormatta(v, formato)}`;
+          } } },
+        },
+        scales: tipo === "doughnut" ? {} : (orizz ? { x: asseV, y: asseC } : { x: asseC, y: asseV }),
+      },
+    });
+    if (registra) registra(w.id, chart);
+    return () => { if (registra) registra(w.id, null); chart.destroy(); };
+  }, [w, dati, formato]);
+  return <canvas ref={ref} />;
+}
+
+// ---------- un oggetto della dashboard ----------
+function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, registra }) {
+  const dati = useMemo(() => anDatiWidget(w, fonte, selezioni), [w, fonte, selezioni]);
+  const [cerca, setCerca] = useState("");
+  const m0 = (w.misure || [])[0];
+  const formato = anFormatoMisura(m0, fonte, w.formato);
+  const titolo = w.titolo || anTitoloAuto(w);
+  let corpo;
+  if (dati.errore) corpo = <div className="an-vuoto">{dati.errore}</div>;
+  else if (w.tipo === "kpi") {
+    corpo = (
+      <div>
+        <div className="an-kpi-val" style={w.colore ? { color: w.colore } : {}}>{anFormatta(dati.valore, formato)}</div>
+        {dati.perStag && (
+          <div className="an-kpi-sub">
+            {dati.perStag.map(x => (
+              <span key={x.s} className="an-cl" onClick={() => onSeleziona("Stagione", x.s)}>{x.s}: <b>{anFormatta(x.v, formato)}</b></span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  } else if (w.tipo === "filtro") {
+    const lista = cerca ? dati.valori.filter(x => x.v.toLowerCase().includes(cerca.toLowerCase())) : dati.valori;
+    corpo = (
+      <div className="an-filtro">
+        {dati.valori.length > 8 && <input className="an-cerca" placeholder="Cerca…" value={cerca} onChange={e => setCerca(e.target.value)} />}
+        {lista.map(x => (
+          <div key={x.v} className={"an-filtro-item " + x.stato} onClick={() => onSeleziona(w.dim, x.v)}>
+            <span>{x.v}</span><span className="an-filtro-n">{x.n || ""}</span>
+          </div>
+        ))}
+        {!lista.length && <div className="an-vuoto">Nessun valore</div>}
+      </div>
+    );
+  } else if (w.tipo === "tabella") {
+    corpo = !dati.rows.length ? <div className="an-vuoto">Nessun dato con le selezioni attuali</div> : (
+      <table className="an-tbl">
+        <thead><tr>{dati.dims.map(d => <th key={d}>{d}</th>)}{dati.mis.map((m, i) => <th key={i} className="n">{anEtichettaMisura(m)}</th>)}</tr></thead>
+        <tbody>
+          {dati.rows.map((r, i) => (
+            <tr key={i}>
+              {r.vals.map((v, j) => <td key={j} className="cl" onClick={() => onSeleziona(dati.dims[j], v)}>{v}</td>)}
+              {r.mis.map((v, j) => <td key={"m" + j} className="n">{anFormatta(v, anFormatoMisura(dati.mis[j], fonte, w.formato))}</td>)}
+            </tr>
+          ))}
+          {dati.mis.length > 0 && dati.dims.length > 0 && dati.rows.length > 1 && (
+            <tr className="tot">
+              <td colSpan={dati.dims.length}>Totale</td>
+              {dati.totale.map((v, j) => <td key={j} className="n">{anFormatta(v, anFormatoMisura(dati.mis[j], fonte, w.formato))}</td>)}
+            </tr>
+          )}
+        </tbody>
+      </table>
+    );
+  } else if (w.tipo === "pivot") {
+    corpo = !dati.rowVals.length ? <div className="an-vuoto">Nessun dato con le selezioni attuali</div> : (
+      <table className="an-tbl">
+        <thead><tr>
+          <th>{w.dim}</th>
+          {dati.colVals.map(cv => <th key={cv} className="n cl" onClick={() => onSeleziona(w.dim2, cv)}>{cv}</th>)}
+          <th className="n">Totale</th>
+        </tr></thead>
+        <tbody>
+          {dati.rowVals.map(rv => (
+            <tr key={rv}>
+              <td className="cl" onClick={() => onSeleziona(w.dim, rv)}>{rv}</td>
+              {dati.colVals.map(cv => { const v = dati.celle.get(rv + "\u0001" + cv); return <td key={cv} className="n">{v ? anFormatta(v, formato) : ""}</td>; })}
+              <td className="n"><b>{anFormatta(dati.totR.get(rv), formato)}</b></td>
+            </tr>
+          ))}
+          <tr className="tot">
+            <td>Totale</td>
+            {dati.colVals.map(cv => <td key={cv} className="n">{anFormatta(dati.totC.get(cv), formato)}</td>)}
+            <td className="n">{anFormatta(dati.tot, formato)}</td>
+          </tr>
+        </tbody>
+      </table>
+    );
+  } else {
+    corpo = !dati.etichette.length ? <div className="an-vuoto">Nessun dato con le selezioni attuali</div> : (
+      <div className="an-chart">
+        <AnGrafico w={w} dati={dati} formato={formato} registra={registra} onEtichetta={(et) => onSeleziona(w.dim, et)} />
+      </div>
+    );
+  }
+  return (
+    <div className={`an-w an-w${w.w || 6} an-h${w.h || 2}${w.tipo === "kpi" ? " an-kpi" : ""}`}>
+      <div className="an-w-head">
+        <span className="an-w-title" title={titolo}>{titolo}</span>
+        {modifica && strumenti}
+      </div>
+      <div className={"an-w-body" + (AN_GRAFICI.includes(w.tipo) ? " an-w-body-chart" : "")}>{corpo}</div>
+    </div>
+  );
+}
+
+// ---------- editor di un oggetto ----------
+function anDefaultPerTipo(tipo) {
+  if (tipo === "kpi") return { w: 3, h: 1 };
+  if (tipo === "filtro") return { w: 4, h: 2 };
+  if (tipo === "pivot" || tipo === "tabella") return { w: 12, h: 3 };
+  return { w: 6, h: 2 };
+}
+function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
+  const [d, setD] = useState(() => anPulisci(iniziale));
+  const set = (patch) => setD(x => ({ ...x, ...patch }));
+  const fonte = fonti[d.fonte];
+  const campi = fonte ? fonte.campi : [];
+  const numerici = campi.filter(c => c.tipo === "numero");
+  const misure = d.misure && d.misure.length ? d.misure : [{ campo: numerici[0] ? numerici[0].nome : "", agg: numerici[0] ? "somma" : "conteggio" }];
+  const setMisura = (i, patch) => { const arr = [...misure]; arr[i] = { ...arr[i], ...patch }; set({ misure: arr }); };
+  const isGraf = AN_GRAFICI.includes(d.tipo);
+  const valoriDi = (campo) => fonte && campo ? anOrdinaVal([...new Set(fonte.righe.map(r => anVal(r[campo])))], anTipoCampo(fonte, campo)).slice(0, 300) : [];
+
+  const cambiaFonte = (id) => {
+    const f = fonti[id]; if (!f) return;
+    const nomi = f.campi.map(c => c.nome);
+    const num = f.campi.filter(c => c.tipo === "numero");
+    const tieni = (x) => nomi.includes(x) ? x : "";
+    set({
+      fonte: id, dim: tieni(d.dim) || (f.campi.find(c => c.tipo !== "numero") || {}).nome || "", dim2: tieni(d.dim2),
+      dims: (d.dims || []).map(tieni).filter(Boolean),
+      misure: (d.misure || []).map(m => (m.agg === "conteggio" || nomi.includes(m.campo)) ? m : { campo: num[0] ? num[0].nome : "", agg: num[0] ? "somma" : "conteggio" }),
+      filtri: (d.filtri || []).filter(x => nomi.includes(x.campo)),
+    });
+  };
+  const cambiaTipo = (tipo) => set({ tipo, ...anDefaultPerTipo(tipo), dims: d.dims && d.dims.length ? d.dims : (d.dim ? [d.dim] : []) });
+
+  const CampoSel = ({ value, onChange, vuoto, soloNumerici }) => (
+    <select value={value || ""} onChange={e => onChange(e.target.value)}>
+      {vuoto !== undefined && <option value="">{vuoto}</option>}
+      {(soloNumerici ? numerici : campi).map(c => <option key={c.nome} value={c.nome}>{c.nome}{c.tipo === "numero" && !soloNumerici ? " (numero)" : ""}</option>)}
+    </select>
+  );
+  const MisuraSel = ({ m, i, rimuovi }) => (
+    <div className="an-row" style={{ marginBottom: 6 }}>
+      <select value={m.agg || "somma"} onChange={e => setMisura(i, { agg: e.target.value })}>
+        {AN_AGG.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+      </select>
+      {m.agg !== "conteggio" && (
+        <select value={m.campo || ""} onChange={e => setMisura(i, { campo: e.target.value })}>
+          <option value="">— campo —</option>
+          {(m.agg === "distinti" ? campi : numerici).map(c => <option key={c.nome} value={c.nome}>{c.nome}</option>)}
+        </select>
+      )}
+      {rimuovi && <button type="button" className="btn ghost sm" style={{ flex: "0 0 auto" }} onClick={rimuovi}>✕</button>}
+    </div>
+  );
+
+  const anteprima = { ...d, misure, id: "__anteprima__" };
+  return (
+    <div className="modal-bg" onClick={onChiudi}>
+      <div className="modal" style={{ maxWidth: 1000 }} onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{iniziale.__nuovo ? "Nuovo oggetto" : "Modifica oggetto"}</h3>
+          <button className="btn ghost sm" onClick={onChiudi}>✕</button>
+        </div>
+        <div className="modal-body">
+          <div className="an-editor">
+            <div>
+              <div className="an-row">
+                <div className="an-field"><label>Tipo</label>
+                  <select value={d.tipo} onChange={e => cambiaTipo(e.target.value)}>{AN_TIPI.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                </div>
+                <div className="an-field"><label>Fonte dati</label>
+                  <select value={d.fonte} onChange={e => cambiaFonte(e.target.value)}>
+                    {Object.values(fonti).map(f => <option key={f.id} value={f.id}>{f.importata ? "📄 " : ""}{f.nome}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="an-field"><label>Titolo</label>
+                <input type="text" value={d.titolo || ""} placeholder={anTitoloAuto({ ...d, misure })} onChange={e => set({ titolo: e.target.value })} />
+              </div>
+
+              {(isGraf || d.tipo === "pivot" || d.tipo === "filtro") && (
+                <div className="an-row">
+                  <div className="an-field"><label>{d.tipo === "filtro" ? "Campo" : d.tipo === "pivot" ? "Righe" : "Dimensione"}</label>
+                    <CampoSel value={d.dim} onChange={v => set({ dim: v })} vuoto="— scegli —" />
+                  </div>
+                  {(d.tipo === "pivot" || (isGraf && d.tipo !== "torta")) && (
+                    <div className="an-field"><label>{d.tipo === "pivot" ? "Colonne" : "Serie (facoltativa)"}</label>
+                      <CampoSel value={d.dim2} onChange={v => set({ dim2: v })} vuoto={d.tipo === "pivot" ? "— scegli —" : "— nessuna —"} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {d.tipo === "tabella" && (
+                <div className="an-field"><label>Dimensioni (righe)</label>
+                  {[0, 1, 2].map(i => (
+                    <div key={i} style={{ marginBottom: 6 }}>
+                      <CampoSel value={(d.dims || [])[i]} vuoto={i === 0 ? "— nessuna —" : "— aggiungi —"}
+                        onChange={v => { const arr = [...(d.dims || [])]; arr[i] = v; set({ dims: arr.filter(Boolean) }); }} />
+                    </div>
+                  )).slice(0, Math.min(3, (d.dims || []).filter(Boolean).length + 1))}
+                </div>
+              )}
+
+              {d.tipo !== "filtro" && (
+                <div className="an-field"><label>{d.tipo === "tabella" ? "Misure" : "Misura"}</label>
+                  {(d.tipo === "tabella" ? misure : misure.slice(0, 1)).map((m, i) => (
+                    <MisuraSel key={i} m={m} i={i} rimuovi={d.tipo === "tabella" && misure.length > 1 ? () => set({ misure: misure.filter((_, j) => j !== i) }) : null} />
+                  ))}
+                  {d.tipo === "tabella" && misure.length < 5 && (
+                    <button type="button" className="btn ghost sm" onClick={() => set({ misure: [...misure, { campo: numerici[0] ? numerici[0].nome : "", agg: numerici[0] ? "somma" : "conteggio" }] })}>+ Misura</button>
+                  )}
+                </div>
+              )}
+
+              {d.tipo !== "kpi" && d.tipo !== "filtro" && (
+                <div className="an-row">
+                  <div className="an-field"><label>Ordina</label>
+                    <select value={d.ordine || "auto"} onChange={e => set({ ordine: e.target.value })}>
+                      <option value="auto">Automatico</option><option value="etichetta">Per etichetta</option>
+                      <option value="desc">Valore decrescente</option><option value="asc">Valore crescente</option>
+                    </select>
+                  </div>
+                  <div className="an-field"><label>Mostra solo i primi</label>
+                    <input type="number" min="0" value={d.limite || ""} placeholder="tutti" onChange={e => set({ limite: Math.max(0, parseInt(e.target.value) || 0) })} />
+                  </div>
+                </div>
+              )}
+
+              {d.tipo !== "filtro" && (
+                <div className="an-row">
+                  <div className="an-field"><label>Formato numeri</label>
+                    <select value={d.formato || "auto"} onChange={e => set({ formato: e.target.value })}>
+                      <option value="auto">Automatico</option><option value="euro">Euro</option><option value="numero">Numero</option>
+                    </select>
+                  </div>
+                  {d.tipo !== "kpi" && (
+                    <div className="an-field"><label>Valori a zero</label>
+                      <select value={d.nascondiZeri === false ? "mostra" : "nascondi"} onChange={e => set({ nascondiZeri: e.target.value !== "mostra" })}>
+                        <option value="nascondi">Nascondi</option><option value="mostra">Mostra</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {d.tipo === "kpi" && (
+                <label className="an-check">
+                  <input type="checkbox" checked={d.perStagione !== false} onChange={e => set({ perStagione: e.target.checked })} />
+                  Mostra il dettaglio per stagione
+                </label>
+              )}
+
+              {(d.tipo === "kpi" || ((d.tipo === "barre" || d.tipo === "barreO" || d.tipo === "linee") && !d.dim2)) && (
+                <div className="an-field"><label>Colore</label>
+                  <div className="an-row" style={{ flexWrap: "wrap", gap: 6 }}>
+                    <span className={"an-swatch an-swatch-auto" + (!d.colore ? " on" : "")} onClick={() => set({ colore: "" })} title="Automatico">A</span>
+                    {AN_PALETTE.map(c => <span key={c} className={"an-swatch" + (d.colore === c ? " on" : "")} style={{ background: c }} onClick={() => set({ colore: c })} />)}
+                  </div>
+                </div>
+              )}
+
+              <div className="an-field"><label>Filtri fissi dell'oggetto</label>
+                {(d.filtri || []).map((f, i) => (
+                  <div key={i} className="an-filtro-fisso">
+                    <div className="an-row">
+                      <CampoSel value={f.campo} vuoto="— campo —" onChange={v => { const arr = [...d.filtri]; arr[i] = { campo: v, valori: [] }; set({ filtri: arr }); }} />
+                      <button type="button" className="btn ghost sm" style={{ flex: "0 0 auto" }} onClick={() => set({ filtri: d.filtri.filter((_, j) => j !== i) })}>✕</button>
+                    </div>
+                    {f.campo && (
+                      <div className="an-valori">
+                        {valoriDi(f.campo).map(v => {
+                          const on = (f.valori || []).includes(v);
+                          return <span key={v} className={"an-chip" + (on ? " on" : "")} onClick={() => {
+                            const arr = [...d.filtri]; const vv = on ? f.valori.filter(x => x !== v) : [...(f.valori || []), v];
+                            arr[i] = { ...f, valori: vv }; set({ filtri: arr });
+                          }}>{v}</span>;
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button type="button" className="btn ghost sm" onClick={() => set({ filtri: [...(d.filtri || []), { campo: "", valori: [] }] })}>+ Filtro fisso</button>
+                <div className="an-nota">Valgono solo per questo oggetto, sempre, in aggiunta alle selezioni della dashboard.</div>
+              </div>
+
+              <div className="an-row">
+                <div className="an-field"><label>Larghezza</label>
+                  <select value={d.w} onChange={e => set({ w: Number(e.target.value) })}>{AN_LARGHEZZE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                </div>
+                <div className="an-field"><label>Altezza</label>
+                  <select value={d.h} onChange={e => set({ h: Number(e.target.value) })}>{AN_ALTEZZE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div className="an-nota" style={{ marginBottom: 6 }}>Anteprima con le selezioni attuali</div>
+              <div className="an-grid an-grid-anteprima">
+                <AnWidget w={{ ...anteprima, w: 12 }} fonte={fonte} selezioni={selezioni} onSeleziona={() => {}} />
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn ghost" onClick={onChiudi}>Annulla</button>
+          <button className="btn accent" onClick={() => { const { __nuovo, ...pulito } = { ...d, misure }; onSalva(pulito); }}>Salva oggetto</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- import di una tabella ----------
+function AnImport({ esistente, onChiudi, onToast }) {
+  const [fogli, setFogli] = useState(null);
+  const [foglio, setFoglio] = useState("");
+  const [rigaInt, setRigaInt] = useState(1);
+  const [nome, setNome] = useState(esistente ? esistente.nome : "");
+  const [nomeFile, setNomeFile] = useState("");
+  const [tipi, setTipi] = useState({});
+  const [salvando, setSalvando] = useState(false);
+
+  const leggi = async (file) => {
+    if (!file) return;
+    try {
+      const ext = (file.name.split(".").pop() || "").toLowerCase();
+      let out = {};
+      if (ext === "csv" || ext === "txt") out = { "CSV": anParseCSV(await file.text()) };
+      else {
+        if (typeof XLSX === "undefined") { onToast("Lettura Excel non disponibile", "error"); return; }
+        const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+        wb.SheetNames.forEach(n => { out[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: "" }); });
+      }
+      const primo = Object.keys(out).find(k => (out[k] || []).length) || Object.keys(out)[0];
+      setFogli(out); setFoglio(primo); setRigaInt(1); setTipi({}); setNomeFile(file.name);
+      if (!nome) setNome(file.name.replace(/\.[^.]+$/, ""));
+    } catch (e) { onToast("File non leggibile: " + (e.message || e), "error"); }
+  };
+
+  const struttura = useMemo(() => {
+    if (!fogli || !fogli[foglio]) return null;
+    const aoa = fogli[foglio];
+    const hi = Math.max(0, rigaInt - 1);
+    const head = aoa[hi] || [];
+    const corpo = aoa.slice(hi + 1).filter(r => r && r.some(v => v !== "" && v !== null && v !== undefined));
+    const nCol = Math.max(head.length, ...corpo.slice(0, 200).map(r => r.length), 0);
+    const visti = {};
+    const colonne = [];
+    for (let i = 0; i < nCol; i++) {
+      let n = String(head[i] === undefined || head[i] === null ? "" : (head[i] instanceof Date ? anDataISO(head[i]) : head[i])).trim() || `Colonna ${i + 1}`;
+      const base = n; let k = 2;
+      while (visti[anKey(n)]) n = `${base} (${k++})`;
+      visti[anKey(n)] = true;
+      const valori = corpo.map(r => r[i]);
+      if (valori.every(v => v === "" || v === null || v === undefined) && !String(head[i] || "").trim()) continue;
+      colonne.push({ i, nome: n, rilevato: anTipoColonna(valori) });
+    }
+    return { colonne, corpo };
+  }, [fogli, foglio, rigaInt]);
+
+  const salva = async () => {
+    if (!struttura || !struttura.colonne.length) return;
+    if (!nome.trim()) return alert("Dai un nome alla tabella");
+    if (struttura.corpo.length > 50000) return alert("La tabella supera le 50.000 righe: è troppo grande per essere salvata qui.");
+    const colonne = struttura.colonne.map(c => ({ nome: c.nome, tipo: tipi[c.nome] || c.rilevato }));
+    const righe = struttura.corpo.map(r => struttura.colonne.map((c, j) => {
+      const v = r[c.i]; const tipo = colonne[j].tipo;
+      if (v === "" || v === null || v === undefined) return "";
+      if (tipo === "numero") { const n = anNumero(v); return n === null ? "" : n; }
+      if (tipo === "data") return anDataISO(v) || "";
+      return v instanceof Date ? (anDataISO(v) || "") : String(v).trim();
+    }));
+    setSalvando(true);
+    try {
+      const payload = anPulisci({ nome: nome.trim(), colonne, righe, nRighe: righe.length, file: nomeFile, importataIl: new Date().toISOString() });
+      if (esistente) await db.ref(`analisi/tabelle/${esistente.id}`).set(payload);
+      else await db.ref("analisi/tabelle").push(payload);
+      onToast(`Tabella "${nome.trim()}" salvata: ${righe.length} righe`);
+      onChiudi();
+    } catch (e) {
+      onToast("Salvataggio non riuscito: " + (e.message || e), "error");
+      setSalvando(false);
+    }
+  };
+
+  return (
+    <div className="modal-bg" onClick={onChiudi}>
+      <div className="modal" style={{ maxWidth: 920 }} onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{esistente ? `Sostituisci i dati di "${esistente.nome}"` : "Importa una tabella"}</h3>
+          <button className="btn ghost sm" onClick={onChiudi}>✕</button>
+        </div>
+        <div className="modal-body">
+          <div className="an-field"><label>File Excel o CSV</label>
+            <input type="file" accept=".xlsx,.xls,.xlsm,.csv,.txt" onChange={e => leggi(e.target.files && e.target.files[0])} />
+          </div>
+          {fogli && (
+            <>
+              <div className="an-row">
+                <div className="an-field"><label>Nome della tabella</label>
+                  <input type="text" value={nome} onChange={e => setNome(e.target.value)} disabled={!!esistente} />
+                </div>
+                {Object.keys(fogli).length > 1 && (
+                  <div className="an-field"><label>Foglio</label>
+                    <select value={foglio} onChange={e => { setFoglio(e.target.value); setTipi({}); }}>{Object.keys(fogli).map(k => <option key={k} value={k}>{k}</option>)}</select>
+                  </div>
+                )}
+                <div className="an-field"><label>Riga delle intestazioni</label>
+                  <input type="number" min="1" value={rigaInt} onChange={e => { setRigaInt(Math.max(1, parseInt(e.target.value) || 1)); setTipi({}); }} />
+                </div>
+              </div>
+              {struttura && struttura.colonne.length > 0 ? (
+                <>
+                  <div className="an-nota" style={{ margin: "4px 0 8px" }}>
+                    {struttura.corpo.length} righe, {struttura.colonne.length} colonne. Controlla il tipo di ogni colonna: le colonne numero diventano misure (somme, medie…), le altre servono per raggruppare e filtrare.
+                    Se una colonna ha lo stesso nome di un campo dell'app (es. BU, Stagione, Categoria) le selezioni la collegano ai dati contabili.
+                  </div>
+                  <div className="an-tbl-wrap">
+                    <table className="an-tbl">
+                      <thead>
+                        <tr>{struttura.colonne.map(c => <th key={c.i}>{c.nome}</th>)}</tr>
+                        <tr>{struttura.colonne.map(c => (
+                          <th key={c.i} style={{ fontWeight: 400 }}>
+                            <select className="an-mini" value={tipi[c.nome] || c.rilevato} onChange={e => setTipi(t => ({ ...t, [c.nome]: e.target.value }))}>
+                              <option value="testo">Testo</option><option value="numero">Numero</option><option value="data">Data</option>
+                            </select>
+                          </th>
+                        ))}</tr>
+                      </thead>
+                      <tbody>
+                        {struttura.corpo.slice(0, 8).map((r, i) => (
+                          <tr key={i}>{struttura.colonne.map(c => { const v = r[c.i]; return <td key={c.i}>{v instanceof Date ? anDataISO(v) : String(v === undefined || v === null ? "" : v)}</td>; })}</tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : <div className="an-vuoto">Nessuna colonna trovata: controlla la riga delle intestazioni.</div>}
+            </>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn ghost" onClick={onChiudi}>Annulla</button>
+          <button className="btn accent" disabled={!struttura || !struttura.colonne.length || salvando} onClick={salva}>{salvando ? "Salvataggio…" : "Salva tabella"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- dashboard di esempio ----------
+function anDashboardEsempio(nome, stagioni) {
+  const W = (o) => ({ id: anNuovoId(), titolo: "", fonte: "mov", dim: "", dim2: "", dims: [], filtri: [], ordine: "auto", limite: 0, formato: "auto", colore: "", nascondiZeri: true, perStagione: true, ...anDefaultPerTipo(o.tipo), ...o });
+  return {
+    nome, stagioni,
+    widgets: [
+      W({ tipo: "kpi", titolo: "Entrate", misure: [{ campo: "Entrate", agg: "somma" }], colore: "#2d5e3e" }),
+      W({ tipo: "kpi", titolo: "Uscite", misure: [{ campo: "Uscite", agg: "somma" }], colore: "#b54343" }),
+      W({ tipo: "kpi", titolo: "Flusso netto", misure: [{ campo: "Flusso netto", agg: "somma" }] }),
+      W({ tipo: "kpi", titolo: "Movimenti di cassa", misure: [{ agg: "conteggio" }], filtri: [{ campo: "Movimento di cassa", valori: ["Sì"] }], formato: "numero" }),
+      W({ tipo: "linee", titolo: "Entrate per mese, stagioni a confronto", dim: "Mese", dim2: "Stagione", misure: [{ campo: "Entrate", agg: "somma" }], w: 8, h: 2 }),
+      W({ tipo: "filtro", titolo: "Business Unit", dim: "BU" }),
+      W({ tipo: "barreO", titolo: "Uscite per categoria", dim: "Categoria", dim2: "Stagione", misure: [{ campo: "Uscite", agg: "somma" }], limite: 10, w: 6, h: 3 }),
+      W({ tipo: "torta", titolo: "Uscite per Business Unit", dim: "BU", misure: [{ campo: "Uscite", agg: "somma" }], w: 6, h: 3 }),
+      W({ tipo: "pivot", titolo: "Flusso netto per categoria e stagione", dim: "Categoria", dim2: "Stagione", misure: [{ campo: "Flusso netto", agg: "somma" }], w: 12, h: 3 }),
+    ],
+  };
+}
+const anScarica = (nomeFile, contenuto, mime) => {
+  const blob = new Blob([contenuto], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = nomeFile;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
+};
+const anSlug = (s) => String(s || "dashboard").replace(/[^\w\-]+/g, "_").replace(/_+/g, "_").slice(0, 40);
+const anPdfTxt = (s) => String(s === undefined || s === null ? "" : s).replace(/−/g, "-").replace(/→/g, "->").replace(/[^\x00-\xFF€…]/g, "");
+
+// ============================================================
+// PAGINA
+// ============================================================
+function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti, saldiIniziali, onToast }) {
+  const [dashboards, setDashboards] = useState(null);
+  const [tabelle, setTabelle] = useState({});
+  const [errFb, setErrFb] = useState(null);
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const r1 = db.ref("analisi/dashboards"), r2 = db.ref("analisi/tabelle");
+    const onErr = (e) => setErrFb((e && e.message) || String(e));
+    const c1 = r1.on("value", s => setDashboards(s.val() || {}), onErr);
+    const c2 = r2.on("value", s => setTabelle(s.val() || {}), onErr);
+    return () => { r1.off("value", c1); r2.off("value", c2); };
+  }, []);
+
+  const lista = useMemo(() => Object.entries(dashboards || {}).map(([id, d]) => ({ ...d, id }))
+    .sort((a, b) => String(a.nome || "").localeCompare(String(b.nome || ""), "it")), [dashboards]);
+  const [attivaId, setAttivaId] = useState(() => { try { return localStorage.getItem("analisiDashboard"); } catch (e) { return null; } });
+  const dash = lista.find(d => d.id === attivaId) || lista[0] || null;
+  const scegli = (id) => { setAttivaId(id); try { localStorage.setItem("analisiDashboard", id); } catch (e) {} };
+  const widgets = useMemo(() => dash ? (Array.isArray(dash.widgets) ? dash.widgets : Object.values(dash.widgets || {})).filter(Boolean) : [], [dash]);
+
+  const [vista, setVista] = useState("dashboard");
+  const [modifica, setModifica] = useState(false);
+  const [selezioni, setSelezioni] = useState({});
+  const [editor, setEditor] = useState(null);
+  const [importa, setImporta] = useState(null);
+  const [anteprimaTab, setAnteprimaTab] = useState(null);
+  const [menuExp, setMenuExp] = useState(false);
+  const fileDefRef = useRef(null);
+  useEffect(() => { setSelezioni({}); }, [dash && dash.id]);
+
+  // ----- dati delle stagioni -----
+  const stagioniDash = useMemo(() => {
+    const s = dash && Array.isArray(dash.stagioni) ? dash.stagioni.filter(Boolean) : (dash && dash.stagioni ? Object.values(dash.stagioni) : []);
+    return s.length ? [...s].sort() : [stagione];
+  }, [dash, stagione]);
+  const [datiStagioni, setDatiStagioni] = useState({});
+  const richiesteRef = useRef(new Set());
+  useEffect(() => {
+    if (!firebaseReady) return;
+    stagioniDash.forEach(s => {
+      if (richiesteRef.current.has(s)) return;
+      richiesteRef.current.add(s);
+      setDatiStagioni(p => ({ ...p, [s]: { loading: true } }));
+      Promise.all(["conti", "movimenti", "cespiti", "saldiIniziali", "budgets"].map(n =>
+        db.ref(`stagioni/${s}/${n}`).once("value").then(sn => sn.val()).catch(() => null)))
+        .then(([c, m, k, si, b]) => setDatiStagioni(p => ({ ...p, [s]: {
+          conti: c ? Object.values(c) : [],
+          movimenti: m ? Object.entries(m).map(([id, x]) => ({ ...x, _id: id })) : [],
+          cespiti: k ? Object.values(k) : [], saldiIniziali: si || {}, budgets: b || {},
+        } })));
+    });
+  }, [stagioniDash.join("|")]);
+  const perStagione = useMemo(() => {
+    const o = {};
+    stagioniDash.forEach(s => {
+      const d = datiStagioni[s];
+      if (s === stagione) o[s] = { conti, movimenti, cespiti, saldiIniziali, budgets: d && !d.loading ? d.budgets : {} };
+      else o[s] = d || { loading: true };
+    });
+    return o;
+  }, [stagioniDash.join("|"), datiStagioni, stagione, conti, movimenti, cespiti, saldiIniziali]);
+  const inCaricamento = stagioniDash.some(s => perStagione[s] && perStagione[s].loading);
+  const fonti = useMemo(() => anCostruisciFonti(perStagione, tabelle), [perStagione, tabelle]);
+
+  // ----- selezioni -----
+  const seleziona = useCallback((campo, valore) => {
+    const k = anKey(campo);
+    setSelezioni(prev => {
+      const cur = prev[k] ? prev[k].valori : [];
+      const vv = cur.includes(valore) ? cur.filter(x => x !== valore) : [...cur, valore];
+      const n = { ...prev };
+      if (vv.length) n[k] = { campo, valori: vv }; else delete n[k];
+      return n;
+    });
+  }, []);
+
+  // ----- registro dei grafici (per il PDF) -----
+  const graficiRef = useRef(new Map());
+  const registra = useCallback((id, ch) => { if (ch) graficiRef.current.set(id, ch); else graficiRef.current.delete(id); }, []);
+
+  // ----- salvataggi -----
+  const salvaDash = async (d) => {
+    try {
+      const { id, ...resto } = d;
+      await db.ref(`analisi/dashboards/${id}`).set(anPulisci({ ...resto, modificataIl: new Date().toISOString() }));
+    } catch (e) { onToast("Salvataggio non riuscito: " + (e.message || e), "error"); }
+  };
+  const salvaWidgets = (nuovi) => dash && salvaDash({ ...dash, widgets: nuovi });
+  const stagionePrec = (s) => { const m = /^(\d{4})-/.exec(s || ""); if (!m) return null; const y = +m[1] - 1; return `${y}-${String(y + 1).slice(2)}`; };
+  const stagioniDefault = () => [stagionePrec(stagione), stagione].filter(s => s && stagioniDisponibili.includes(s));
+  const creaDash = async (esempio) => {
+    const nome = prompt("Nome della dashboard:", esempio ? "Panoramica stagioni" : "Nuova dashboard");
+    if (!nome || !nome.trim()) return;
+    const base = esempio ? anDashboardEsempio(nome.trim(), stagioniDefault()) : { nome: nome.trim(), stagioni: stagioniDefault(), widgets: [] };
+    try {
+      const ref = db.ref("analisi/dashboards").push();
+      await ref.set(anPulisci({ ...base, creataIl: new Date().toISOString() }));
+      scegli(ref.key);
+      setVista("dashboard");
+      if (!esempio) setModifica(true);
+    } catch (e) { onToast("Creazione non riuscita: " + (e.message || e), "error"); }
+  };
+  const rinomina = () => { const n = prompt("Nuovo nome:", dash.nome); if (n && n.trim()) salvaDash({ ...dash, nome: n.trim() }); };
+  const duplica = async () => {
+    try {
+      const { id, ...resto } = dash;
+      const ref = db.ref("analisi/dashboards").push();
+      await ref.set(anPulisci({ ...resto, nome: (dash.nome || "Dashboard") + " (copia)", creataIl: new Date().toISOString() }));
+      scegli(ref.key);
+    } catch (e) { onToast("Duplicazione non riuscita: " + (e.message || e), "error"); }
+  };
+  const elimina = async () => {
+    if (!confirm(`Elimino la dashboard "${dash.nome}"? I dati non vengono toccati.`)) return;
+    try { await db.ref(`analisi/dashboards/${dash.id}`).remove(); setAttivaId(null); } catch (e) { onToast("Eliminazione non riuscita: " + (e.message || e), "error"); }
+  };
+  const toggleStagione = (s) => {
+    const cur = stagioniDash;
+    const n = cur.includes(s) ? cur.filter(x => x !== s) : [...cur, s];
+    if (!n.length) return;
+    salvaDash({ ...dash, stagioni: n.sort() });
+  };
+
+  // ----- oggetti -----
+  const nuovoWidget = () => {
+    setEditor({ __nuovo: true, id: anNuovoId(), tipo: "barre", titolo: "", fonte: "mov", dim: "Categoria", dim2: "", dims: ["Categoria"],
+      misure: [{ campo: "Uscite", agg: "somma" }], filtri: [], ordine: "auto", limite: 0, formato: "auto", colore: "", nascondiZeri: true, perStagione: true, w: 6, h: 2 });
+  };
+  const salvaWidget = (w) => {
+    const i = widgets.findIndex(x => x.id === w.id);
+    const nuovi = i >= 0 ? widgets.map(x => x.id === w.id ? w : x) : [...widgets, w];
+    salvaWidgets(nuovi); setEditor(null);
+  };
+  const sposta = (i, delta) => {
+    const j = i + delta; if (j < 0 || j >= widgets.length) return;
+    const arr = [...widgets]; [arr[i], arr[j]] = [arr[j], arr[i]]; salvaWidgets(arr);
+  };
+  const eliminaWidget = (w) => { if (confirm(`Elimino "${w.titolo || anTitoloAuto(w)}"?`)) salvaWidgets(widgets.filter(x => x.id !== w.id)); };
+  const duplicaWidget = (i) => { const arr = [...widgets]; arr.splice(i + 1, 0, { ...anPulisci(widgets[i]), id: anNuovoId() }); salvaWidgets(arr); };
+
+  // ----- export -----
+  const testoSelezioni = () => Object.values(selezioni).map(s => `${s.campo}: ${s.valori.join(", ")}`).join(" · ") || "nessuna";
+  const esportaExcel = () => {
+    setMenuExp(false);
+    if (typeof XLSX === "undefined") return onToast("Excel non disponibile", "error");
+    const wb = XLSX.utils.book_new();
+    const info = XLSX.utils.aoa_to_sheet([["Dashboard", dash.nome], ["Stagioni", stagioniDash.join(", ")], ["Selezioni", testoSelezioni()], ["Esportata il", new Date().toLocaleString("it-IT")]]);
+    info["!cols"] = [{ wch: 14 }, { wch: 70 }];
+    XLSX.utils.book_append_sheet(wb, info, "Info");
+    const usati = new Set(["info"]);
+    widgets.forEach((w, i) => {
+      const f = fonti[w.fonte];
+      const t = anTabellare(w, anDatiWidget(w, f, selezioni), f);
+      const ws = XLSX.utils.aoa_to_sheet([t.intestazioni, ...t.righe]);
+      Object.keys(ws).forEach(ref => { if (ref[0] !== "!" && ws[ref].t === "n") ws[ref].z = "#,##0.00"; });
+      ws["!cols"] = t.intestazioni.map((_, j) => ({ wch: j === 0 ? 30 : 14 }));
+      let nome = `${i + 1} ${w.titolo || anTitoloAuto(w)}`.replace(/[\\\/\?\*\[\]:]/g, " ").slice(0, 31).trim();
+      let k = 2; while (usati.has(nome.toLowerCase())) nome = nome.slice(0, 27) + " (" + (k++) + ")";
+      usati.add(nome.toLowerCase());
+      XLSX.utils.book_append_sheet(wb, ws, nome);
+    });
+    XLSX.writeFile(wb, `Dashboard_${anSlug(dash.nome)}.xlsx`);
+    onToast("Dashboard esportata in Excel");
+  };
+  const esportaPdf = () => {
+    setMenuExp(false);
+    if (!window.jspdf) return onToast("PDF non disponibile", "error");
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+    const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), M = 12, G = 6;
+    const pieno = W - 2 * M, meta = (pieno - G) / 2, quarto = (pieno - 3 * G) / 4;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.text(anPdfTxt(dash.nome), M, 16);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(120);
+    doc.text(anPdfTxt(`Stagioni: ${stagioniDash.join(", ")}  ·  Selezioni: ${testoSelezioni()}  ·  ${new Date().toLocaleDateString("it-IT")}`), M, 22, { maxWidth: pieno });
+    doc.setTextColor(0);
+    let x = M, y = 28, rigaH = 0;
+    const aCapo = () => { if (x > M) { y += rigaH + G; x = M; rigaH = 0; } };
+    const spazio = (h) => { if (y + h > H - M) { doc.addPage(); y = M; x = M; rigaH = 0; } };
+    const titolo = (t, xx, yy) => { doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(70); doc.text(anPdfTxt(t), xx, yy, { maxWidth: pieno }); doc.setTextColor(0); doc.setFont("helvetica", "normal"); };
+    widgets.forEach(w => {
+      const f = fonti[w.fonte];
+      const dati = anDatiWidget(w, f, selezioni);
+      const tit = w.titolo || anTitoloAuto(w);
+      const formato = anFormatoMisura((w.misure || [])[0], f, w.formato);
+      if (w.tipo === "kpi" && !dati.errore) {
+        const h = dati.perStag ? 24 : 18;
+        if (x + quarto > W - M + 0.1) aCapo();
+        spazio(h);
+        doc.setDrawColor(220); doc.roundedRect(x, y, quarto, h, 2, 2);
+        titolo(tit, x + 3, y + 5);
+        doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.text(anPdfTxt(anFormatta(dati.valore, formato)), x + 3, y + 12); doc.setFont("helvetica", "normal");
+        if (dati.perStag) { doc.setFontSize(7); doc.setTextColor(110); doc.text(anPdfTxt(dati.perStag.map(p => `${p.s}: ${anFormatta(p.v, formato)}`).join("  ")), x + 3, y + 18, { maxWidth: quarto - 6 }); doc.setTextColor(0); }
+        x += quarto + G; rigaH = Math.max(rigaH, h);
+        return;
+      }
+      const ch = graficiRef.current.get(w.id);
+      if (AN_GRAFICI.includes(w.tipo) && ch && !dati.errore) {
+        const larg = (w.w || 6) <= 6 ? meta : pieno;
+        const alt = larg === pieno ? 85 : 75;
+        if (x + larg > W - M + 0.1) aCapo();
+        spazio(alt);
+        titolo(tit, x, y + 4);
+        const cv = ch.canvas; const ar = cv.width / cv.height;
+        let iw = larg, ih = iw / ar; if (ih > alt - 7) { ih = alt - 7; iw = ih * ar; }
+        try { doc.addImage(ch.toBase64Image("image/png", 1), "PNG", x, y + 6, iw, ih); } catch (e) {}
+        x += larg + G; rigaH = Math.max(rigaH, alt);
+        return;
+      }
+      aCapo();
+      spazio(30);
+      titolo(tit, M, y + 4);
+      const t = anTabellare(w, dati, f);
+      const fmtCella = (v) => typeof v === "number" ? anPdfTxt(anFormatta(v, w.tipo === "filtro" ? "numero" : formato)) : anPdfTxt(v);
+      doc.autoTable({
+        startY: y + 6, margin: { left: M, right: M },
+        head: [t.intestazioni.map(anPdfTxt)], body: t.righe.map(r => r.map(fmtCella)),
+        styles: { fontSize: 7.5, cellPadding: 1.3 }, headStyles: { fillColor: [26, 26, 26], textColor: 240 },
+        didParseCell: (dd) => { if (dd.column.index > 0 && dd.section === "body" && typeof (t.righe[dd.row.index] || [])[dd.column.index] === "number") dd.cell.styles.halign = "right"; },
+      });
+      y = doc.lastAutoTable.finalY + G; x = M; rigaH = 0;
+    });
+    doc.save(`Dashboard_${anSlug(dash.nome)}.pdf`);
+    onToast("Dashboard esportata in PDF");
+  };
+  const esportaDefinizione = () => {
+    setMenuExp(false);
+    const { id, ...resto } = dash;
+    anScarica(`Dashboard_${anSlug(dash.nome)}.json`, JSON.stringify({ formato: "futsal-analisi-dashboard", versione: 1, dashboard: resto }, null, 2), "application/json");
+  };
+  const importaDefinizione = async (file) => {
+    if (!file) return;
+    try {
+      const j = JSON.parse(await file.text());
+      const d = j && j.dashboard;
+      if (!d || !Array.isArray(d.widgets)) throw new Error("il file non contiene una dashboard");
+      const ref = db.ref("analisi/dashboards").push();
+      await ref.set(anPulisci({ ...d, nome: (d.nome || "Dashboard") + " (importata)", creataIl: new Date().toISOString() }));
+      scegli(ref.key); setVista("dashboard");
+      onToast("Dashboard importata");
+    } catch (e) { onToast("Import non riuscito: " + (e.message || e), "error"); }
+    if (fileDefRef.current) fileDefRef.current.value = "";
+  };
+  const scaricaTabella = (id) => {
+    const t = tabelle[id]; if (!t || typeof XLSX === "undefined") return;
+    const col = (Array.isArray(t.colonne) ? t.colonne : Object.values(t.colonne || {}));
+    const righe = (Array.isArray(t.righe) ? t.righe : Object.values(t.righe || {})).map(r => col.map((_, i) => r[i] === undefined ? "" : r[i]));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([col.map(c => c.nome), ...righe]), "Dati");
+    XLSX.writeFile(wb, `${anSlug(t.nome)}.xlsx`);
+  };
+  const rinominaTabella = async (id) => {
+    const n = prompt("Nuovo nome della tabella:", tabelle[id].nome);
+    if (!n || !n.trim()) return;
+    try { await db.ref(`analisi/tabelle/${id}/nome`).set(n.trim()); } catch (e) { onToast("Errore: " + (e.message || e), "error"); }
+  };
+  const eliminaTabella = async (id) => {
+    const usata = lista.filter(d => (Array.isArray(d.widgets) ? d.widgets : Object.values(d.widgets || {})).some(w => w && w.fonte === "tab:" + id));
+    const avviso = usata.length ? `\n\nÈ usata in: ${usata.map(d => d.nome).join(", ")}. Quegli oggetti resteranno vuoti.` : "";
+    if (!confirm(`Elimino la tabella "${tabelle[id].nome}"?${avviso}`)) return;
+    try { await db.ref(`analisi/tabelle/${id}`).remove(); } catch (e) { onToast("Errore: " + (e.message || e), "error"); }
+  };
+
+  // ----- render -----
+  const nSel = Object.keys(selezioni).length;
+  const stagioniTutte = [...new Set([...stagioniDisponibili, ...stagioniDash])].sort();
+
+  if (errFb) {
+    return (
+      <div>
+        <div className="page-head"><div><h2>Analisi</h2></div></div>
+        <div className="card">
+          <p style={{ marginTop: 0 }}>Firebase non permette di leggere o salvare le dashboard.</p>
+          <p style={{ fontSize: 13, color: "var(--ink-2)" }}>Le dashboard e le tabelle importate stanno nel percorso <span className="mono">analisi</span> del database. Nelle regole di Firebase (Realtime Database → Regole) dai a <span className="mono">analisi</span> gli stessi permessi di <span className="mono">stagioni</span>, poi ricarica la pagina.</p>
+          <p className="an-nota">Errore: {errFb}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Analisi</h2>
+          <div className="sub">Dashboard personalizzate su più stagioni · tocca un valore per filtrare tutto</div>
+        </div>
+      </div>
+
+      <div className="an-tabs">
+        <button className={vista === "dashboard" ? "on" : ""} onClick={() => setVista("dashboard")}>Dashboard</button>
+        <button className={vista === "dati" ? "on" : ""} onClick={() => setVista("dati")}>Dati e importazioni</button>
+      </div>
+
+      {dashboards === null ? <div className="empty-state">Caricamento…</div> : vista === "dati" ? (
+        <div>
+          <div className="an-sez-head">
+            <h3>Tabelle importate</h3>
+            <button className="btn accent sm" onClick={() => setImporta({})}>↑ Importa Excel/CSV</button>
+          </div>
+          {!Object.keys(tabelle).length ? (
+            <div className="card an-nota">Nessuna tabella importata. Puoi caricare qualunque foglio Excel o CSV con la prima riga di intestazioni: iscritti, presenze, sponsor, incassi degli eventi… Poi la usi come fonte negli oggetti delle dashboard.</div>
+          ) : (
+            <div className="an-lista-tab">
+              {Object.entries(tabelle).sort((a, b) => String(a[1].nome).localeCompare(String(b[1].nome), "it")).map(([id, t]) => {
+                const f = fonti["tab:" + id];
+                return (
+                  <div key={id} className="card an-tab-card">
+                    <div className="an-tab-top">
+                      <div style={{ minWidth: 0 }}>
+                        <div className="an-tab-nome">📄 {t.nome}</div>
+                        <div className="an-nota">{t.nRighe || (f ? f.righe.length : 0)} righe{t.file ? ` · da ${t.file}` : ""}{t.importataIl ? ` · importata il ${new Date(t.importataIl).toLocaleDateString("it-IT")}` : ""}</div>
+                      </div>
+                      <div className="an-tab-az">
+                        <button className="btn ghost sm" onClick={() => setAnteprimaTab(id)}>Anteprima</button>
+                        <button className="btn ghost sm" onClick={() => setImporta({ id, nome: t.nome })}>Sostituisci dati</button>
+                        <button className="btn ghost sm" onClick={() => rinominaTabella(id)}>Rinomina</button>
+                        <button className="btn ghost sm" onClick={() => scaricaTabella(id)}>Scarica</button>
+                        <button className="btn danger sm" onClick={() => eliminaTabella(id)}>Elimina</button>
+                      </div>
+                    </div>
+                    {f && <div className="an-campi">{f.campi.map(c => <span key={c.nome} className={"an-campo" + (c.tipo === "numero" ? " num" : "")}>{c.nome}</span>)}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="an-nota" style={{ margin: "10px 0 22px" }}>
+            Per collegare una tabella ai dati contabili basta che una colonna si chiami come un campo dell'app (es. <b>BU</b>, <b>Stagione</b>, <b>Categoria</b>): selezionando un valore, il filtro vale per tutte le fonti che hanno quel campo.
+            Se la tabella ha una colonna data, Stagione, Mese e Anno-mese vengono aggiunti da soli.
+          </div>
+
+          <div className="an-sez-head"><h3>Fonti dell'app</h3><span className="an-nota">Righe calcolate sulle stagioni della dashboard attiva: {stagioniDash.join(", ")}</span></div>
+          <div className="an-lista-tab">
+            {["mov", "scr", "cesp", "bud"].map(id => {
+              const f = fonti[id];
+              return (
+                <div key={id} className="card an-tab-card">
+                  <div className="an-tab-nome">{f.nome} <span className="an-nota">· {inCaricamento ? "…" : numIT(f.righe.length, 0)} righe</span></div>
+                  <div className="an-nota" style={{ margin: "2px 0 8px" }}>{f.descr}</div>
+                  <div className="an-campi">{f.campi.map(c => <span key={c.nome} className={"an-campo" + (c.tipo === "numero" ? " num" : "")}>{c.nome}</span>)}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="an-nota" style={{ marginTop: 8 }}><span className="an-campo num">in giallo</span> i campi numerici, usabili come misure; gli altri servono per raggruppare e filtrare.</div>
+        </div>
+      ) : !dash ? (
+        <div className="card an-benvenuto">
+          <h3 className="serif" style={{ marginTop: 0 }}>Nessuna dashboard ancora</h3>
+          <p>Crea una dashboard vuota e aggiungi i tuoi oggetti, oppure parti da un esempio già pronto che confronta le ultime due stagioni.</p>
+          <div className="an-row" style={{ flexWrap: "wrap", justifyContent: "flex-start" }}>
+            <button className="btn accent" style={{ flex: "0 0 auto" }} onClick={() => creaDash(true)}>Crea dashboard di esempio</button>
+            <button className="btn ghost" style={{ flex: "0 0 auto" }} onClick={() => creaDash(false)}>Crea dashboard vuota</button>
+            <button className="btn ghost" style={{ flex: "0 0 auto" }} onClick={() => fileDefRef.current && fileDefRef.current.click()}>Importa da file</button>
+          </div>
+          <input ref={fileDefRef} type="file" accept=".json" hidden onChange={e => importaDefinizione(e.target.files && e.target.files[0])} />
+        </div>
+      ) : (
+        <div>
+          <div className="an-toolbar">
+            <select className="an-dash-sel" value={dash.id} onChange={e => scegli(e.target.value)}>
+              {lista.map(d => <option key={d.id} value={d.id}>{d.nome}</option>)}
+            </select>
+            <button className={"btn sm " + (modifica ? "accent" : "ghost")} onClick={() => setModifica(m => !m)}>{modifica ? "✓ Fine modifiche" : "✎ Modifica"}</button>
+            {modifica && <button className="btn ghost sm" onClick={nuovoWidget}>+ Oggetto</button>}
+            <div style={{ position: "relative" }}>
+              <button className="btn ghost sm" onClick={() => setMenuExp(o => !o)}>⤓ Esporta ▾</button>
+              {menuExp && <div className="an-menu-bg" onClick={() => setMenuExp(false)} />}
+              {menuExp && (
+                <div className="an-menu">
+                  <button onClick={esportaPdf}>PDF (grafici e tabelle)</button>
+                  <button onClick={esportaExcel}>Excel (dati di ogni oggetto)</button>
+                  <button onClick={esportaDefinizione}>File della dashboard (.json)</button>
+                </div>
+              )}
+            </div>
+            {modifica && (
+              <>
+                <button className="btn ghost sm" onClick={rinomina}>Rinomina</button>
+                <button className="btn ghost sm" onClick={duplica}>Duplica</button>
+                <button className="btn ghost sm" onClick={() => creaDash(false)}>Nuova</button>
+                <button className="btn ghost sm" onClick={() => creaDash(true)}>Nuova da esempio</button>
+                <button className="btn ghost sm" onClick={() => fileDefRef.current && fileDefRef.current.click()}>Importa da file</button>
+                <button className="btn danger sm" onClick={elimina}>Elimina</button>
+              </>
+            )}
+            <input ref={fileDefRef} type="file" accept=".json" hidden onChange={e => importaDefinizione(e.target.files && e.target.files[0])} />
+          </div>
+
+          <div className="an-stagioni">
+            <span className="an-nota">Stagioni:</span>
+            {stagioniTutte.map(s => (
+              <span key={s} className={"an-chip" + (stagioniDash.includes(s) ? " on" : "")} onClick={() => toggleStagione(s)}>{s}</span>
+            ))}
+            {inCaricamento && <span className="an-nota">caricamento…</span>}
+          </div>
+
+          <div className={"an-selbar" + (nSel ? "" : " vuota")}>
+            {nSel ? (
+              <>
+                {Object.entries(selezioni).map(([k, s]) => (
+                  <span key={k} className="an-sel">
+                    <b>{s.campo}:</b>&nbsp;{s.valori.length > 3 ? `${s.valori.length} valori` : s.valori.join(", ")}
+                    <button onClick={() => setSelezioni(p => { const n = { ...p }; delete n[k]; return n; })} aria-label="Togli">×</button>
+                  </span>
+                ))}
+                <button className="btn ghost sm" onClick={() => setSelezioni({})}>Cancella selezioni</button>
+              </>
+            ) : <span>Nessuna selezione: tocca una barra, una fetta, una riga o un valore di un filtro per filtrare tutta la dashboard.</span>}
+          </div>
+
+          {!widgets.length ? (
+            <div className="card an-benvenuto">
+              <p style={{ marginTop: 0 }}>La dashboard è vuota.</p>
+              <button className="btn accent" onClick={() => { setModifica(true); nuovoWidget(); }}>+ Aggiungi il primo oggetto</button>
+            </div>
+          ) : (
+            <div className={"an-grid" + (modifica ? " an-edit" : "")}>
+              {widgets.map((w, i) => (
+                <AnWidget key={w.id} w={w} fonte={fonti[w.fonte]} selezioni={selezioni} onSeleziona={seleziona} modifica={modifica} registra={registra}
+                  strumenti={(
+                    <span className="an-w-tools">
+                      <button title="Sposta prima" onClick={() => sposta(i, -1)} disabled={i === 0}>←</button>
+                      <button title="Sposta dopo" onClick={() => sposta(i, 1)} disabled={i === widgets.length - 1}>→</button>
+                      <button title="Modifica" onClick={() => setEditor(anPulisci(w))}>⚙</button>
+                      <button title="Duplica" onClick={() => duplicaWidget(i)}>⧉</button>
+                      <button title="Elimina" onClick={() => eliminaWidget(w)}>✕</button>
+                    </span>
+                  )} />
+              ))}
+            </div>
+          )}
+          {modifica && widgets.length > 0 && (
+            <button className="btn ghost an-aggiungi" onClick={nuovoWidget}>+ Aggiungi oggetto</button>
+          )}
+        </div>
+      )}
+
+      {editor && <AnEditor iniziale={editor} fonti={fonti} selezioni={selezioni} onSalva={salvaWidget} onChiudi={() => setEditor(null)} />}
+      {importa && <AnImport esistente={importa.id ? importa : null} onChiudi={() => setImporta(null)} onToast={onToast} />}
+      {anteprimaTab && tabelle[anteprimaTab] && (() => {
+        const f = fonti["tab:" + anteprimaTab];
+        return (
+          <div className="modal-bg" onClick={() => setAnteprimaTab(null)}>
+            <div className="modal" style={{ maxWidth: 960 }} onClick={e => e.stopPropagation()}>
+              <div className="modal-head"><h3>{tabelle[anteprimaTab].nome}</h3><button className="btn ghost sm" onClick={() => setAnteprimaTab(null)}>✕</button></div>
+              <div className="modal-body">
+                <div className="an-nota" style={{ marginBottom: 8 }}>Prime 50 righe di {f ? f.righe.length : 0}</div>
+                <div className="an-tbl-wrap">
+                  <table className="an-tbl">
+                    <thead><tr>{f && f.campi.map(c => <th key={c.nome} className={c.tipo === "numero" ? "n" : ""}>{c.nome}</th>)}</tr></thead>
+                    <tbody>{f && f.righe.slice(0, 50).map((r, i) => (
+                      <tr key={i}>{f.campi.map(c => <td key={c.nome} className={c.tipo === "numero" ? "n" : ""}>{c.tipo === "numero" && r[c.nome] !== "" ? numIT(r[c.nome], Number.isInteger(r[c.nome]) ? 0 : 2) : String(r[c.nome])}</td>)}</tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
 function App() {
   const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
   // La stagione attiva viene ricordata sul dispositivo. Se non c'e' una scelta
@@ -16479,6 +17978,9 @@ function App() {
           <button className={"navlink " + (page==="snapshot"?"active":"")} onClick={() => setPage("snapshot")}><span className="ico">📸</span> Snapshot mensili</button>
           <button className={"navlink " + (page==="export"?"active":"")} onClick={() => setPage("export")}><span className="ico">↧</span> Export</button>
 
+          <div className="section-label">Analisi</div>
+          <button className={"navlink " + (page==="analisi"?"active":"")} onClick={() => setPage("analisi")}><span className="ico">◧</span> Dashboard personalizzate</button>
+
           <div className="section-label">Gestione</div>
           <button className={"navlink " + (page==="riapertura"?"active":"")} onClick={() => setPage("riapertura")}><span className="ico">⟳</span> Riapertura conti</button>
           <button className={"navlink " + (page==="cespiti"?"active":"")} onClick={() => setPage("cespiti")}><span className="ico">▣</span> Cespiti</button>
@@ -16543,6 +18045,7 @@ function App() {
               {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
+              {page === "analisi" && <PageAnalisi stagione={stagione} stagioniDisponibili={stagioniDisponibili} conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
             </>
           )}
         </main>
