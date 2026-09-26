@@ -910,6 +910,11 @@
   .an-tbl .n { text-align: right; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px; font-variant-numeric: tabular-nums; }
   .an-tbl tr.tot td { font-weight: 700; background: var(--panel-2); border-top: 1.5px solid var(--ink); }
   .an-tbl .cl { cursor: pointer; }
+  .an-tbl .an-cmp { background: rgba(120,113,108,.07); font-size: 11px; }
+  .an-tbl th.an-cmp { color: var(--ink-2, var(--ink-3)); }
+  .an-tbl .an-pos { color: #2d7a4a; }
+  .an-tbl .an-neg { color: #b54343; }
+  .an-tbl tr.tot td.an-cmp { background: var(--panel-2); }
   .an-tbl .cl:hover { text-decoration: underline; color: var(--accent); }
   .an-mini { padding: 3px 6px !important; font-size: 11.5px !important; min-height: 0 !important; }
   .an-editor { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
@@ -966,7 +971,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.32.0";
+const APP_VERSION = "3.33.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -16534,6 +16539,34 @@ const anFormatta = (v, formato) => {
   if (formato === "euro") return "€ " + numIT(n, 2);
   return numIT(n, Number.isInteger(n) ? 0 : 2);
 };
+// ---------- confronto tra colonne della pivot (Δ e Δ %) ----------
+const anFmtDelta = (v, formato) => (v > 1e-9 ? "+" : v < -1e-9 ? "−" : "") + anFormatta(Math.abs(v), formato);
+const anFmtPerc = (p) => p === null || p === undefined || !isFinite(p) ? "—" : (p > 1e-9 ? "+" : p < -1e-9 ? "−" : "") + numIT(Math.abs(p) * 100, 1) + "%";
+const anClsDelta = (d, inverti) => Math.abs(d) < 1e-7 ? "" : ((d > 0) !== !!inverti ? " an-pos" : " an-neg");
+const anPerc = (va, vb) => Math.abs(va) > 1e-9 ? (vb - va) / Math.abs(va) : null;
+// Colonne della pivot: {t:"v", cv} valore, {t:"d", a, b} differenza B − A, {t:"p", a, b} variazione %
+function anPivotColonne(w, colVals) {
+  const c = w.confronto || {};
+  const modo = c.modo || "nessuno";
+  const mostra = c.mostra || "entrambi";
+  const out = [];
+  const cmp = (a, b) => { if (mostra !== "perc") out.push({ t: "d", a, b }); if (mostra !== "diff") out.push({ t: "p", a, b }); };
+  if (!colVals.length) return out;
+  if (modo === "precedente") colVals.forEach((cv, i) => { out.push({ t: "v", cv }); if (i > 0) cmp(colVals[i - 1], cv); });
+  else if (modo === "base") {
+    const base = colVals.includes(c.base) ? c.base : colVals[0];
+    colVals.forEach(cv => { out.push({ t: "v", cv }); if (cv !== base) cmp(base, cv); });
+  } else if (modo === "coppia") {
+    const a = colVals.includes(c.a) ? c.a : colVals[0];
+    const b = colVals.includes(c.b) ? c.b : colVals[colVals.length - 1];
+    if (c.soloCoppia) { out.push({ t: "v", cv: a }); if (b !== a) out.push({ t: "v", cv: b }); }
+    else colVals.forEach(cv => out.push({ t: "v", cv }));
+    if (a !== b) cmp(a, b);
+  } else colVals.forEach(cv => out.push({ t: "v", cv }));
+  return out;
+}
+const anEtichettaCmp = (c) => `${c.t === "p" ? "Δ %" : "Δ"} ${c.b} vs ${c.a}`;
+const anEtichettaCmpBreve = (c, w) => ((w.confronto || {}).modo === "coppia" ? anEtichettaCmp(c) : (c.t === "p" ? "Δ %" : "Δ"));
 const anCompatto = (v) => {
   const a = Math.abs(v);
   if (a >= 1e6) return numIT(v / 1e6, 1) + " M";
@@ -16616,12 +16649,27 @@ function anDatiWidget(w, fonte, sel) {
       rowVals = rowVals.filter(rv => colVals.some(cv => Math.abs(celle.get(rv + "\u0001" + cv) || 0) > 1e-7));
       colVals = colVals.filter(cv => rowVals.some(rv => Math.abs(celle.get(rv + "\u0001" + cv) || 0) > 1e-7));
     }
+    const conf = w.confronto || {};
+    const colonne = anPivotColonne(w, colVals);
+    const vCella = (rv, cv) => celle.get(rv + "\u0001" + cv) || 0;
+    // con "solo A e B" le righe vuote in entrambe le colonne non servono
+    if (conf.modo === "coppia" && conf.soloCoppia && w.nascondiZeri !== false) {
+      const vis = colonne.filter(c => c.t === "v").map(c => c.cv);
+      rowVals = rowVals.filter(rv => vis.some(cv => Math.abs(vCella(rv, cv)) > 1e-7));
+    }
+    const ultimoCmp = [...colonne].reverse().find(c => c.t !== "v");
     const tipoR = anTipoCampo(fonte, w.dim);
-    const ord = w.ordine && w.ordine !== "auto" ? w.ordine : (["mese", "data"].includes(tipoR) || /stagione|anno|mese|data/i.test(w.dim) ? "etichetta" : "desc");
+    let ord = w.ordine && w.ordine !== "auto" ? w.ordine : (["mese", "data"].includes(tipoR) || /stagione|anno|mese|data/i.test(w.dim) ? "etichetta" : "desc");
+    if (/^delta/.test(ord) && !ultimoCmp) ord = "desc";
     if (ord === "etichetta") rowVals = anOrdinaVal(rowVals, tipoR);
+    else if (/^delta/.test(ord)) {
+      const dd = (rv) => vCella(rv, ultimoCmp.b) - vCella(rv, ultimoCmp.a);
+      rowVals.sort((a, b) => ord === "delta_desc" ? dd(b) - dd(a) : dd(a) - dd(b));
+    }
     else rowVals.sort((a, b) => ord === "desc" ? totR.get(b) - totR.get(a) : totR.get(a) - totR.get(b));
     if (w.limite > 0) rowVals = rowVals.slice(0, w.limite);
-    return { rowVals, colVals, celle, totR, totC, tot: anAggrega(righe, m0) };
+    const mostraTotale = !w.nascondiTotale && !(conf.modo === "coppia" && conf.soloCoppia);
+    return { rowVals, colVals, colonne, mostraTotale, celle, totR, totC, tot: anAggrega(righe, m0) };
   }
   // grafici
   const tipoDim = anTipoCampo(fonte, w.dim);
@@ -16661,9 +16709,22 @@ function anTabellare(w, dati, fonte) {
     return { intestazioni: [...dati.dims, ...dati.mis.map(anEtichettaMisura)], righe: r };
   }
   if (w.tipo === "pivot") {
-    const r = dati.rowVals.map(rv => [rv, ...dati.colVals.map(cv => dati.celle.get(rv + "\u0001" + cv) || 0), dati.totR.get(rv) || 0]);
-    r.push(["Totale", ...dati.colVals.map(cv => dati.totC.get(cv) || 0), dati.tot]);
-    return { intestazioni: [`${w.dim} \\ ${w.dim2}`, ...dati.colVals, "Totale"], righe: r };
+    const cols = dati.colonne || dati.colVals.map(cv => ({ t: "v", cv }));
+    const riga = (get, tot) => {
+      const out = cols.map(c => {
+        if (c.t === "v") return get(c.cv);
+        const va = get(c.a), vb = get(c.b);
+        return c.t === "d" ? vb - va : anPerc(va, vb);
+      });
+      if (dati.mostraTotale !== false) out.push(tot);
+      return out;
+    };
+    const r = dati.rowVals.map(rv => [rv, ...riga(cv => dati.celle.get(rv + "\u0001" + cv) || 0, dati.totR.get(rv) || 0)]);
+    r.push(["Totale", ...riga(cv => dati.totC.get(cv) || 0, dati.tot)]);
+    const intest = [`${w.dim} \\ ${w.dim2}`, ...cols.map(c => c.t === "v" ? c.cv : anEtichettaCmp(c))];
+    if (dati.mostraTotale !== false) intest.push("Totale");
+    const perc = cols.map((c, i) => c.t === "p" ? i + 1 : -1).filter(i => i >= 0);
+    return { intestazioni: intest, righe: r, perc };
   }
   return { intestazioni: [w.dim, ...dati.serie.map(s => s.nome)], righe: dati.etichette.map((et, i) => [et, ...dati.serie.map(s => s.valori[i])]) };
 }
@@ -16768,25 +16829,42 @@ function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, regis
       </table>
     );
   } else if (w.tipo === "pivot") {
+    const inverti = !!(w.confronto || {}).inverti;
     corpo = !dati.rowVals.length ? <div className="an-vuoto">Nessun dato con le selezioni attuali</div> : (
       <table className="an-tbl">
         <thead><tr>
           <th>{w.dim}</th>
-          {dati.colVals.map(cv => <th key={cv} className="n cl" onClick={() => onSeleziona(w.dim2, cv)}>{cv}</th>)}
-          <th className="n">Totale</th>
+          {dati.colonne.map((c, i) => c.t === "v"
+            ? <th key={i} className="n cl" onClick={() => onSeleziona(w.dim2, c.cv)}>{c.cv}</th>
+            : <th key={i} className="n an-cmp" title={anEtichettaCmp(c)}>{anEtichettaCmpBreve(c, w)}</th>)}
+          {dati.mostraTotale && <th className="n">Totale</th>}
         </tr></thead>
         <tbody>
           {dati.rowVals.map(rv => (
             <tr key={rv}>
               <td className="cl" onClick={() => onSeleziona(w.dim, rv)}>{rv}</td>
-              {dati.colVals.map(cv => { const v = dati.celle.get(rv + "\u0001" + cv); return <td key={cv} className="n">{v ? anFormatta(v, formato) : ""}</td>; })}
-              <td className="n"><b>{anFormatta(dati.totR.get(rv), formato)}</b></td>
+              {dati.colonne.map((c, i) => {
+                const get = (cv) => dati.celle.get(rv + "\u0001" + cv) || 0;
+                if (c.t === "v") { const v = get(c.cv); return <td key={i} className="n">{v ? anFormatta(v, formato) : ""}</td>; }
+                const va = get(c.a), vb = get(c.b), d = vb - va;
+                if (c.t === "d") return <td key={i} className={"n an-cmp" + anClsDelta(d, inverti)} title={anEtichettaCmp(c)}>{Math.abs(d) > 1e-7 ? anFmtDelta(d, formato) : ""}</td>;
+                const pc = anPerc(va, vb);
+                return <td key={i} className={"n an-cmp" + (pc === null ? "" : anClsDelta(d, inverti))} title={anEtichettaCmp(c)}>{Math.abs(d) > 1e-7 || pc !== null ? anFmtPerc(pc) : ""}</td>;
+              })}
+              {dati.mostraTotale && <td className="n"><b>{anFormatta(dati.totR.get(rv), formato)}</b></td>}
             </tr>
           ))}
           <tr className="tot">
             <td>Totale</td>
-            {dati.colVals.map(cv => <td key={cv} className="n">{anFormatta(dati.totC.get(cv), formato)}</td>)}
-            <td className="n">{anFormatta(dati.tot, formato)}</td>
+            {dati.colonne.map((c, i) => {
+              const get = (cv) => dati.totC.get(cv) || 0;
+              if (c.t === "v") return <td key={i} className="n">{anFormatta(get(c.cv), formato)}</td>;
+              const va = get(c.a), vb = get(c.b), d = vb - va;
+              if (c.t === "d") return <td key={i} className={"n an-cmp" + anClsDelta(d, inverti)}>{anFmtDelta(d, formato)}</td>;
+              const pc = anPerc(va, vb);
+              return <td key={i} className={"n an-cmp" + (pc === null ? "" : anClsDelta(d, inverti))}>{anFmtPerc(pc)}</td>;
+            })}
+            {dati.mostraTotale && <td className="n">{anFormatta(dati.tot, formato)}</td>}
           </tr>
         </tbody>
       </table>
@@ -16839,7 +16917,9 @@ function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
       filtri: (d.filtri || []).filter(x => nomi.includes(x.campo)),
     });
   };
-  const cambiaTipo = (tipo) => set({ tipo, ...anDefaultPerTipo(tipo), dims: d.dims && d.dims.length ? d.dims : (d.dim ? [d.dim] : []) });
+  const cambiaTipo = (tipo) => set({ tipo, ...anDefaultPerTipo(tipo), dims: d.dims && d.dims.length ? d.dims : (d.dim ? [d.dim] : []),
+    ...(tipo !== "pivot" && /^delta/.test(d.ordine || "") ? { ordine: "auto" } : {}) });
+  const confOn = d.tipo === "pivot" && d.confronto && d.confronto.modo && d.confronto.modo !== "nessuno";
 
   const CampoSel = ({ value, onChange, vuoto, soloNumerici }) => (
     <select value={value || ""} onChange={e => onChange(e.target.value)}>
@@ -16928,6 +17008,8 @@ function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
                     <select value={d.ordine || "auto"} onChange={e => set({ ordine: e.target.value })}>
                       <option value="auto">Automatico</option><option value="etichetta">Per etichetta</option>
                       <option value="desc">Valore decrescente</option><option value="asc">Valore crescente</option>
+                      {confOn && <option value="delta_desc">Per Δ decrescente (ultimo confronto)</option>}
+                      {confOn && <option value="delta_asc">Per Δ crescente (ultimo confronto)</option>}
                     </select>
                   </div>
                   <div className="an-field"><label>Mostra solo i primi</label>
@@ -16968,6 +17050,65 @@ function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
                   </div>
                 </div>
               )}
+
+              {d.tipo === "pivot" && (() => {
+                const c = d.confronto || {};
+                const setC = (patch) => set({ confronto: { ...c, ...patch } });
+                const cols = fonte && d.dim2 ? anOrdinaVal([...new Set(anFiltra(fonte, d.filtri, {}, null).map(r => anVal(r[d.dim2])))], anTipoCampo(fonte, d.dim2)).slice(0, 300) : [];
+                const modo = c.modo || "nessuno";
+                const ColSel = ({ value, onChange, vuoto }) => (
+                  <select value={value || ""} onChange={e => onChange(e.target.value)}>
+                    <option value="">{vuoto}</option>
+                    {cols.map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                );
+                return (
+                  <div className="an-field an-filtro-fisso"><label>Confronto tra colonne (Δ e Δ %)</label>
+                    <select value={modo} onChange={e => setC({ modo: e.target.value })}>
+                      <option value="nessuno">Nessun confronto</option>
+                      <option value="precedente">Ogni colonna rispetto alla precedente</option>
+                      <option value="base">Ogni colonna rispetto a una colonna base</option>
+                      <option value="coppia">Due colonne a scelta (A → B)</option>
+                    </select>
+                    {!d.dim2 && modo !== "nessuno" && <div className="an-nota">Scegli prima il campo delle colonne.</div>}
+                    {modo === "base" && (
+                      <div className="an-field" style={{ marginTop: 8 }}><label>Colonna base</label>
+                        <ColSel value={c.base} vuoto="— prima colonna —" onChange={v => setC({ base: v })} />
+                      </div>
+                    )}
+                    {modo === "coppia" && (
+                      <>
+                        <div className="an-row" style={{ marginTop: 8 }}>
+                          <div className="an-field"><label>A (di partenza)</label><ColSel value={c.a} vuoto="— prima colonna —" onChange={v => setC({ a: v })} /></div>
+                          <div className="an-field"><label>B (da confrontare)</label><ColSel value={c.b} vuoto="— ultima colonna —" onChange={v => setC({ b: v })} /></div>
+                        </div>
+                        <label className="an-check">
+                          <input type="checkbox" checked={!!c.soloCoppia} onChange={e => setC({ soloCoppia: e.target.checked })} />
+                          Mostra solo le colonne A e B
+                        </label>
+                      </>
+                    )}
+                    {modo !== "nessuno" && (
+                      <>
+                        <div className="an-field" style={{ marginTop: 8 }}><label>Mostra</label>
+                          <select value={c.mostra || "entrambi"} onChange={e => setC({ mostra: e.target.value })}>
+                            <option value="entrambi">Δ e Δ %</option><option value="diff">Solo Δ (differenza)</option><option value="perc">Solo Δ %</option>
+                          </select>
+                        </div>
+                        <label className="an-check">
+                          <input type="checkbox" checked={!!c.inverti} onChange={e => setC({ inverti: e.target.checked })} />
+                          Un aumento è un peggioramento (es. costi): aumenti in rosso
+                        </label>
+                      </>
+                    )}
+                    <label className="an-check">
+                      <input type="checkbox" checked={!!d.nascondiTotale} onChange={e => set({ nascondiTotale: e.target.checked })} />
+                      Nascondi la colonna Totale
+                    </label>
+                    <div className="an-nota">Δ = B − A · Δ % = (B − A) / |A|. Se A è zero la percentuale non si calcola (—). Per scegliere quali mesi mostrare usa un filtro fisso sul campo delle colonne.</div>
+                  </div>
+                );
+              })()}
 
               <div className="an-field"><label>Filtri fissi dell'oggetto</label>
                 {(d.filtri || []).map((f, i) => (
@@ -17341,7 +17482,8 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
       const f = fonti[w.fonte];
       const t = anTabellare(w, anDatiWidget(w, f, selezioni), f);
       const ws = XLSX.utils.aoa_to_sheet([t.intestazioni, ...t.righe]);
-      Object.keys(ws).forEach(ref => { if (ref[0] !== "!" && ws[ref].t === "n") ws[ref].z = "#,##0.00"; });
+      const colPerc = new Set(t.perc || []);
+      Object.keys(ws).forEach(ref => { if (ref[0] !== "!" && ws[ref].t === "n") ws[ref].z = colPerc.has(XLSX.utils.decode_cell(ref).c) ? "0.0%" : "#,##0.00"; });
       ws["!cols"] = t.intestazioni.map((_, j) => ({ wch: j === 0 ? 30 : 14 }));
       let nome = `${i + 1} ${w.titolo || anTitoloAuto(w)}`.replace(/[\\\/\?\*\[\]:]/g, " ").slice(0, 31).trim();
       let k = 2; while (usati.has(nome.toLowerCase())) nome = nome.slice(0, 27) + " (" + (k++) + ")";
@@ -17412,12 +17554,23 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
       spazio(30);
       titolo(tit, M, y + 4);
       const t = anTabellare(w, dati, f);
-      const fmtCella = (v) => typeof v === "number" ? anPdfTxt(anFormatta(v, w.tipo === "filtro" ? "numero" : formato)) : anPdfTxt(v);
+      const colPerc = new Set(t.perc || []);
+      const colDelta = new Set((t.intestazioni || []).map((h, j) => /^Δ /.test(String(h)) && !colPerc.has(j) ? j : -1).filter(j => j >= 0));
+      const fmtCella = (v, j) => colPerc.has(j) ? (v === null || v === undefined ? "n.c." : anPdfTxt(anFmtPerc(v)))
+        : colDelta.has(j) && typeof v === "number" ? anPdfTxt(anFmtDelta(v, formato))
+        : typeof v === "number" ? anPdfTxt(anFormatta(v, w.tipo === "filtro" ? "numero" : formato)) : anPdfTxt(v ?? "");
       doc.autoTable({
         startY: y + 6, margin: { left: M, right: M },
-        head: [t.intestazioni.map(anPdfTxt)], body: t.righe.map(r => r.map(fmtCella)),
+        head: [t.intestazioni.map(h => anPdfTxt(String(h).replace(/Δ/g, "Var.")))], body: t.righe.map(r => r.map((v, j) => fmtCella(v, j))),
         styles: { fontSize: 7.5, cellPadding: 1.3 }, headStyles: { fillColor: [26, 26, 26], textColor: 240 },
-        didParseCell: (dd) => { if (dd.column.index > 0 && dd.section === "body" && typeof (t.righe[dd.row.index] || [])[dd.column.index] === "number") dd.cell.styles.halign = "right"; },
+        didParseCell: (dd) => {
+          const raw = (t.righe[dd.row.index] || [])[dd.column.index];
+          if (dd.column.index > 0 && (dd.section === "head" || typeof raw === "number" || colPerc.has(dd.column.index))) dd.cell.styles.halign = "right";
+          if (dd.section === "body" && typeof raw === "number" && (colPerc.has(dd.column.index) || colDelta.has(dd.column.index)) && Math.abs(raw) > 1e-7) {
+            const pos = (raw > 0) !== !!(w.confronto || {}).inverti;
+            dd.cell.styles.textColor = pos ? [45, 122, 74] : [181, 67, 67];
+          }
+        },
       });
       y = doc.lastAutoTable.finalY + G; x = M; rigaH = 0;
     });
