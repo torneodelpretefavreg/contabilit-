@@ -966,7 +966,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.30.0";
+const APP_VERSION = "3.32.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -17351,6 +17351,19 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
     XLSX.writeFile(wb, `Dashboard_${anSlug(dash.nome)}.xlsx`);
     onToast("Dashboard esportata in Excel");
   };
+  // Il grafico a schermo ha la risoluzione del monitor: stirato su un A4 si sgrana.
+  // Per l'export lo ridisegno temporaneamente a 3x (senza animazioni), catturo e ripristino.
+  const anCatturaGraficoHD = (ch) => {
+    const o = ch.options, dpr0 = o.devicePixelRatio, an0 = o.animation;
+    try {
+      ch.stop(); o.devicePixelRatio = 3; o.animation = false;
+      ch.update("none"); ch.resize(); ch.update("none");
+      return ch.toBase64Image("image/png", 1);
+    } finally {
+      o.devicePixelRatio = dpr0; o.animation = an0;
+      ch.update("none"); ch.resize(); ch.update("none");
+    }
+  };
   const esportaPdf = () => {
     setMenuExp(false);
     if (!window.jspdf) return onToast("PDF non disponibile", "error");
@@ -17391,7 +17404,7 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
         titolo(tit, x, y + 4);
         const cv = ch.canvas; const ar = cv.width / cv.height;
         let iw = larg, ih = iw / ar; if (ih > alt - 7) { ih = alt - 7; iw = ih * ar; }
-        try { doc.addImage(ch.toBase64Image("image/png", 1), "PNG", x, y + 6, iw, ih); } catch (e) {}
+        try { doc.addImage(anCatturaGraficoHD(ch), "PNG", x, y + 6, iw, ih, undefined, "FAST"); } catch (e) {}
         x += larg + G; rigaH = Math.max(rigaH, alt);
         return;
       }
@@ -17972,7 +17985,7 @@ function App() {
           <button className={"navlink " + (page==="schema"?"active":"")} onClick={() => setPage("schema")}><span className="ico">§</span> Schema di Bilancio</button>
           <button className={"navlink " + (page==="chiusura"?"active":"")} onClick={() => setPage("chiusura")}><span className="ico">🗓</span> Chiusura mensile</button>
           <button className={"navlink " + (page==="rf"?"active":"")} onClick={() => setPage("rf")}><span className="ico">≋</span> Rendiconto Fin.</button>
-          <button className={"navlink " + (page==="pivot"?"active":"")} onClick={() => setPage("pivot")}><span className="ico">⊞</span> Pivot Conti</button>
+          {/* Pivot Conti nascosta per ora: per riattivarla ripristinare il pulsante e il render di PagePivotConti */}
           <button className={"navlink " + (page==="controller"?"active":"")} onClick={() => setPage("controller")}><span className="ico">🎯</span> Controller</button>
           <button className={"navlink " + (page==="budget"?"active":"")} onClick={() => setPage("budget")}><span className="ico">🎚</span> Budget</button>
           <button className={"navlink " + (page==="snapshot"?"active":"")} onClick={() => setPage("snapshot")}><span className="ico">📸</span> Snapshot mensili</button>
@@ -18035,7 +18048,6 @@ function App() {
               {page === "schema" && <PageSchemaBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
-              {page === "pivot" && <PagePivotConti conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} />}
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "budget" && <PageBudget conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} bu={bu} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
