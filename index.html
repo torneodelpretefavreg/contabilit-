@@ -984,7 +984,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.35.0";
+const APP_VERSION = "3.36.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1345,10 +1345,12 @@ function useFirebaseData(stagione) {
 function Login({ onLogin }) {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
+  const [ricorda, setRicorda] = useState(true);
   const submit = (e) => {
     e.preventDefault();
     if (pw === APP_PASSWORD) {
       sessionStorage.setItem(SESSION_KEY, "1");
+      try { if (ricorda) localStorage.setItem(SESSION_KEY, "1"); else localStorage.removeItem(SESSION_KEY); } catch (er) {}
       onLogin();
     } else {
       setErr("Password errata.");
@@ -1364,6 +1366,10 @@ function Login({ onLogin }) {
           <label>Password</label>
           <input type="password" autoFocus value={pw} onChange={e => setPw(e.target.value)} />
         </div>
+        <label style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, margin:"-4px 0 14px", color:"var(--ink-2)", cursor:"pointer"}}>
+          <input type="checkbox" style={{width:"auto"}} checked={ricorda} onChange={e => setRicorda(e.target.checked)} />
+          Resta connesso su questo dispositivo
+        </label>
         <button className="btn accent" type="submit">Entra</button>
         {!firebaseReady && (
           <div style={{marginTop:18, fontSize:11.5, color:"var(--warn)", lineHeight:1.5}}>
@@ -17919,7 +17925,10 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
 }
 
 function App() {
-  const [logged, setLogged] = useState(sessionStorage.getItem(SESSION_KEY) === "1");
+  const [logged, setLogged] = useState(() => {
+    if (sessionStorage.getItem(SESSION_KEY) === "1") return true;
+    try { return localStorage.getItem(SESSION_KEY) === "1"; } catch (e) { return false; }
+  });
   // La stagione attiva viene ricordata sul dispositivo. Se non c'e' una scelta
   // salvata, si parte da quella suggerita dalla data, ma NON si salta mai da soli
   // a una stagione che su Firebase non esiste ancora: al 1 settembre la stagione
@@ -18212,7 +18221,7 @@ function App() {
         <span className="desktop-only" style={{ fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{diagStagione}</span>
         <button className="icon-btn" onClick={() => setPannelloStagioni(true)} title="Mostra tutte le stagioni presenti su Firebase">Stagioni</button>
         <button className="icon-btn desktop-only" onClick={newStagione}>+ Nuova stagione</button>
-        <button className="icon-btn" onClick={() => { sessionStorage.removeItem(SESSION_KEY); setLogged(false); }}>Esci</button>
+        <button className="icon-btn" onClick={() => { sessionStorage.removeItem(SESSION_KEY); try { localStorage.removeItem(SESSION_KEY); } catch (e) {} setLogged(false); }}>Esci</button>
       </div>
 
       <div className="layout">
