@@ -879,8 +879,21 @@
   .an-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; grid-auto-flow: row dense; }
   .an-w { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--radius-lg); display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .an-edit .an-w { border-style: dashed; border-color: var(--rule-2); }
-  .an-w3 { grid-column: span 3; } .an-w4 { grid-column: span 4; } .an-w6 { grid-column: span 6; } .an-w8 { grid-column: span 8; } .an-w12 { grid-column: span 12; }
-  .an-h1 { height: 132px; } .an-h2 { height: 300px; } .an-h3 { height: 440px; }
+  .an-w2 { grid-column: span 2; } .an-w3 { grid-column: span 3; } .an-w4 { grid-column: span 4; } .an-w5 { grid-column: span 5; }
+  .an-w6 { grid-column: span 6; } .an-w7 { grid-column: span 7; } .an-w8 { grid-column: span 8; } .an-w9 { grid-column: span 9; }
+  .an-w10 { grid-column: span 10; } .an-w11 { grid-column: span 11; } .an-w12 { grid-column: span 12; }
+  .an-h1 { height: 132px; } .an-h2 { height: 300px; } .an-h3 { height: 440px; } .an-h4 { height: 600px; }
+  .an-edit .an-w { position: relative; }
+  .an-edit .an-w-head { cursor: grab; }
+  .an-edit .an-w-head:active { cursor: grabbing; }
+  .an-w.an-drag-src { opacity: .35; }
+  .an-w.an-drop-prima { box-shadow: -5px 0 0 -1px var(--accent); }
+  .an-w.an-drop-dopo { box-shadow: 5px 0 0 -1px var(--accent); }
+  .an-w.an-ridim { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .an-resize { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 3; touch-action: none;
+    background: linear-gradient(135deg, transparent 0 55%, var(--rule-2) 55% 62%, transparent 62% 72%, var(--rule-2) 72% 79%, transparent 79%); }
+  .an-resize:hover { background: linear-gradient(135deg, transparent 0 55%, var(--accent) 55% 62%, transparent 62% 72%, var(--accent) 72% 79%, transparent 79%); }
+  .an-ridim-info { position: absolute; right: 22px; bottom: 4px; z-index: 3; font-size: 11px; background: var(--ink); color: #f0eee7; border-radius: 4px; padding: 1px 6px; }
   .an-w-head { display: flex; align-items: center; gap: 6px; padding: 10px 12px 0; min-height: 30px; }
   .an-w-title { font-size: 12px; font-weight: 600; color: var(--ink-2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .an-w-tools { display: inline-flex; gap: 3px; flex: 0 0 auto; }
@@ -971,7 +984,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.33.0";
+const APP_VERSION = "3.35.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -16292,8 +16305,9 @@ const AN_AGG = [["somma", "Somma"], ["media", "Media"], ["min", "Minimo"], ["max
 const AN_TIPI = [["kpi", "KPI"], ["barre", "Barre"], ["barreO", "Barre orizzontali"], ["linee", "Linee"], ["torta", "Torta"],
   ["tabella", "Tabella"], ["pivot", "Tabella pivot"], ["filtro", "Pannello filtro"]];
 const AN_GRAFICI = ["barre", "barreO", "linee", "torta"];
-const AN_LARGHEZZE = [[3, "1/4"], [4, "1/3"], [6, "Metà"], [8, "2/3"], [12, "Intera"]];
-const AN_ALTEZZE = [[1, "Bassa"], [2, "Media"], [3, "Alta"]];
+const AN_LARGHEZZE = [[2, "1/6"], [3, "1/4"], [4, "1/3"], [5, "5/12"], [6, "Metà"], [7, "7/12"], [8, "2/3"], [9, "3/4"], [10, "5/6"], [11, "11/12"], [12, "Intera"]];
+const AN_ALTEZZE = [[1, "Bassa"], [2, "Media"], [3, "Alta"], [4, "Molto alta"]];
+const AN_ALTEZZE_PX = { 1: 132, 2: 300, 3: 440, 4: 600 };
 
 // ---------- campi delle fonti dell'app ----------
 // tipo: testo | data | mese | numero. euro: la misura è un importo.
@@ -16540,6 +16554,7 @@ const anFormatta = (v, formato) => {
   return numIT(n, Number.isInteger(n) ? 0 : 2);
 };
 // ---------- confronto tra colonne della pivot (Δ e Δ %) ----------
+const anNorm = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 const anFmtDelta = (v, formato) => (v > 1e-9 ? "+" : v < -1e-9 ? "−" : "") + anFormatta(Math.abs(v), formato);
 const anFmtPerc = (p) => p === null || p === undefined || !isFinite(p) ? "—" : (p > 1e-9 ? "+" : p < -1e-9 ? "−" : "") + numIT(Math.abs(p) * 100, 1) + "%";
 const anClsDelta = (d, inverti) => Math.abs(d) < 1e-7 ? "" : ((d > 0) !== !!inverti ? " an-pos" : " an-neg");
@@ -16774,7 +16789,32 @@ function AnGrafico({ w, dati, formato, onEtichetta, registra }) {
 }
 
 // ---------- un oggetto della dashboard ----------
-function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, registra }) {
+function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, registra, drag, onRidimensiona }) {
+  const [ridim, setRidim] = useState(null);   // {w, h} mentre trascini l'angolo
+  const ridimRef = useRef(false);
+  const iniziaRidim = (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const el = e.currentTarget.closest(".an-w"); const grid = el && el.parentElement; if (!grid) return;
+    const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
+    const colW = (grid.clientWidth + gap) / 12;
+    const r = el.getBoundingClientRect(); const x0 = e.clientX, y0 = e.clientY;
+    const w0 = w.w || 6, h0 = w.h || 2;
+    let cur = { w: w0, h: h0 };
+    ridimRef.current = true;
+    const muovi = (ev) => {
+      const span = Math.round((r.width + (ev.clientX - x0) + gap) / colW);
+      const hPx = r.height + (ev.clientY - y0);
+      const h = Object.entries(AN_ALTEZZE_PX).reduce((b, [k, px]) => Math.abs(px - hPx) < Math.abs(AN_ALTEZZE_PX[b] - hPx) ? Number(k) : b, h0);
+      cur = { w: Math.max(2, Math.min(12, span)), h };
+      setRidim(cur);
+    };
+    const fine = () => {
+      window.removeEventListener("pointermove", muovi); window.removeEventListener("pointerup", fine);
+      ridimRef.current = false; setRidim(null);
+      if ((cur.w !== w0 || cur.h !== h0) && onRidimensiona) onRidimensiona(cur);
+    };
+    window.addEventListener("pointermove", muovi); window.addEventListener("pointerup", fine);
+  };
   const dati = useMemo(() => anDatiWidget(w, fonte, selezioni), [w, fonte, selezioni]);
   const [cerca, setCerca] = useState("");
   const m0 = (w.misure || [])[0];
@@ -16876,9 +16916,17 @@ function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, regis
       </div>
     );
   }
+  const wv = ridim ? ridim.w : (w.w || 6), hv = ridim ? ridim.h : (w.h || 2);
+  const dnd = modifica && drag ? {
+    draggable: true,
+    onDragStart: (e) => { if (ridimRef.current || e.target.closest && e.target.closest("button, input, select, .an-resize")) { e.preventDefault(); return; } drag.onDragStart(e); },
+    onDragOver: drag.onDragOver, onDragLeave: drag.onDragLeave, onDrop: drag.onDrop, onDragEnd: drag.onDragEnd,
+  } : {};
   return (
-    <div className={`an-w an-w${w.w || 6} an-h${w.h || 2}${w.tipo === "kpi" ? " an-kpi" : ""}`}>
-      <div className="an-w-head">
+    <div className={`an-w an-w${wv} an-h${hv}${w.tipo === "kpi" ? " an-kpi" : ""}${modifica && drag ? " " + (drag.classe || "") : ""}${ridim ? " an-ridim" : ""}`} {...dnd}>
+      {modifica && onRidimensiona && <span className="an-resize" title="Trascina per ridimensionare" onPointerDown={iniziaRidim} />}
+      {ridim && <span className="an-ridim-info">{(AN_LARGHEZZE.find(x => x[0] === ridim.w) || [0, ridim.w + "/12"])[1]} · {(AN_ALTEZZE.find(x => x[0] === ridim.h) || [0, ""])[1]}</span>}
+      <div className="an-w-head" title={modifica && drag ? "Trascina per spostare" : undefined}>
         <span className="an-w-title" title={titolo}>{titolo}</span>
         {modifica && strumenti}
       </div>
@@ -16896,6 +16944,7 @@ function anDefaultPerTipo(tipo) {
 }
 function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
   const [d, setD] = useState(() => anPulisci(iniziale));
+  const [cercaF, setCercaF] = useState({});
   const set = (patch) => setD(x => ({ ...x, ...patch }));
   const fonte = fonti[d.fonte];
   const campi = fonte ? fonte.campi : [];
@@ -17114,20 +17163,44 @@ function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
                 {(d.filtri || []).map((f, i) => (
                   <div key={i} className="an-filtro-fisso">
                     <div className="an-row">
-                      <CampoSel value={f.campo} vuoto="— campo —" onChange={v => { const arr = [...d.filtri]; arr[i] = { campo: v, valori: [] }; set({ filtri: arr }); }} />
-                      <button type="button" className="btn ghost sm" style={{ flex: "0 0 auto" }} onClick={() => set({ filtri: d.filtri.filter((_, j) => j !== i) })}>✕</button>
+                      <CampoSel value={f.campo} vuoto="— campo —" onChange={v => { const arr = [...d.filtri]; arr[i] = { campo: v, valori: [] }; set({ filtri: arr }); setCercaF(x => ({ ...x, [i]: "" })); }} />
+                      <button type="button" className="btn ghost sm" style={{ flex: "0 0 auto" }} onClick={() => { set({ filtri: d.filtri.filter((_, j) => j !== i) }); setCercaF({}); }}>✕</button>
                     </div>
-                    {f.campo && (
-                      <div className="an-valori">
-                        {valoriDi(f.campo).map(v => {
-                          const on = (f.valori || []).includes(v);
-                          return <span key={v} className={"an-chip" + (on ? " on" : "")} onClick={() => {
-                            const arr = [...d.filtri]; const vv = on ? f.valori.filter(x => x !== v) : [...(f.valori || []), v];
-                            arr[i] = { ...f, valori: vv }; set({ filtri: arr });
-                          }}>{v}</span>;
-                        })}
-                      </div>
-                    )}
+                    {f.campo && (() => {
+                      const tutti = valoriDi(f.campo);
+                      const sel = f.valori || [];
+                      const q = anNorm(cercaF[i] || "");
+                      const visibili = q ? tutti.filter(v => anNorm(v).includes(q)) : tutti;
+                      // i valori già scelti restano sempre in cima, anche se non corrispondono alla ricerca
+                      const lista = [...sel.filter(v => tutti.includes(v)), ...visibili.filter(v => !sel.includes(v))];
+                      const setValori = (vv) => { const arr = [...d.filtri]; arr[i] = { ...f, valori: vv }; set({ filtri: arr }); };
+                      return (
+                        <>
+                          {tutti.length > 8 && (
+                            <div className="an-row" style={{ marginTop: 6, alignItems: "center" }}>
+                              <input className="an-cerca" style={{ marginBottom: 0 }} placeholder={`Cerca tra ${tutti.length} valori…`}
+                                value={cercaF[i] || ""} onChange={e => setCercaF(x => ({ ...x, [i]: e.target.value }))}
+                                onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); const nuovi = visibili.filter(v => !sel.includes(v)); if (q && nuovi.length === 1) { setValori([...sel, nuovi[0]]); setCercaF(x => ({ ...x, [i]: "" })); } } }} />
+                              {q && visibili.some(v => !sel.includes(v)) && (
+                                <button type="button" className="btn ghost sm" style={{ flex: "0 0 auto" }}
+                                  onClick={() => setValori([...sel, ...visibili.filter(v => !sel.includes(v))])}>+ tutti i trovati</button>
+                              )}
+                              {sel.length > 0 && (
+                                <button type="button" className="btn ghost sm" style={{ flex: "0 0 auto" }} onClick={() => setValori([])}>Azzera ({sel.length})</button>
+                              )}
+                            </div>
+                          )}
+                          <div className="an-valori">
+                            {lista.map(v => {
+                              const on = sel.includes(v);
+                              return <span key={v} className={"an-chip" + (on ? " on" : "")}
+                                onClick={() => setValori(on ? sel.filter(x => x !== v) : [...sel, v])}>{v}</span>;
+                            })}
+                            {!lista.length && <span className="an-nota">Nessun valore trovato</span>}
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 ))}
                 <button type="button" className="btn ghost sm" onClick={() => set({ filtri: [...(d.filtri || []), { campo: "", valori: [] }] })}>+ Filtro fisso</button>
@@ -17461,6 +17534,30 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
     const nuovi = i >= 0 ? widgets.map(x => x.id === w.id ? w : x) : [...widgets, w];
     salvaWidgets(nuovi); setEditor(null);
   };
+  // ----- trascinamento degli oggetti -----
+  const [trascina, setTrascina] = useState(null);   // { da: indice, a: indice, dopo: bool }
+  const spostaA = (da, a, dopo) => {
+    if (da === null || da === undefined || a === null || a === undefined) return;
+    let dest = a + (dopo ? 1 : 0);
+    if (da < dest) dest -= 1;
+    if (dest === da) return;
+    const arr = [...widgets]; const [x] = arr.splice(da, 1); arr.splice(dest, 0, x); salvaWidgets(arr);
+  };
+  const dragDi = (i) => ({
+    classe: trascina ? (trascina.da === i ? "an-drag-src" : (trascina.a === i ? (trascina.dopo ? "an-drop-dopo" : "an-drop-prima") : "")) : "",
+    onDragStart: (e) => { e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", String(i)); } catch (err) {} setTrascina({ da: i, a: null, dopo: false }); },
+    onDragOver: (e) => {
+      if (!trascina) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = "move";
+      const r = e.currentTarget.getBoundingClientRect();
+      const dopo = e.clientX > r.left + r.width / 2;
+      if (trascina.a !== i || trascina.dopo !== dopo) setTrascina(t => t && ({ ...t, a: i, dopo }));
+    },
+    onDragLeave: () => {},
+    onDrop: (e) => { e.preventDefault(); e.stopPropagation(); if (trascina) spostaA(trascina.da, trascina.a === null ? i : trascina.a, trascina.dopo); setTrascina(null); },
+    onDragEnd: () => setTrascina(null),
+  });
+  const ridimensiona = (i, dim) => { const arr = [...widgets]; arr[i] = { ...arr[i], w: dim.w, h: dim.h }; salvaWidgets(arr); };
   const sposta = (i, delta) => {
     const j = i + delta; if (j < 0 || j >= widgets.length) return;
     const arr = [...widgets]; [arr[i], arr[j]] = [arr[j], arr[i]]; salvaWidgets(arr);
@@ -17770,9 +17867,12 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
               <button className="btn accent" onClick={() => { setModifica(true); nuovoWidget(); }}>+ Aggiungi il primo oggetto</button>
             </div>
           ) : (
-            <div className={"an-grid" + (modifica ? " an-edit" : "")}>
+            <div className={"an-grid" + (modifica ? " an-edit" : "")}
+              onDragOver={e => { if (trascina) e.preventDefault(); }}
+              onDrop={e => { if (!trascina) return; e.preventDefault(); if (trascina.a === null) spostaA(trascina.da, widgets.length - 1, true); else spostaA(trascina.da, trascina.a, trascina.dopo); setTrascina(null); }}>
               {widgets.map((w, i) => (
                 <AnWidget key={w.id} w={w} fonte={fonti[w.fonte]} selezioni={selezioni} onSeleziona={seleziona} modifica={modifica} registra={registra}
+                  drag={dragDi(i)} onRidimensiona={(dim) => ridimensiona(i, dim)}
                   strumenti={(
                     <span className="an-w-tools">
                       <button title="Sposta prima" onClick={() => sposta(i, -1)} disabled={i === 0}>←</button>
