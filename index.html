@@ -998,7 +998,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.44.0";
+const APP_VERSION = "3.45.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -6699,7 +6699,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     const mastPrec = calcolaMastrini(generaLibroGiornale(datiPrecEx.movimenti, datiPrecEx.saldiIniziali, cm));
     const pr = calcolaProspetti(schemaBilancio, mastPrec);
     const rf = rendicontoDiretto(schemaBilancio, datiPrecEx.movimenti, datiPrecEx.saldiIniziali);
-    return { stagione: datiPrecEx.stagione, prospetti: pr, rfDir: rf, mappa: mappaValoriProspetti(pr, rf) };
+    const mastIniPrec = calcolaMastrini(generaLibroGiornale(datiPrecEx.movimenti.filter(isAperturaMov), datiPrecEx.saldiIniziali, cm));
+    const rfRicl = rendicontoRiclassificato(schemaBilancio, pr, mastPrec, mastIniPrec, cm);
+    return { stagione: datiPrecEx.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf) };
   }, [datiPrecEx, schemaBilancio, contiMap]);
   const precAttivo = (confrontoEx && calcPrecEx) ? { ...calcPrecEx, variazioni: variazioniEx } : null;
   // cf: stesso oggetto usato dal PDF comparativo (colonna anno precedente, Var. €, Var. %)
@@ -6734,6 +6736,19 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       else generaPdfRF(rfDirSchema, stagione);
       setLastAction("Rendiconto Finanziario generato" + suffConfronto);
     } finally { setBusy(false); }
+  };
+  const exportRfRiclPDF = (conDettaglio) => {
+    if (!rfRiclSchema) return;
+    setBusy(true);
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, `Rendiconto Riclassificato · ${stagione}${precAttivo ? " vs " + precAttivo.stagione : ""}`, conDettaglio,
+        precAttivo ? { R: precAttivo.rfRicl, stagione: precAttivo.stagione, variazioni: precAttivo.variazioni } : null);
+      doc.save(`Rendiconto_Riclassificato_${stagione}${precAttivo ? "_vs_" + precAttivo.stagione + (precAttivo.variazioni ? "_variazioni" : "") : ""}${conDettaglio ? "_conti" : ""}.pdf`);
+      setLastAction("Rendiconto Riclassificato generato" + suffConfronto);
+    } catch (e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
   };
   const exportProspettiTuttiPDF = () => {
     if (!prospettiSchema || !rfDirSchema) return;
@@ -7276,7 +7291,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       // Stesso prospetto della pagina Schema di Bilancio, tab "RF Riclassificato".
       if (rfRiclSchema) {
         doc.addPage("a4", "portrait");
-        generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, "5. Rendiconto Riclassificato", false);
+        generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, "5. Rendiconto Riclassificato", false,
+          precAttivo ? { R: precAttivo.rfRicl, stagione: precAttivo.stagione, variazioni: precAttivo.variazioni } : null);
       }
 
       // === 6. RIEPILOGO PER BUSINESS UNIT (landscape) ===
@@ -7895,6 +7911,19 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <button className="btn" onClick={exportRFUfficialePDF} disabled={busy || !rfDirSchema}>
             {!rfDirSchema ? "Caricamento…" : "PDF"}
           </button>
+        </div>
+        <div className="card">
+          <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
+            <h3 className="card-title" style={{margin:0}}>🔁 Rendiconto Riclassificato</h3>
+            <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:9.5}}>SCHEMA DI BILANCIO</span>
+          </div>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Dall'EBITDA al free cash flow e alla variazione di liquidità.{calcPrecEx && confrontoEx ? ` Con la colonna ${calcPrecEx.stagione}.` : ""}
+          </p>
+          <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+            <button className="btn" onClick={() => exportRfRiclPDF(false)} disabled={busy || !rfRiclSchema}>{!rfRiclSchema ? "Caricamento…" : "PDF"}</button>
+            <button className="btn ghost" onClick={() => exportRfRiclPDF(true)} disabled={busy || !rfRiclSchema}>PDF con i conti</button>
+          </div>
         </div>
         <div className="card">
           <h3 className="card-title">◎ Riepilogo Business Unit</h3>
@@ -14912,7 +14941,7 @@ function rendicontoRiclassificato(schema, prospetti, mastriniFin, mastriniIni, c
 // Righe del prospetto riclassificato, condivise tra schermo ed export.
 // tipo: "sez" titolo di sezione · "voce" riga normale · "tot" risultato intermedio ·
 // "fin" risultato finale · "det" dettaglio conto (solo se richiesto)
-function righeRfRiclassificato(R, conDettaglio) {
+function righeRfRiclassificato(R, conDettaglio, forza) {
   const out = [];
   // add restituisce l'indice della riga, così i totali possono dichiarare da
   // quali righe sono composti (campo `parti`). Serve solo per verificare se
@@ -14939,7 +14968,7 @@ function righeRfRiclassificato(R, conDettaglio) {
   pOp.push(add("voce", "Altre variazioni del circolante", R.varAltro)); det(R.dettagli.altroCirc);
   pOp.push(add("voce", "Componenti straordinarie", R.straordinari));
   pOp.push(add("voce", "Imposte", R.imposte));
-  if (Math.abs(R.nonClassificato) >= 0.5) pOp.push(add("voce", "Componenti economiche non assegnate nello schema", R.nonClassificato));
+  if (Math.abs(R.nonClassificato) >= 0.5 || (forza && forza.nonClass)) pOp.push(add("voce", "Componenti economiche non assegnate nello schema", R.nonClassificato));
   const iFlusso = add("tot", "FLUSSO DI CASSA OPERATIVO", R.flussoOperativo, { parti: pOp });
   const iInv = add("voce", "Investimenti", R.investimenti); det(R.dettagli.imm.filter(x => x.val < 0));
   const iAltreImm = add("voce", "Disinvestimenti e altre variazioni delle immobilizzazioni", R.altreImm);
@@ -14952,6 +14981,28 @@ function righeRfRiclassificato(R, conDettaglio) {
   add("fin", "VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", R.variazione, { parti: [iFcfe, iDist, iApp] });
   add("voce", "Disponibilità liquide iniziali", R.liqIni);
   add("voce", "Disponibilità liquide finali", R.liqFin);
+  return out;
+}
+
+// Righe del riclassificato con la colonna dell'esercizio precedente (pv).
+// Le righe si abbinano per etichetta (e ordine, per quelle che compaiono due volte);
+// i conti di dettaglio presenti solo l'anno prima si aggiungono sotto la stessa voce, a zero.
+function righeRfConfronto(R, Rp, conDettaglio) {
+  const forza = { nonClass: Math.abs(R.nonClassificato) >= 0.5 || !!(Rp && Math.abs(Rp.nonClassificato) >= 0.5) };
+  const chiavi = (rr) => { const n = {}; let par = null;
+    return rr.map(r => {
+      if (r.tipo === "det") return { ...r, k: par + "|" + r.label, parent: par };
+      const b = r.tipo + ":" + r.label; n[b] = (n[b] || 0) + 1; par = b + "#" + n[b];
+      return { ...r, k: par };
+    }); };
+  const a = chiavi(righeRfRiclassificato(R, conDettaglio, forza));
+  if (!Rp) return a;
+  const b = chiavi(righeRfRiclassificato(Rp, conDettaglio, forza));
+  const mb = new Map(b.map(r => [r.k, r])), ka = new Set(a.map(r => r.k));
+  const out = []; let par = null;
+  const aggiungiSoloPrec = () => { if (par) b.filter(r => r.tipo === "det" && r.parent === par && !ka.has(r.k)).forEach(r => out.push({ ...r, val: 0, pv: r.val })); };
+  a.forEach(r => { if (r.tipo !== "det") { aggiungiSoloPrec(); par = r.k; } out.push({ ...r, pv: mb.has(r.k) ? mb.get(r.k).val : 0 }); });
+  aggiungiSoloPrec();
   return out;
 }
 
@@ -14976,8 +15027,10 @@ function scartiDiArrotondamento(righe) {
 // vista a schermo (righeRfRiclassificato), così carta e video non possono
 // divergere: se cambia il prospetto, cambiano entrambi insieme.
 // `doc` e' il documento su cui appendere; `titolo` l'intestazione di sezione.
-function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
+function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio, prec) {
   if (!R) return;
+  // prec: { R, stagione, variazioni } per la versione comparativa
+  const Rp = prec && prec.R ? prec.R : null;
   const W = doc.internal.pageSize.width;
   doc.setFont("helvetica", "bold"); doc.setFontSize(14);
   doc.text(titolo, 14, 18);
@@ -14990,23 +15043,33 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
   // Stessa formattazione degli altri prospetti del documento: importi interi,
   // lo zero scritto "-". Prendo money() dal builder cosi' non puo' divergere.
   const { money, NERO, GRIGIO_CHIARO: GRIGIO } = creaPdfBuilder(stagione, "portrait", doc);
-  const body = righeRfRiclassificato(R, !!conDettaglio).map(r => {
+  const cf = Rp ? { stagione, precStagione: prec.stagione, get: () => 0, var: !!prec.variazioni } : null;
+  const nCol = cf ? (cf.var ? 5 : 3) : 2;
+  const extra = (r, stile) => { if (!cf) return [];
+    return celleConfrontoPdf({ ...cf, get: () => r.pv || 0 }, "", stile, r.val, money); };
+  const body = righeRfConfronto(R, Rp, !!conDettaglio).map(r => {
     const imp = money(r.val);
-    if (r.tipo === "sez") return [{ content: r.label, colSpan: 2, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } }];
-    if (r.tipo === "det") return [{ content: `      ${r.label}`, styles: { fontSize: 7, textColor: [130, 130, 130] } },
-                                  { content: imp, styles: { fontSize: 7, textColor: [130, 130, 130] } }];
-    if (r.tipo === "tot") return [{ content: `  ${r.label}`, styles: { fontStyle: "bold", fillColor: GRIGIO } },
-                                  { content: imp, styles: { fontStyle: "bold", fillColor: GRIGIO } }];
-    if (r.tipo === "fin") return [{ content: `  ${r.label}`, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } },
-                                  { content: imp, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } }];
-    return [`     ${r.label}`, imp];
+    if (r.tipo === "sez") return [{ content: r.label, colSpan: nCol, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } }];
+    if (r.tipo === "det") { const st = { fontSize: 7, textColor: [130, 130, 130] };
+      return [{ content: `      ${r.label}`, styles: st }, { content: imp, styles: st }, ...extra(r, { fontSize: 7 })]; }
+    if (r.tipo === "tot") { const st = { fontStyle: "bold", fillColor: GRIGIO };
+      return [{ content: `  ${r.label}`, styles: st }, { content: imp, styles: st }, ...extra(r, st)]; }
+    if (r.tipo === "fin") { const st = { fontStyle: "bold", fillColor: NERO, textColor: 240 };
+      return [{ content: `  ${r.label}`, styles: st }, { content: imp, styles: st },
+              ...extra(r, { fontStyle: "bold", fillColor: NERO }).map(c => ({ ...c, styles: { ...c.styles, textColor: 225 } }))]; }
+    return [`     ${r.label}`, imp, ...extra(r, null)];
   });
+  const largT = cf ? (cf.var ? 184 : 150) : 160;
+  const larg0 = cf ? (cf.var ? 90 : 90) : 126;
   doc.autoTable({
-    startY: 30, head: [["Voce", "Importo"]], body, theme: "plain",
-    styles: { fontSize: 8.5, cellPadding: 1.6 },
+    startY: 30, head: [cf ? ["Voce", cf.stagione, cf.precStagione, ...(cf.var ? ["Var. €", "Var. %"] : [])] : ["Voce", "Importo"]], body, theme: "plain",
+    styles: { fontSize: cf ? 8 : 8.5, cellPadding: 1.6 },
     headStyles: { fillColor: NERO, textColor: 240, fontStyle: "bold" },
-    columnStyles: { 0: { cellWidth: 126 }, 1: { cellWidth: 34, halign: "right" } },
-    margin: { left: (W - 160) / 2 },
+    columnStyles: cf
+      ? { 0: { cellWidth: larg0 }, 1: { cellWidth: 30, halign: "right" }, 2: { cellWidth: 30, halign: "right" }, ...(cf.var ? { 3: { cellWidth: 20, halign: "right" }, 4: { cellWidth: 14, halign: "right" } } : {}) }
+      : { 0: { cellWidth: 126 }, 1: { cellWidth: 34, halign: "right" } },
+    didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
+    margin: { left: (W - largT) / 2 },
   });
 
   const righeRf = righeRfRiclassificato(R, !!conDettaglio);
@@ -15014,7 +15077,7 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
     const yN = doc.lastAutoTable.finalY + 5;
     doc.setFont("helvetica", "italic"); doc.setFontSize(7.5); doc.setTextColor(120);
     doc.text("Importi in unità di euro: ogni riga è arrotondata singolarmente, quindi una somma può differire di 1 dal totale esposto. I valori reali quadrano al centesimo.",
-             (W - 160) / 2, yN);
+             (W - (cf ? largT : 160)) / 2, yN, { maxWidth: cf ? largT : 160 });
     doc.setFont("helvetica", "normal"); doc.setTextColor(0);
   }
 
@@ -15030,20 +15093,35 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio) {
 }
 
 // Vista a schermo (componente a livello di modulo, come gli altri editor dello schema)
-function SBRfRiclassificato({ R }) {
+function SBRfRiclassificato({ R, Rp, precStagione, variazioni, stagione }) {
   const [dettaglio, setDettaglio] = useState(false);
   if (!R) return null;
+  const conf = !!Rp;
   // m0: colonne di importi → negativi fra parentesi. m0s: righe discorsive → segno meno.
   const m0 = (n) => { const r = Math.round(Number(n) || 0); if (r === 0) return "-";
                       const s = Math.abs(r).toLocaleString("it-IT"); return r < 0 ? "(" + s + ")" : s; };
   const m0s = (n) => { const r = Math.round(Number(n) || 0); return r === 0 ? "-" : r.toLocaleString("it-IT"); };
   const righe = righeRfRiclassificato(R, dettaglio);
+  const righeV = righeRfConfronto(R, Rp, dettaglio);
+  const nCol = conf ? (variazioni ? 5 : 4) : 2;
+  // colonne aggiuntive: esercizio precedente, Δ ed eventualmente Δ %
+  const extra = (r, stile, bianco) => {
+    if (!conf) return null;
+    const pv = r.pv || 0, d = Math.round(((r.val || 0) - pv) * 100) / 100;
+    const grigio = bianco ? "rgba(255,255,255,.7)" : "var(--ink-3)";
+    return [
+      <td key="p" className="num" style={{ ...(stile || {}), color: grigio }}>{m0(pv)}</td>,
+      <td key="d" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>{Math.abs(d) < 0.5 ? "–" : (d > 0 ? "+" : "−") + m0(Math.abs(d))}</td>,
+      ...(variazioni ? [<td key="pc" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>
+        {Math.abs(pv) > 0.5 ? (d > 0.004 ? "+" : d < -0.004 ? "−" : "") + numIT(Math.abs(d) / Math.abs(pv) * 100, 1) + "%" : "–"}</td>] : []),
+    ];
+  };
   const ok = Math.abs(R.scarto) < 0.5;
   const okCe = Math.abs(R.risultato - R.risultatoSchema) < 0.5;
   return (
-    <div className="card" style={{ maxWidth: 640, margin: "0 auto" }}>
+    <div className="card" style={{ maxWidth: conf ? 860 : 640, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-        <div className="card-title" style={{ margin: 0 }}>RF Riclassificato</div>
+        <div className="card-title" style={{ margin: 0 }}>RF Riclassificato{conf ? ` · confronto con ${precStagione}` : ""}</div>
         <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
           <input type="checkbox" checked={dettaglio} onChange={e => setDettaglio(e.target.checked)} />
           Mostra i conti
@@ -15055,15 +15133,24 @@ function SBRfRiclassificato({ R }) {
       </div>
       <table style={{ width: "100%" }}>
         <tbody>
-          {righe.map((r, i) => {
+          {conf && (
+            <tr>
+              <td></td>
+              {[stagione || "", precStagione, "Δ", ...(variazioni ? ["Δ %"] : [])].map(t => (
+                <td key={t} className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>{t}</td>
+              ))}
+            </tr>
+          )}
+          {righeV.map((r, i) => {
             if (r.tipo === "sez") return (
-              <tr key={i}><td colSpan={2} style={{ paddingTop: i ? 18 : 4, fontFamily: "'Fraunces',serif", fontSize: 14,
+              <tr key={i}><td colSpan={nCol} style={{ paddingTop: i ? 18 : 4, fontFamily: "'Fraunces',serif", fontSize: 14,
                                                   borderBottom: "1px solid var(--rule-2)" }}>{r.label}</td></tr>
             );
             if (r.tipo === "det") return (
               <tr key={i}>
                 <td style={{ paddingLeft: 22, fontSize: 11.5, color: "var(--ink-3)" }}>{r.label}</td>
                 <td className="num" style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{m0(r.val)}</td>
+                {extra(r, { fontSize: 11.5 })}
               </tr>
             );
             const tot = r.tipo === "tot", fin = r.tipo === "fin";
@@ -15075,6 +15162,7 @@ function SBRfRiclassificato({ R }) {
                 <td className={"num " + (!fin && r.val < -0.5 ? "neg" : "")} style={{ fontWeight: tot || fin ? 700 : 400, paddingRight: 8 }}>
                   {m0(r.val)}
                 </td>
+                {extra(r, { fontWeight: tot || fin ? 700 : 400 }, fin)}
               </tr>
             );
           })}
@@ -15092,6 +15180,14 @@ function SBRfRiclassificato({ R }) {
           ? `✓ Quadra con la variazione effettiva della liquidità (${m0s(R.variazioneEffettiva)})`
           : `✗ Scarto di ${m0s(R.scarto)} rispetto alla variazione effettiva della liquidità (${m0s(R.variazioneEffettiva)}): c'è un conto classificato male o una natura da correggere in Struttura RF.`}
       </div>
+      {conf && (
+        <div style={{ marginTop: 8, padding: "6px 12px", borderRadius: 6, fontSize: 12,
+                      background: Math.abs(Rp.scarto) < 0.5 ? "#e7f3ea" : "var(--danger-soft)", color: Math.abs(Rp.scarto) < 0.5 ? "var(--accent)" : "var(--danger)" }}>
+          {Math.abs(Rp.scarto) < 0.5
+            ? `✓ ${precStagione}: quadra con la variazione effettiva della liquidità (${m0s(Rp.variazioneEffettiva)})`
+            : `✗ ${precStagione}: scarto di ${m0s(Rp.scarto)} rispetto alla variazione effettiva della liquidità (${m0s(Rp.variazioneEffettiva)})`}
+        </div>
+      )}
       {!okCe && (
         <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}>
           ⚠ Il risultato riclassificato ({m0s(R.risultato)}) non coincide con quello del conto economico ({m0s(R.risultatoSchema)}).
@@ -16041,7 +16137,9 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     const pr = calcolaProspetti(schema, mastPrec);
     const rf = rendicontoDiretto(schema, datiPrec.movimenti, datiPrec.saldiIniziali);
     const mancanti = controlliSchema(schema, mastPrec, []).mancanti;
-    return { stagione: datiPrec.stagione, prospetti: pr, rfDir: rf, mappa: mappaValoriProspetti(pr, rf), mancanti };
+    const mastIniPrec = calcolaMastrini(generaLibroGiornale(datiPrec.movimenti.filter(isAperturaMov), datiPrec.saldiIniziali, cm));
+    const rfRicl = rendicontoRiclassificato(schema, pr, mastPrec, mastIniPrec, cm);
+    return { stagione: datiPrec.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf), mancanti };
   }, [datiPrec, schema, contiMap]);
 
   if (!caricato || !schema) return <div className="empty-state">Caricamento schema…</div>;
@@ -16573,7 +16671,11 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         </div>
       )}
 
-      {tab === "rfr" && <SBRfRiclassificato R={rfRicl} />}
+      {tab === "rfr" && (
+        <div style={{ display: "grid", gap: 10 }}>
+          <SBRfRiclassificato R={rfRicl} Rp={conf ? calcPrec.rfRicl : null} precStagione={calcPrec ? calcPrec.stagione : ""} variazioni={variazioni} stagione={stagione} />
+        </div>
+      )}
 
       {tab === "prospetti" && (
         <div style={{ display: "grid", gap: 18 }}>
@@ -16716,7 +16818,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
           {/* Il metodo indiretto "puro" e' superato dall'RF Riclassificato, che parte
               dall'EBITDA e arriva alla variazione di liquidita' con piu' dettaglio. Il calcolo
               indiretto resta solo come controllo, nella scheda Controlli. */}
-          <SBRfRiclassificato R={rfRicl} />
+          <SBRfRiclassificato R={rfRicl} Rp={conf ? calcPrec.rfRicl : null} precStagione={calcPrec ? calcPrec.stagione : ""} variazioni={variazioni} stagione={stagione} />
         </div>
       )}
 
