@@ -990,7 +990,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.40.0";
+const APP_VERSION = "3.41.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -15042,12 +15042,14 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
     doc.setTextColor(0);
   };
   // tabella con intestazione colorata (verde/rosso), come in Export
-  const tabellaColorata = (body, headLabel, startY, coloreHead) => {
+  const tabellaColorata = (body, headLabel, startY, coloreHead, cf) => {
     doc.autoTable({
-      startY, head: [[headLabel, "Importo"]], body, theme: "plain",
+      startY, head: [cf ? [headLabel, cf.stagione, cf.precStagione] : [headLabel, "Importo"]], body, theme: "plain",
       styles: { fontSize: 9, cellPadding: 2 },
       headStyles: { fillColor: coloreHead, textColor: 240, fontStyle: "bold" },
-      columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
+      columnStyles: cf ? { 0: { cellWidth: 118 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" } }
+                       : { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
+      didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
     });
     return doc.lastAutoTable.finalY;
   };
@@ -15061,20 +15063,22 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
   };
   // righe di una macroclasse, con eventuale sottotitolo per le voci "sotto-sezione"
   // (marcatori senza conti propri, es. Immobilizzazioni materiali / immateriali / finanziarie)
-  const righeClasse = (cl, prefissoVoce) => {
+  // cf (facoltativo): { get(chiave) } per la colonna dell'esercizio precedente
+  const righeClasse = (cl, prefissoVoce, cf) => {
+    const prev = (k, stile) => cf ? [{ content: money(cf.get(k)), styles: { ...(stile || {}), textColor: [110, 110, 110] } }] : [];
     const rows = [[{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
-                   { content: money(cl.totale), styles: { fontStyle: "bold" } }]];
+                   { content: money(cl.totale), styles: { fontStyle: "bold" } }, ...prev("cl:" + cl.id, { fontStyle: "bold" })]];
     (cl.voci || []).forEach(v => {
       if (v.tipo === "sottosezione") {
-        rows.push([{ content: `   ${v.nome}`, styles: { fontStyle: "italic", textColor: [130, 130, 130] } }, ""]);
+        rows.push([{ content: `   ${v.nome}`, styles: { fontStyle: "italic", textColor: [130, 130, 130] } }, "", ...(cf ? [""] : [])]);
         return;
       }
-      rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore)]);
+      rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore), ...prev("v:" + v.id)]);
       // sotto-voci: un livello piu' rientrato, col proprio subtotale, come
       // "1) Terreni e fabbricati" sotto "II. Immobilizzazioni materiali"
       (v.sottovoci || []).forEach(sv => {
         rows.push([{ content: `      ${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, styles: { textColor: [90, 90, 90] } },
-                   { content: money(sv.valore), styles: { textColor: [90, 90, 90] } }]);
+                   { content: money(sv.valore), styles: { textColor: [90, 90, 90] } }, ...prev("sv:" + sv.id)]);
       });
     });
     return rows;
@@ -15300,73 +15304,121 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
 // a partire dai dati già calcolati con lo Schema di Bilancio. Usata dal pulsante
 // "PDF prospetti" della pagina Schema di Bilancio. Il metodo indiretto e' tolto per ora
 // (vedi generaPdfRF); rfInd resta come parametro per quando verrà riattivato.
-function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione) {
+// Mappa id -> valore dei prospetti di un esercizio, per affiancarlo a un altro
+// esercizio calcolato con lo STESSO schema (colonna "anno precedente").
+function mappaValoriProspetti(pr, rf) {
+  const m = {};
+  if (pr) {
+    [...(pr.sp || []), ...(pr.ce || [])].forEach(cl => {
+      m["cl:" + cl.id] = cl.totale;
+      (cl.voci || []).forEach(v => {
+        m["v:" + v.id] = v.valore;
+        (v.dettaglio || []).forEach(d => { m["d:" + v.id + ":" + d.c] = d.valore; });
+        (v.sottovoci || []).forEach(sv => {
+          m["sv:" + sv.id] = sv.valore;
+          (sv.dettaglio || []).forEach(d => { m["d:" + sv.id + ":" + d.c] = d.valore; });
+        });
+      });
+    });
+    m.totAttivo = pr.totAttivo; m.totPassivo = pr.totPassivo; m.risultato = pr.risultato;
+    m.totPos = (pr.ce || []).filter(c => c.segno >= 0).reduce((x, c) => x + c.totale, 0);
+    m.totNeg = (pr.ce || []).filter(c => c.segno < 0).reduce((x, c) => x + c.totale, 0);
+  }
+  if (rf) {
+    (rf.aree || []).forEach(a => {
+      m["a:" + a.id] = a.totale;
+      (a.voci || []).forEach(v => {
+        m["rv:" + v.id] = v.totale;
+        (v.righe || []).forEach(r => { m["rr:" + v.id + ":" + r.cat] = r.val; });
+      });
+    });
+    m.rfVar = rf.variazione; m.rfAp = rf.apertura; m.rfCh = rf.chiusura;
+    (rf.dettaglioLiquidita || []).forEach(d => { m["li:" + d.nome] = d.apertura; m["lf:" + d.nome] = d.chiusura; });
+  }
+  return m;
+}
+
+function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
   const b = creaPdfBuilder(stagione, "portrait");
+  // confronto con l'esercizio precedente: stessa struttura, una colonna in piu'
+  const P = prec ? mappaValoriProspetti(prec.prospetti, prec.rfDir) : null;
+  const cf = P ? { stagione, precStagione: prec.stagione, get: (k) => P[k] || 0 } : null;
+  const pc = (k, stile) => cf ? [{ content: b.money(cf.get(k)), styles: { ...(stile || {}), textColor: [110, 110, 110] } }] : [];
 
   // --- Stato Patrimoniale ---
-  b.intestazioneP("Stato Patrimoniale");
-  const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => b.righeClasse(cl, ". "));
+  b.intestazioneP("Stato Patrimoniale" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
+  const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => b.righeClasse(cl, ". ", cf));
   attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
-                    { content: b.money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
-  let y = b.tabellaColorata(attivoRows, "ATTIVO", 36, b.VERDE);
-  const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => b.righeClasse(cl, ". "));
+                    { content: b.money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } },
+                    ...pc("totAttivo", { fontStyle: "bold", fillColor: b.VERDE_CHIARO })]);
+  let y = b.tabellaColorata(attivoRows, "ATTIVO", 36, b.VERDE, cf);
+  const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => b.righeClasse(cl, ". ", cf));
   passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
-                     { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
-  y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO);
+                     { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } },
+                     ...pc("totPassivo", { fontStyle: "bold", fillColor: b.ROSSO_CHIARO })]);
+  y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO, cf);
   if (Math.abs(prospetti.sbilancio) >= 0.01) {
     b.barraFinale(y + 6, "SBILANCIO ATTIVO / PASSIVO", b.money(prospetti.sbilancio), b.ROSSO);
   }
 
   // --- Conto Economico ---
-  b.doc.addPage(); b.intestazioneP("Conto Economico");
+  b.doc.addPage(); b.intestazioneP("Conto Economico" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
   const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
   const negCE = prospetti.ce.filter(cl => cl.segno < 0);
   let y2 = 34;
   if (posCE.length) {
-    const rows = posCE.flatMap(cl => b.righeClasse(cl, ") "));
+    const rows = posCE.flatMap(cl => b.righeClasse(cl, ") ", cf));
     rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
-               { content: b.money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
-    y2 = b.tabellaColorata(rows, "VOCI POSITIVE", y2, b.VERDE) + 10;
+               { content: b.money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } },
+               ...pc("totPos", { fontStyle: "bold", fillColor: b.VERDE_CHIARO })]);
+    y2 = b.tabellaColorata(rows, "VOCI POSITIVE", y2, b.VERDE, cf) + 10;
   }
   if (negCE.length) {
-    const rows = negCE.flatMap(cl => b.righeClasse(cl, ") "));
+    const rows = negCE.flatMap(cl => b.righeClasse(cl, ") ", cf));
     rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
-               { content: b.money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } }]);
-    y2 = b.tabellaColorata(rows, "VOCI NEGATIVE", y2, b.ROSSO) + 10;
+               { content: b.money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } },
+               ...pc("totNeg", { fontStyle: "bold", fillColor: b.ROSSO_CHIARO })]);
+    y2 = b.tabellaColorata(rows, "VOCI NEGATIVE", y2, b.ROSSO, cf) + 10;
   }
   b.barraFinale(y2, "RISULTATO D'ESERCIZIO",
-                `${b.money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, b.NERO);
+                `${b.money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})` +
+                (cf ? `     ${cf.precStagione}: ${b.money(cf.get("risultato"))}` : ""), b.NERO);
 
   // --- Rendiconto: metodo diretto ---
   b.doc.addPage("a4", "landscape"); b.intestazioneL("Rendiconto Finanziario · Metodo diretto");
   const bodyD = [];
   rfDir.aree.forEach(a => {
     bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
-                { content: b.money(a.totale), styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } }]);
+                { content: b.money(a.totale), styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
+                ...pc("a:" + a.id, { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO })]);
     (a.voci || []).forEach(v => {
       bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
-                  { content: b.money(v.totale), styles: { fontStyle: "bold" } }]);
+                  { content: b.money(v.totale), styles: { fontStyle: "bold" } }, ...pc("rv:" + v.id, { fontStyle: "bold" })]);
     });
   });
   bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
-              { content: b.money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } }]);
-  bodyD.push(["Disponibilita' liquide iniziali", b.money(rfDir.apertura)]);
-  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.apertura)]));
+              { content: b.money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } },
+              ...pc("rfVar", { fontStyle: "bold", fillColor: b.VERDE_CHIARO })]);
+  bodyD.push(["Disponibilita' liquide iniziali", b.money(rfDir.apertura), ...pc("rfAp")]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.apertura), ...pc("li:" + d.nome)]));
   bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
-              { content: b.money(rfDir.chiusura), styles: { fontStyle: "bold" } }]);
-  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.chiusura)]));
+              { content: b.money(rfDir.chiusura), styles: { fontStyle: "bold" } }, ...pc("rfCh", { fontStyle: "bold" })]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.chiusura), ...pc("lf:" + d.nome)]));
+  const larg = cf ? 172 : 140;
   b.doc.autoTable({
-    startY: 30, head: [["Voce", "Importo"]], body: bodyD, theme: "plain",
+    startY: 30, head: [cf ? ["Voce", cf.stagione, cf.precStagione] : ["Voce", "Importo"]], body: bodyD, theme: "plain",
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
-    columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
+    columnStyles: cf ? { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" } }
+                     : { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
+    didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
     // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
-    margin: { left: (b.doc.internal.pageSize.width - 140) / 2 },
+    margin: { left: (b.doc.internal.pageSize.width - larg) / 2 },
   });
 
   // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
 
-  b.doc.save(`Prospetti_Civilistici_${stagione}.pdf`);
+  b.doc.save(`Prospetti_Civilistici_${stagione}${cf ? "_vs_" + cf.precStagione : ""}.pdf`);
 }
 
 function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
@@ -15797,6 +15849,44 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const rfInd = useMemo(() => schema ? rendicontoIndiretto(schema, mastrini, mastriniIniziali, contiMap) : null,
     [schema, mastrini, mastriniIniziali, contiMap]);
 
+  // ---------- esercizio precedente (colonna di confronto) ----------
+  // Si legge la stagione precedente e la si calcola con lo STESSO schema di
+  // questa: stessa classificazione, quindi le due colonne sono confrontabili.
+  const [datiPrec, setDatiPrec] = useState(null);
+  const [confronto, setConfronto] = useState(true);
+  useEffect(() => {
+    setDatiPrec(null);
+    const prec = stagionePrecedenteDi(stagione);
+    if (!firebaseReady || !prec) return;
+    let vivo = true;
+    (async () => {
+      try {
+        const [mv, si, ct] = await Promise.all([
+          db.ref(`stagioni/${prec}/movimenti`).once("value"),
+          db.ref(`stagioni/${prec}/saldiIniziali`).once("value"),
+          db.ref(`stagioni/${prec}/conti`).once("value"),
+        ]);
+        if (!vivo || !mv.exists()) return;
+        const r = intervalloStagione(prec);
+        const movs = Object.entries(mv.val() || {}).map(([k, m]) => ({ ...m, _id: k }))
+          .filter(m => !r || !m.data || (m.data >= r.da && m.data <= r.a));
+        setDatiPrec({ stagione: prec, movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}) });
+      } catch (e) { /* stagione precedente assente o illeggibile: niente confronto */ }
+    })();
+    return () => { vivo = false; };
+  }, [stagione]);
+  const calcPrec = useMemo(() => {
+    if (!datiPrec || !schema) return null;
+    const cm = {};
+    datiPrec.conti.forEach(c => { if (c) cm[c.codice] = c; });
+    Object.values(contiMap).forEach(c => { if (!cm[c.codice]) cm[c.codice] = c; });
+    const mastPrec = calcolaMastrini(generaLibroGiornale(datiPrec.movimenti, datiPrec.saldiIniziali, cm));
+    const pr = calcolaProspetti(schema, mastPrec);
+    const rf = rendicontoDiretto(schema, datiPrec.movimenti, datiPrec.saldiIniziali);
+    const mancanti = controlliSchema(schema, mastPrec, []).mancanti;
+    return { stagione: datiPrec.stagione, prospetti: pr, rfDir: rf, mappa: mappaValoriProspetti(pr, rf), mancanti };
+  }, [datiPrec, schema, contiMap]);
+
   if (!caricato || !schema) return <div className="empty-state">Caricamento schema…</div>;
 
   // ---------- mutatori ----------
@@ -16011,16 +16101,39 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
   // ---------- export PDF (stessa grafica della pagina Export) ----------
-  const esportaPDF = () => generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione);
+  const esportaPDF = () => generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, (confronto && calcPrec) ? calcPrec : null);
 
   // ---------- render dei prospetti ----------
-  const rigaConto = (d, indent) => (
+  const conf = !!(confronto && calcPrec);
+  const PM = conf ? calcPrec.mappa : {};
+  const nCol = conf ? 4 : 2;
+  // colonne aggiuntive: esercizio precedente e variazione
+  const cp = (cur, key, stile, dec = 0) => {
+    if (!conf) return null;
+    const pv = PM[key] || 0, d = Math.round(((cur || 0) - pv) * 100) / 100;
+    return [
+      <td key="p" className="num" style={{ ...(stile || {}), color: "var(--ink-3)" }}>{fmtP(pv, dec)}</td>,
+      <td key="d" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: Math.abs(d) < 0.005 ? "var(--ink-3)" : "var(--ink-2)" }}>
+        {Math.abs(d) < 0.005 ? "–" : (d > 0 ? "+" : "−") + fmtP(Math.abs(d), dec)}
+      </td>,
+    ];
+  };
+  const testataConfronto = conf ? (
+    <tr>
+      <td></td>
+      <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>{stagione}</td>
+      <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>{calcPrec.stagione}</td>
+      <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>Δ</td>
+    </tr>
+  ) : null;
+  const rigaConto = (d, indent, vid) => (
     <tr key={d.c} style={{ fontSize: 12, color: "var(--ink-2)" }}>
       <td style={{ paddingLeft: indent }}>
         <span className="mono">{String(d.c).padStart(2, "0")}</span> {d.nome}
         {d.valore < 0 && <span style={{ color: "var(--danger)" }}> (in rettifica)</span>}
       </td>
       <td className="num">{fmtP(d.valore)}</td>
+      {cp(d.valore, "d:" + vid + ":" + d.c, null, 2)}
     </tr>
   );
   const rigaVoce = (v) => {
@@ -16036,6 +16149,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             {v.speciale === "risultato" && <span style={{ color: "var(--ink-3)", fontSize: 11 }}> (da CE)</span>}
           </td>
           <td className="num">{fmtP(v.valore, 0)}</td>
+          {cp(v.valore, "v:" + v.id)}
         </tr>
         {/* le sotto-voci restano sempre visibili col loro subtotale: sono parte
             del prospetto, non un dettaglio da aprire. I conti sotto, invece, si
@@ -16047,11 +16161,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 {x.codice ? x.codice + ") " : ""}{x.nome}
               </td>
               <td className="num" style={{ color: "var(--ink-2)" }}>{fmtP(x.valore, 0)}</td>
+              {cp(x.valore, "sv:" + x.id)}
             </tr>
-            {espansi[v.id] && (x.dettaglio || []).map(d => rigaConto(d, 68))}
+            {espansi[v.id] && (x.dettaglio || []).map(d => rigaConto(d, 68, x.id))}
           </React.Fragment>
         ))}
-        {espansi[v.id] && v.dettaglio.map(d => rigaConto(d, 52))}
+        {espansi[v.id] && v.dettaglio.map(d => rigaConto(d, 52, v.id))}
       </React.Fragment>
     );
   };
@@ -16061,7 +16176,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const righeVociConSottosezioni = (voci) => (voci || []).map(v => (
     v.tipo === "sottosezione" ? (
       <tr key={v.id}>
-        <td colSpan={2} style={{ paddingLeft: 20, fontSize: 11, fontWeight: 700, color: "var(--ink-3)",
+        <td colSpan={nCol} style={{ paddingLeft: 20, fontSize: 11, fontWeight: 700, color: "var(--ink-3)",
                                   textTransform: "uppercase", letterSpacing: 0.4, paddingTop: 10 }}>
           {v.nome}
         </td>
@@ -16084,7 +16199,14 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className="btn ghost" onClick={autoMappa}>Proponi mappatura</button>
           <button className="btn ghost" onClick={resetSchema}>Ripristina default</button>
-          <button className="btn accent" onClick={esportaPDF}>↧ PDF prospetti</button>
+          {calcPrec && (
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}
+                   title="Affianca ai prospetti la colonna dell'esercizio precedente, calcolata con lo stesso schema">
+              <input type="checkbox" style={{ width: "auto" }} checked={confronto} onChange={e => setConfronto(e.target.checked)} />
+              Confronto con {calcPrec.stagione}
+            </label>
+          )}
+          <button className="btn accent" onClick={esportaPDF}>↧ PDF prospetti{(confronto && calcPrec) ? " (con " + calcPrec.stagione + ")" : ""}</button>
         </div>
       </div>
 
@@ -16092,16 +16214,19 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
         <div className="kpi">
           <div className="label">Totale Attivo</div>
           <div className="value">{fmt0Euro(prospetti.totAttivo)}</div>
+          {conf && <div className="hint">{calcPrec.stagione}: {fmt0Euro(PM.totAttivo || 0)}</div>}
         </div>
         <div className="kpi">
           <div className="label">Totale Passivo e PN</div>
           <div className="value">{fmt0Euro(prospetti.totPassivo)}</div>
+          {conf && <div className="hint">{calcPrec.stagione}: {fmt0Euro(PM.totPassivo || 0)}</div>}
         </div>
         <div className="kpi">
           <div className="label">Risultato d'esercizio</div>
           <div className="value" style={{ color: prospetti.risultato >= 0 ? "var(--accent)" : "var(--danger)" }}>
             {fmt0Euro(prospetti.risultato)}
           </div>
+          {conf && <div className="hint">{calcPrec.stagione}: {fmt0Euro(PM.risultato || 0)}</div>}
         </div>
         <div className="kpi">
           <div className="label">Quadratura</div>
@@ -16283,6 +16408,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
       {tab === "prospetti" && (
         <div style={{ display: "grid", gap: 18 }}>
+          {conf && calcPrec.mancanti.length > 0 && (
+            <div style={{ padding: "10px 14px", borderRadius: 8, background: "#fff8e7", border: "1px solid #f0d860", color: "#7a5d00", fontSize: 12.5 }}>
+              <b>Colonna {calcPrec.stagione} incompleta:</b> {calcPrec.mancanti.length} cont{calcPrec.mancanti.length === 1 ? "o movimentato" : "i movimentati"} in {calcPrec.stagione} non {calcPrec.mancanti.length === 1 ? "è" : "sono"} nello schema di {stagione}:{" "}
+              {calcPrec.mancanti.map(m => `${m.codice} ${m.nome} (${fmt(m.saldo)})`).join(", ")}. Aggiungili a una voce per avere il confronto completo.
+            </div>
+          )}
           <div className="card">
             <div className="card-title">Stato Patrimoniale</div>
             {["attivo", "passivo"].map(lato => (
@@ -16292,11 +16423,13 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 </div>
                 <table style={{ width: "100%" }}>
                   <tbody>
+                    {testataConfronto}
                     {prospetti.sp.filter(c => c.lato === lato).map(cl => (
                       <React.Fragment key={cl.id}>
                         <tr style={{ background: "var(--panel-2)" }}>
                           <td style={{ fontWeight: 700 }}>{cl.codice ? cl.codice + ") " : ""}{cl.nome}</td>
                           <td className="num" style={{ fontWeight: 700 }}>{fmtP(cl.totale, 0)}</td>
+                          {cp(cl.totale, "cl:" + cl.id, { fontWeight: 700 })}
                         </tr>
                         {righeVociConSottosezioni(cl.voci)}
                       </React.Fragment>
@@ -16308,6 +16441,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>
                         {fmtP((lato === "attivo" ? prospetti.totAttivo : prospetti.totPassivo), 0)}
                       </td>
+                      {cp(lato === "attivo" ? prospetti.totAttivo : prospetti.totPassivo, lato === "attivo" ? "totAttivo" : "totPassivo", { fontWeight: 700, fontSize: 14 })}
                     </tr>
                   </tbody>
                 </table>
@@ -16324,6 +16458,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             <div className="card-title">Conto Economico</div>
             <table style={{ width: "100%", marginTop: 10 }}>
               <tbody>
+                {testataConfronto}
                 {prospetti.ce.map(cl => (
                   <React.Fragment key={cl.id}>
                     <tr style={{ background: "var(--panel-2)" }}>
@@ -16332,6 +16467,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                         <span style={{ color: "var(--ink-3)", fontWeight: 400, fontSize: 11 }}> {cl.segno >= 0 ? "(+)" : "(−)"}</span>
                       </td>
                       <td className="num" style={{ fontWeight: 700 }}>{fmtP(cl.totale, 0)}</td>
+                      {cp(cl.totale, "cl:" + cl.id, { fontWeight: 700 })}
                     </tr>
                     {righeVociConSottosezioni(cl.voci)}
                   </React.Fragment>
@@ -16341,6 +16477,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                   <td className="num" style={{ fontWeight: 700, fontSize: 14, color: prospetti.risultato >= 0 ? "var(--accent)" : "var(--danger)" }}>
                     {fmtP(prospetti.risultato, 0)}
                   </td>
+                  {cp(prospetti.risultato, "risultato", { fontWeight: 700, fontSize: 14 })}
                 </tr>
               </tbody>
             </table>
@@ -16350,11 +16487,13 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
             <div className="card-title">Rendiconto Finanziario · metodo diretto</div>
             <table style={{ width: "100%", marginTop: 10 }}>
               <tbody>
+                {testataConfronto}
                 {rfDir.aree.map(a => (
                   <React.Fragment key={a.id}>
                     <tr style={{ background: "var(--panel-2)" }}>
                       <td style={{ fontWeight: 700 }}>{a.codice ? a.codice + ") " : ""}{a.nome}</td>
                       <td className="num" style={{ fontWeight: 700 }}>{fmtP(a.totale, 0)}</td>
+                      {cp(a.totale, "a:" + a.id, { fontWeight: 700 })}
                     </tr>
                     {(a.voci || []).map(v => (
                       <React.Fragment key={v.id}>
@@ -16364,36 +16503,41 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                             {v.codice ? v.codice + ". " : ""}{v.nome}
                           </td>
                           <td className="num" style={{ fontWeight: 600 }}>{fmtP(v.totale, 0)}</td>
+                          {cp(v.totale, "rv:" + v.id, { fontWeight: 600 })}
                         </tr>
                         {(v.righe || []).map(r => (
                           <tr key={r.cat}>
                             <td style={{ paddingLeft: 34, fontSize: 12.5, color: "var(--ink-2)" }}>{r.cat}</td>
                             <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmtP(r.val, 0)}</td>
+                            {cp(r.val, "rr:" + v.id + ":" + r.cat, { fontSize: 12.5 })}
                           </tr>
                         ))}
                       </React.Fragment>
                     ))}
                     {(a.voci || []).length === 0 && (
-                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessuna sottovoce</td><td className="num">—</td></tr>
+                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessuna sottovoce</td><td className="num">—</td>{conf && <><td></td><td></td></>}</tr>
                     )}
                   </React.Fragment>
                 ))}
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
                   <td style={{ fontFamily: "'Fraunces',serif", fontSize: 14 }}>VARIAZIONE DISPONIBILITÀ LIQUIDE</td>
                   <td className="num" style={{ fontWeight: 700, fontSize: 14 }}>{fmtP(rfDir.variazione, 0)}</td>
+                  {cp(rfDir.variazione, "rfVar", { fontWeight: 700, fontSize: 14 })}
                 </tr>
-                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmtP(rfDir.apertura, 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 26 }}>Disponibilità liquide iniziali</td><td className="num">{fmtP(rfDir.apertura, 0)}</td>{cp(rfDir.apertura, "rfAp")}</tr>
                 {rfDir.dettaglioLiquidita.map(d => (
                   <tr key={"ini-" + d.nome}>
                     <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
                     <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmtP(d.apertura, 0)}</td>
+                    {cp(d.apertura, "li:" + d.nome, { fontSize: 12.5 })}
                   </tr>
                 ))}
-                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmtP(rfDir.chiusura, 0)}</td></tr>
+                <tr><td style={{ paddingLeft: 26, fontWeight: 600 }}>Disponibilità liquide finali</td><td className="num" style={{ fontWeight: 600 }}>{fmtP(rfDir.chiusura, 0)}</td>{cp(rfDir.chiusura, "rfCh", { fontWeight: 600 })}</tr>
                 {rfDir.dettaglioLiquidita.map(d => (
                   <tr key={"fin-" + d.nome}>
                     <td style={{ paddingLeft: 40, fontSize: 12.5, color: "var(--ink-2)" }}>{d.nome}</td>
                     <td className="num" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{fmtP(d.chiusura, 0)}</td>
+                    {cp(d.chiusura, "lf:" + d.nome, { fontSize: 12.5 })}
                   </tr>
                 ))}
               </tbody>
