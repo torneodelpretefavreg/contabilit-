@@ -990,7 +990,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.41.0";
+const APP_VERSION = "3.42.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -15044,10 +15044,12 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
   // tabella con intestazione colorata (verde/rosso), come in Export
   const tabellaColorata = (body, headLabel, startY, coloreHead, cf) => {
     doc.autoTable({
-      startY, head: [cf ? [headLabel, cf.stagione, cf.precStagione] : [headLabel, "Importo"]], body, theme: "plain",
-      styles: { fontSize: 9, cellPadding: 2 },
+      startY, head: [cf ? [headLabel, cf.stagione, cf.precStagione, ...(cf.var ? ["Var. €", "Var. %"] : [])] : [headLabel, "Importo"]], body, theme: "plain",
+      styles: { fontSize: cf && cf.var ? 8.5 : 9, cellPadding: 2 },
       headStyles: { fillColor: coloreHead, textColor: 240, fontStyle: "bold" },
-      columnStyles: cf ? { 0: { cellWidth: 118 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" } }
+      columnStyles: cf ? (cf.var
+                         ? { 0: { cellWidth: 86 }, 1: { cellWidth: 25, halign: "right" }, 2: { cellWidth: 25, halign: "right" }, 3: { cellWidth: 24, halign: "right" }, 4: { cellWidth: 22, halign: "right" } }
+                         : { 0: { cellWidth: 118 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" } })
                        : { 0: { cellWidth: 140 }, 1: { cellWidth: 42, halign: "right" } },
       didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
     });
@@ -15065,20 +15067,20 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
   // (marcatori senza conti propri, es. Immobilizzazioni materiali / immateriali / finanziarie)
   // cf (facoltativo): { get(chiave) } per la colonna dell'esercizio precedente
   const righeClasse = (cl, prefissoVoce, cf) => {
-    const prev = (k, stile) => cf ? [{ content: money(cf.get(k)), styles: { ...(stile || {}), textColor: [110, 110, 110] } }] : [];
+    const prev = (k, stile, cur) => celleConfrontoPdf(cf, k, stile, cur, money);
     const rows = [[{ content: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, styles: { fontStyle: "bold" } },
-                   { content: money(cl.totale), styles: { fontStyle: "bold" } }, ...prev("cl:" + cl.id, { fontStyle: "bold" })]];
+                   { content: money(cl.totale), styles: { fontStyle: "bold" } }, ...prev("cl:" + cl.id, { fontStyle: "bold" }, cl.totale)]];
     (cl.voci || []).forEach(v => {
       if (v.tipo === "sottosezione") {
-        rows.push([{ content: `   ${v.nome}`, styles: { fontStyle: "italic", textColor: [130, 130, 130] } }, "", ...(cf ? [""] : [])]);
+        rows.push([{ content: `   ${v.nome}`, styles: { fontStyle: "italic", textColor: [130, 130, 130] } }, "", ...(cf ? Array(cf.var ? 3 : 1).fill("") : [])]);
         return;
       }
-      rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore), ...prev("v:" + v.id)]);
+      rows.push([`   ${v.codice ? v.codice + prefissoVoce : ""}${v.nome}`, money(v.valore), ...prev("v:" + v.id, null, v.valore)]);
       // sotto-voci: un livello piu' rientrato, col proprio subtotale, come
       // "1) Terreni e fabbricati" sotto "II. Immobilizzazioni materiali"
       (v.sottovoci || []).forEach(sv => {
         rows.push([{ content: `      ${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, styles: { textColor: [90, 90, 90] } },
-                   { content: money(sv.valore), styles: { textColor: [90, 90, 90] } }, ...prev("sv:" + sv.id)]);
+                   { content: money(sv.valore), styles: { textColor: [90, 90, 90] } }, ...prev("sv:" + sv.id, null, sv.valore)]);
       });
     });
     return rows;
@@ -15304,6 +15306,22 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
 // a partire dai dati già calcolati con lo Schema di Bilancio. Usata dal pulsante
 // "PDF prospetti" della pagina Schema di Bilancio. Il metodo indiretto e' tolto per ora
 // (vedi generaPdfRF); rfInd resta come parametro per quando verrà riattivato.
+// Celle PDF dell'esercizio precedente: importo, e con cf.var anche variazione in euro e in %.
+function celleConfrontoPdf(cf, k, stile, cur, money) {
+  if (!cf) return [];
+  const pv = cf.get(k);
+  const out = [{ content: money(pv), styles: { ...(stile || {}), textColor: [110, 110, 110] } }];
+  if (!cf.var) return out;
+  const c = Number(cur) || 0, d = Math.round((c - pv) * 100) / 100;
+  const segno = d > 0.004 ? "+" : "";
+  const pct = Math.abs(pv) > 0.004 ? (d / Math.abs(pv)) * 100 : null;
+  const col = Math.abs(d) < 0.005 ? [130, 130, 130] : [70, 70, 70];
+  out.push({ content: Math.abs(d) < 0.005 ? "-" : segno + money(d), styles: { ...(stile || {}), textColor: col } });
+  out.push({ content: pct === null ? (Math.abs(c) > 0.004 ? "n.c." : "-") : (pct > 0.05 ? "+" : "") + numIT(pct, 1) + "%",
+             styles: { ...(stile || {}), textColor: col } });
+  return out;
+}
+
 // Mappa id -> valore dei prospetti di un esercizio, per affiancarlo a un altro
 // esercizio calcolato con lo STESSO schema (colonna "anno precedente").
 function mappaValoriProspetti(pr, rf) {
@@ -15342,20 +15360,20 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
   const b = creaPdfBuilder(stagione, "portrait");
   // confronto con l'esercizio precedente: stessa struttura, una colonna in piu'
   const P = prec ? mappaValoriProspetti(prec.prospetti, prec.rfDir) : null;
-  const cf = P ? { stagione, precStagione: prec.stagione, get: (k) => P[k] || 0 } : null;
-  const pc = (k, stile) => cf ? [{ content: b.money(cf.get(k)), styles: { ...(stile || {}), textColor: [110, 110, 110] } }] : [];
+  const cf = P ? { stagione, precStagione: prec.stagione, get: (k) => P[k] || 0, var: !!prec.variazioni } : null;
+  const pc = (k, stile, cur) => celleConfrontoPdf(cf, k, stile, cur, b.money);
 
   // --- Stato Patrimoniale ---
   b.intestazioneP("Stato Patrimoniale" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
   const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => b.righeClasse(cl, ". ", cf));
   attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
                     { content: b.money(prospetti.totAttivo), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } },
-                    ...pc("totAttivo", { fontStyle: "bold", fillColor: b.VERDE_CHIARO })]);
+                    ...pc("totAttivo", { fontStyle: "bold", fillColor: b.VERDE_CHIARO }, prospetti.totAttivo)]);
   let y = b.tabellaColorata(attivoRows, "ATTIVO", 36, b.VERDE, cf);
   const passivoRows = prospetti.sp.filter(c => c.lato === "passivo").flatMap(cl => b.righeClasse(cl, ". ", cf));
   passivoRows.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
                      { content: b.money(prospetti.totPassivo), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } },
-                     ...pc("totPassivo", { fontStyle: "bold", fillColor: b.ROSSO_CHIARO })]);
+                     ...pc("totPassivo", { fontStyle: "bold", fillColor: b.ROSSO_CHIARO }, prospetti.totPassivo)]);
   y = b.tabellaColorata(passivoRows, "PASSIVO E PATRIMONIO NETTO", y + 10, b.ROSSO, cf);
   if (Math.abs(prospetti.sbilancio) >= 0.01) {
     b.barraFinale(y + 6, "SBILANCIO ATTIVO / PASSIVO", b.money(prospetti.sbilancio), b.ROSSO);
@@ -15370,19 +15388,20 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
     const rows = posCE.flatMap(cl => b.righeClasse(cl, ") ", cf));
     rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
                { content: b.money(posCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } },
-               ...pc("totPos", { fontStyle: "bold", fillColor: b.VERDE_CHIARO })]);
+               ...pc("totPos", { fontStyle: "bold", fillColor: b.VERDE_CHIARO }, posCE.reduce((s, c) => s + c.totale, 0))]);
     y2 = b.tabellaColorata(rows, "VOCI POSITIVE", y2, b.VERDE, cf) + 10;
   }
   if (negCE.length) {
     const rows = negCE.flatMap(cl => b.righeClasse(cl, ") ", cf));
     rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
                { content: b.money(negCE.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: b.ROSSO_CHIARO } },
-               ...pc("totNeg", { fontStyle: "bold", fillColor: b.ROSSO_CHIARO })]);
+               ...pc("totNeg", { fontStyle: "bold", fillColor: b.ROSSO_CHIARO }, negCE.reduce((s, c) => s + c.totale, 0))]);
     y2 = b.tabellaColorata(rows, "VOCI NEGATIVE", y2, b.ROSSO, cf) + 10;
   }
   b.barraFinale(y2, "RISULTATO D'ESERCIZIO",
                 `${b.money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})` +
-                (cf ? `     ${cf.precStagione}: ${b.money(cf.get("risultato"))}` : ""), b.NERO);
+                (cf ? `     ${cf.precStagione}: ${b.money(cf.get("risultato"))}` +
+                  (cf.var && Math.abs(cf.get("risultato")) > 0.004 ? `  (${prospetti.risultato - cf.get("risultato") >= 0 ? "+" : ""}${numIT((prospetti.risultato - cf.get("risultato")) / Math.abs(cf.get("risultato")) * 100, 1)}%)` : "") : ""), b.NERO);
 
   // --- Rendiconto: metodo diretto ---
   b.doc.addPage("a4", "landscape"); b.intestazioneL("Rendiconto Finanziario · Metodo diretto");
@@ -15390,26 +15409,28 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
   rfDir.aree.forEach(a => {
     bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
                 { content: b.money(a.totale), styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
-                ...pc("a:" + a.id, { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO })]);
+                ...pc("a:" + a.id, { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO }, a.totale)]);
     (a.voci || []).forEach(v => {
       bodyD.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
-                  { content: b.money(v.totale), styles: { fontStyle: "bold" } }, ...pc("rv:" + v.id, { fontStyle: "bold" })]);
+                  { content: b.money(v.totale), styles: { fontStyle: "bold" } }, ...pc("rv:" + v.id, { fontStyle: "bold" }, v.totale)]);
     });
   });
   bodyD.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
               { content: b.money(rfDir.variazione), styles: { fontStyle: "bold", fillColor: b.VERDE_CHIARO } },
-              ...pc("rfVar", { fontStyle: "bold", fillColor: b.VERDE_CHIARO })]);
-  bodyD.push(["Disponibilita' liquide iniziali", b.money(rfDir.apertura), ...pc("rfAp")]);
-  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.apertura), ...pc("li:" + d.nome)]));
+              ...pc("rfVar", { fontStyle: "bold", fillColor: b.VERDE_CHIARO }, rfDir.variazione)]);
+  bodyD.push(["Disponibilita' liquide iniziali", b.money(rfDir.apertura), ...pc("rfAp", null, rfDir.apertura)]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.apertura), ...pc("li:" + d.nome, null, d.apertura)]));
   bodyD.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
-              { content: b.money(rfDir.chiusura), styles: { fontStyle: "bold" } }, ...pc("rfCh", { fontStyle: "bold" })]);
-  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.chiusura), ...pc("lf:" + d.nome)]));
-  const larg = cf ? 172 : 140;
+              { content: b.money(rfDir.chiusura), styles: { fontStyle: "bold" } }, ...pc("rfCh", { fontStyle: "bold" }, rfDir.chiusura)]);
+  rfDir.dettaglioLiquidita.forEach(d => bodyD.push([`      ${d.nome}`, b.money(d.chiusura), ...pc("lf:" + d.nome, null, d.chiusura)]));
+  const larg = cf ? (cf.var ? 232 : 172) : 140;
   b.doc.autoTable({
-    startY: 30, head: [cf ? ["Voce", cf.stagione, cf.precStagione] : ["Voce", "Importo"]], body: bodyD, theme: "plain",
+    startY: 30, head: [cf ? ["Voce", cf.stagione, cf.precStagione, ...(cf.var ? ["Var. €", "Var. %"] : [])] : ["Voce", "Importo"]], body: bodyD, theme: "plain",
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
-    columnStyles: cf ? { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" } }
+    columnStyles: cf ? (cf.var
+                       ? { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" }, 3: { cellWidth: 32, halign: "right" }, 4: { cellWidth: 28, halign: "right" } }
+                       : { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" } })
                      : { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
     didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
     // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
@@ -15418,7 +15439,7 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
 
   // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
 
-  b.doc.save(`Prospetti_Civilistici_${stagione}${cf ? "_vs_" + cf.precStagione : ""}.pdf`);
+  b.doc.save(`Prospetti_Civilistici_${stagione}${cf ? "_vs_" + cf.precStagione + (cf.var ? "_variazioni" : "") : ""}.pdf`);
 }
 
 function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
@@ -15854,6 +15875,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   // questa: stessa classificazione, quindi le due colonne sono confrontabili.
   const [datiPrec, setDatiPrec] = useState(null);
   const [confronto, setConfronto] = useState(true);
+  const [variazioni, setVariazioni] = useState(false);   // Δ % nell'anteprima e Δ €/% nel PDF
   useEffect(() => {
     setDatiPrec(null);
     const prec = stagionePrecedenteDi(stagione);
@@ -16101,12 +16123,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const reincludiConto = (cod) => aggiorna(statoRef.current.schema, esclusi.filter(x => Number(x) !== Number(cod)));
 
   // ---------- export PDF (stessa grafica della pagina Export) ----------
-  const esportaPDF = () => generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, (confronto && calcPrec) ? calcPrec : null);
+  const esportaPDF = () => generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, (confronto && calcPrec) ? { ...calcPrec, variazioni } : null);
 
   // ---------- render dei prospetti ----------
   const conf = !!(confronto && calcPrec);
   const PM = conf ? calcPrec.mappa : {};
-  const nCol = conf ? 4 : 2;
+  const nCol = conf ? (variazioni ? 5 : 4) : 2;
   // colonne aggiuntive: esercizio precedente e variazione
   const cp = (cur, key, stile, dec = 0) => {
     if (!conf) return null;
@@ -16116,6 +16138,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       <td key="d" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: Math.abs(d) < 0.005 ? "var(--ink-3)" : "var(--ink-2)" }}>
         {Math.abs(d) < 0.005 ? "–" : (d > 0 ? "+" : "−") + fmtP(Math.abs(d), dec)}
       </td>,
+      ...(variazioni ? [
+        <td key="pc" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: "var(--ink-3)" }}>
+          {Math.abs(pv) > 0.004 ? (d > 0.004 ? "+" : d < -0.004 ? "−" : "") + numIT(Math.abs(d) / Math.abs(pv) * 100, 1) + "%" : (Math.abs(cur || 0) > 0.004 ? "n.c." : "–")}
+        </td>] : []),
     ];
   };
   const testataConfronto = conf ? (
@@ -16124,6 +16150,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>{stagione}</td>
       <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>{calcPrec.stagione}</td>
       <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>Δ</td>
+      {variazioni && <td className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>Δ %</td>}
     </tr>
   ) : null;
   const rigaConto = (d, indent, vid) => (
@@ -16204,6 +16231,13 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                    title="Affianca ai prospetti la colonna dell'esercizio precedente, calcolata con lo stesso schema">
               <input type="checkbox" style={{ width: "auto" }} checked={confronto} onChange={e => setConfronto(e.target.checked)} />
               Confronto con {calcPrec.stagione}
+            </label>
+          )}
+          {calcPrec && confronto && (
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}
+                   title="Aggiunge la variazione percentuale nell'anteprima e le colonne Var. € e Var. % nel PDF">
+              <input type="checkbox" style={{ width: "auto" }} checked={variazioni} onChange={e => setVariazioni(e.target.checked)} />
+              Con variazioni %
             </label>
           )}
           <button className="btn accent" onClick={esportaPDF}>↧ PDF prospetti{(confronto && calcPrec) ? " (con " + calcPrec.stagione + ")" : ""}</button>
@@ -16515,7 +16549,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                       </React.Fragment>
                     ))}
                     {(a.voci || []).length === 0 && (
-                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessuna sottovoce</td><td className="num">—</td>{conf && <><td></td><td></td></>}</tr>
+                      <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessuna sottovoce</td><td className="num">—</td>{conf && <><td></td><td></td>{variazioni && <td></td>}</>}</tr>
                     )}
                   </React.Fragment>
                 ))}
