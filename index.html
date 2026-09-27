@@ -1010,7 +1010,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.38.0";
+const APP_VERSION = "3.39.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1096,7 +1096,12 @@ if (db) {
 // ============================================================
 // COSTANTI DI DOMINIO
 // ============================================================
-const CONTI_LIQUIDITA = [
+// Conti di liquidità di partenza. La lista viva (CONTI_LIQUIDITA) è ricavata dal
+// piano dei conti della stagione: ogni conto con categoria DISP. LIQUIDE è un conto
+// di liquidità. Si gestiscono dalla pagina "Conti Liquidità" (come nella contabilità
+// personale). L'array viene aggiornato sul posto, così tutte le pagine che lo usano
+// vedono subito i conti aggiunti o tolti.
+const CONTI_LIQUIDITA_BASE = [
   { codice: 1, nome: "FUTSAL C/C" },
   { codice: 3, nome: "CASSA" },
   { codice: 4, nome: '"TIZIO" C/C' },
@@ -1104,6 +1109,17 @@ const CONTI_LIQUIDITA = [
   { codice: 9, nome: "PAYPAL C/C" },
   { codice: 10, nome: "SATISPAY C/C" },
 ];
+const CONTI_LIQUIDITA = CONTI_LIQUIDITA_BASE.map(c => ({ ...c }));
+const CAT_LIQUIDITA = "DISP. LIQUIDE";
+function sincronizzaContiLiquidita(conti) {
+  const liq = (conti || []).filter(c => c && c.categoria === CAT_LIQUIDITA && c.codice !== undefined && c.codice !== null && c.codice !== "")
+    .map(c => ({ codice: Number(c.codice), nome: String(c.nome || ("Conto " + c.codice)) }))
+    .sort((a, b) => a.codice - b.codice);
+  const nuova = liq.length ? liq : CONTI_LIQUIDITA_BASE.map(c => ({ ...c }));
+  CONTI_LIQUIDITA.splice(0, CONTI_LIQUIDITA.length, ...nuova);
+  return nuova.map(c => c.codice + ":" + c.nome).join("|");
+}
+const saldiInizialiAZero = () => Object.fromEntries(CONTI_LIQUIDITA.map(c => [c.codice, 0]));
 
 // Macroaree dello Stato Patrimoniale, per assegnare come contropartita le voci di budget
 // che non si abbinano a un conto di cassa (così non restano scoperte e il prospetto quadra).
@@ -1352,7 +1368,7 @@ function useFirebaseData(stagione) {
       cespiti: cespitiObj,
       movimenti: movsObj,
       // Saldi iniziali a 0: i saldi reali vengono dalla scrittura di apertura
-      saldiIniziali: { 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 },
+      saldiIniziali: saldiInizialiAZero(),
       businessUnits: BUSINESS_UNITS_DEFAULT.reduce((acc, b, i) => {
         acc[`bu_${i}`] = { nome: b, ordine: i };
         return acc;
@@ -2262,7 +2278,7 @@ function ManutenzioneBox({ stagione }) {
       // ===== ESEGUI =====
       // Apertura
       if (!hasApertura) {
-        await db.ref(`stagioni/${stagione}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
+        await db.ref(`stagioni/${stagione}/saldiIniziali`).set(saldiInizialiAZero());
         const apertureObj = {};
         APERTURA_MOVIMENTI.forEach((m, i) => {
           apertureObj[`apertura_${String(i).padStart(4,'0')}`] = m;
@@ -3276,7 +3292,8 @@ function calcolaMastrini(scritture) {
 // contoLiquidita = null (il conto sta in contoPdC), quindi i calcoli di cassa
 // basati su contoLiquidita non li vedrebbero. Restituisce {codice, delta} con
 // convenzione DARE = +liquidità, AVERE = -liquidità (oppure null).
-const CODICI_LIQUIDITA = [1, 3, 4, 5, 9, 10];
+// Lista viva: segue CONTI_LIQUIDITA (conti DISP. LIQUIDE del piano dei conti).
+const CODICI_LIQUIDITA = { includes: (c) => CONTI_LIQUIDITA.some(l => l.codice === Number(c)) };
 function effettoLiquiditaNascosto(m) {
   if (!m) return null;
   // Scrittura composta / libera: ogni riga porta contoPdC + dare/avere
@@ -3306,7 +3323,8 @@ function generaRiapertura(movimenti, saldiIniziali, conti, annoY1) {
   const isSP = c => cM[c] && cM[c].prospetto === "SP";
   const isRes = c => cM[c] && (cM[c].prospetto === "CE" || cM[c].prospetto === "SP/CE");
   const utile = r2(mastrini.filter(m => isRes(m.codice)).reduce((s, m) => s + (m.avere - m.dare), 0));
-  const LIQ = [1, 3, 4, 5, 9, 10];
+  const codLiqPdC = (conti || []).filter(c => c && c.categoria === CAT_LIQUIDITA).map(c => Number(c.codice));
+  const LIQ = codLiqPdC.length ? codLiqPdC : CONTI_LIQUIDITA.map(c => c.codice);
   const data = `${annoY1}-09-01`;
   const now = new Date().toISOString();
   const ap = [];
@@ -3761,7 +3779,7 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
         upd[`riapertura_${annoY1}_${String(i).padStart(4, "0")}`] = mov;
       });
       await db.ref(`stagioni/${stagione}/movimenti`).update(upd);
-      if (azzeraSaldi) await db.ref(`stagioni/${stagione}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
+      if (azzeraSaldi) await db.ref(`stagioni/${stagione}/saldiIniziali`).set(saldiInizialiAZero());
 
       // --- anagrafiche: piano dei conti, libro cespiti, schema, categorie ---
       // Non sovrascrivo mai quello che c'e' gia' nella stagione nuova: aggiungo
@@ -10807,6 +10825,254 @@ function BUForm({ bu, onSave, onCancel }) {
 // ============================================================
 // PAGINA: PIANO DEI CONTI
 // ============================================================
+// ============================================================
+// PAGINA: CONTI LIQUIDITÀ (sul modello della contabilità personale)
+// Aggiunge o toglie conti di liquidità: un conto nuovo viene creato
+// direttamente nel piano dei conti con categoria DISP. LIQUIDE e compare
+// subito in dashboard, nuovo movimento, rendiconto, snapshot e cassa.
+// ============================================================
+const liqNum = (v) => {
+  let t = String(v == null ? "" : v).trim().replace(/[^\d.,-]/g, "");
+  if (t.includes(",")) t = t.replace(/\./g, "").replace(",", ".");   // 1.234,56
+  const n = parseFloat(t);
+  return isNaN(n) ? 0 : Math.round(n * 100) / 100;
+};
+function contaMovimentiConto(movimenti, cod) {
+  const c = Number(cod);
+  return (movimenti || []).filter(m => m && (
+    Number(m.contoLiquidita) === c || Number(m.contoLiquiditaDest) === c || Number(m.contoPdC) === c ||
+    Number(m.contoContropartita) === c ||
+    (Array.isArray(m.righe) && m.righe.some(r => r && Number(r.conto) === c))
+  )).length;
+}
+function PageLiquidita({ conti, movimenti, saldiIniziali, saldiInizialiEff, ereditati, stagione, onToast }) {
+  const liq = useMemo(() => (conti || []).filter(c => c.categoria === CAT_LIQUIDITA).sort((a, b) => a.codice - b.codice), [conti]);
+  const altri = useMemo(() => (conti || []).filter(c => c.categoria !== CAT_LIQUIDITA).sort((a, b) => a.codice - b.codice), [conti]);
+  const catSP = useMemo(() => {
+    const set = new Set((conti || []).filter(c => c.prospetto === "SP" && c.categoria && c.categoria !== CAT_LIQUIDITA).map(c => c.categoria));
+    ["CREDITI", "DEBITI"].forEach(x => set.add(x));
+    return [...set].sort();
+  }, [conti]);
+  const [modo, setModo] = useState("nuovo");
+  const [nome, setNome] = useState("");
+  const [ini, setIni] = useState("");
+  const [collega, setCollega] = useState("");
+  const [edit, setEdit] = useState(null);     // { codice, nome, ini }
+  const [scoll, setScoll] = useState(null);   // { codice, cat }
+  const [lavoro, setLavoro] = useState(false);
+  const chiusa = !!STAGIONI_BLOCCATE[stagione];
+
+  const saldiAtt = useMemo(() => saldiFinaliLiquidita(movimenti, saldiInizialiEff), [movimenti, saldiInizialiEff, conti]);
+  const righe = liq.map(c => ({
+    ...c,
+    ini: Number((saldiInizialiEff || {})[c.codice]) || 0,
+    saldo: saldiAtt[c.codice] || 0,
+    mov: contaMovimentiConto(movimenti, c.codice),
+  }));
+  const totIni = righe.reduce((x, r) => x + r.ini, 0);
+  const totSaldo = righe.reduce((x, r) => x + r.saldo, 0);
+  const prossimoCodice = () => (conti || []).reduce((m, c) => Math.max(m, Number(c.codice) || 0), 0) + 1;
+  const nomeUsato = (n, escludi) => (conti || []).some(c => Number(c.codice) !== Number(escludi) && String(c.nome || "").trim().toUpperCase() === n);
+
+  const esegui = async (fn, ok) => {
+    if (chiusa) { onToast(`La stagione ${stagione} è chiusa: riaprila per modificare i conti`, "error"); return; }
+    setLavoro(true);
+    try { await fn(); if (ok) onToast(ok); }
+    catch (e) { onToast("Errore: " + ((e && e.message) || e), "error"); }
+    finally { setLavoro(false); }
+  };
+
+  const aggiungi = () => {
+    const n = nome.trim().toUpperCase();
+    if (!n) return onToast("Inserisci il nome del conto", "error");
+    if (nomeUsato(n)) return onToast("Esiste già un conto con questo nome", "error");
+    const codice = prossimoCodice();
+    const v = liqNum(ini);
+    esegui(async () => {
+      await db.ref(`stagioni/${stagione}/conti/c${codice}`).set({ codice, nome: n, eccedenza: "DARE/AVERE", prospetto: "SP", categoria: CAT_LIQUIDITA });
+      if (v !== 0) await db.ref(`stagioni/${stagione}/saldiIniziali/${codice}`).set(v);
+      setNome(""); setIni("");
+    }, `Conto “${n}” creato (codice ${codice}) e aggiunto alla liquidità`);
+  };
+
+  const collegaEsistente = () => {
+    const c = altri.find(x => String(x.codice) === String(collega));
+    if (!c) return onToast("Seleziona un conto dal piano dei conti", "error");
+    const mov = contaMovimentiConto(movimenti, c.codice);
+    const msg = mov > 0
+      ? `“${String(c.nome).trim()}” ha ${mov} moviment${mov === 1 ? "o" : "i"} registrat${mov === 1 ? "o" : "i"}: diventa un conto di liquidità (categoria ${c.categoria} → ${CAT_LIQUIDITA}). Procedo?`
+      : `Collego “${String(c.nome).trim()}” ai conti di liquidità? La categoria passa da ${c.categoria} a ${CAT_LIQUIDITA}.`;
+    if (!confirm(msg)) return;
+    const v = liqNum(ini);
+    esegui(async () => {
+      await db.ref(`stagioni/${stagione}/conti/c${c.codice}`).update({ categoria: CAT_LIQUIDITA, prospetto: "SP", eccedenza: "DARE/AVERE" });
+      if (v !== 0) await db.ref(`stagioni/${stagione}/saldiIniziali/${c.codice}`).set(v);
+      setCollega(""); setIni("");
+    }, `“${String(c.nome).trim()}” collegato alla liquidità`);
+  };
+
+  const confermaScollega = () => {
+    const c = liq.find(x => x.codice === scoll.codice);
+    if (!c) return setScoll(null);
+    if (liq.length <= 1) return onToast("Serve almeno un conto di liquidità", "error");
+    esegui(async () => {
+      await db.ref(`stagioni/${stagione}/conti/c${c.codice}`).update({ categoria: scoll.cat });
+      await db.ref(`stagioni/${stagione}/saldiIniziali/${c.codice}`).set(null);
+      setScoll(null);
+    }, `“${String(c.nome).trim()}” spostato in ${scoll.cat}`);
+  };
+
+  const elimina = (c) => {
+    const mov = contaMovimentiConto(movimenti, c.codice);
+    if (mov > 0) return onToast(`Non si può eliminare: il conto ha ${mov} moviment${mov === 1 ? "o" : "i"}`, "error");
+    if (liq.length <= 1) return onToast("Serve almeno un conto di liquidità", "error");
+    if (!confirm(`Elimino definitivamente il conto ${c.codice} · ${String(c.nome).trim()} dal piano dei conti della stagione ${stagione}?`)) return;
+    esegui(async () => {
+      await db.ref(`stagioni/${stagione}/conti/c${c.codice}`).remove();
+      await db.ref(`stagioni/${stagione}/saldiIniziali/${c.codice}`).set(null);
+    }, "Conto eliminato");
+  };
+
+  const salvaEdit = () => {
+    const n = (edit.nome || "").trim().toUpperCase();
+    if (!n) return onToast("Il nome non può essere vuoto", "error");
+    if (nomeUsato(n, edit.codice)) return onToast("Nome già usato da un altro conto", "error");
+    const v = liqNum(edit.ini);
+    esegui(async () => {
+      await db.ref(`stagioni/${stagione}/conti/c${edit.codice}`).update({ nome: n });
+      await db.ref(`stagioni/${stagione}/saldiIniziali/${edit.codice}`).set(v);
+      setEdit(null);
+    }, "Conto aggiornato");
+  };
+
+  const icona = { background: "transparent", border: "none", color: "var(--ink-3)", fontSize: 14, padding: "2px 5px", cursor: "pointer" };
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Conti Liquidità</h2>
+          <div className="sub">Conti che compongono le disponibilità: conti correnti, cassa, POS, PayPal… · stagione {stagione}</div>
+        </div>
+      </div>
+
+      {chiusa && <div className="card" style={{ marginBottom: 16, borderLeft: "3px solid var(--danger)" }}>La stagione {stagione} è chiusa: per aggiungere o modificare conti riaprila dal pannello Stagioni.</div>}
+
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+          <h3 className="serif" style={{ margin: 0, fontWeight: 500, fontSize: 17 }}>Aggiungi conto di liquidità</h3>
+          <div className="bd-seg" style={{ marginLeft: "auto" }}>
+            <button className={modo === "nuovo" ? "on" : ""} onClick={() => setModo("nuovo")}>Crea da zero</button>
+            <button className={modo === "collega" ? "on" : ""} onClick={() => setModo("collega")}>Collega esistente</button>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          {modo === "nuovo" ? (
+            <div className="form-row" style={{ flex: "2 1 260px", margin: 0 }}>
+              <label>Nome conto <span className="req">*</span></label>
+              <input type="text" value={nome} onChange={e => setNome(e.target.value)} placeholder="es. REVOLUT C/C, CASSA BAR, SUMUP"
+                onKeyDown={e => { if (e.key === "Enter") aggiungi(); }} />
+            </div>
+          ) : (
+            <div className="form-row" style={{ flex: "2 1 260px", margin: 0 }}>
+              <label>Conto dal piano dei conti <span className="req">*</span></label>
+              <select value={collega} onChange={e => setCollega(e.target.value)}>
+                <option value="">— seleziona un conto —</option>
+                {altri.map(c => <option key={c.codice} value={c.codice}>{String(c.codice).padStart(2, "0")} · {String(c.nome).trim()} ({c.categoria})</option>)}
+              </select>
+            </div>
+          )}
+          <div className="form-row" style={{ flex: "1 1 140px", margin: 0 }}>
+            <label>Saldo iniziale</label>
+            <input type="text" inputMode="decimal" value={ini} onChange={e => setIni(e.target.value)} placeholder="0,00"
+              onKeyDown={e => { if (e.key === "Enter") (modo === "nuovo" ? aggiungi() : collegaEsistente()); }} />
+          </div>
+          <button className="btn accent" disabled={lavoro || chiusa || (modo === "collega" && !collega)} onClick={modo === "nuovo" ? aggiungi : collegaEsistente}>
+            {modo === "nuovo" ? "+ Crea conto" : "↔ Collega"}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 12, fontStyle: "italic" }}>
+          {modo === "nuovo"
+            ? `Il conto viene creato nel piano dei conti (codice ${prossimoCodice()}, categoria ${CAT_LIQUIDITA}) e compare subito in Dashboard, Nuovo movimento, Rendiconto, Snapshot e Composizione cassa.`
+            : `Il conto scelto passa in ${CAT_LIQUIDITA} mantenendo codice, nome e movimenti già registrati.`}
+        </div>
+      </div>
+
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <thead><tr>
+            <th style={{ width: 50 }}>Cod</th><th>Conto</th>
+            <th className="num">Saldo iniziale</th><th className="num">Saldo attuale</th>
+            <th className="num" style={{ width: 70 }}>Movim.</th><th style={{ width: 120 }}></th>
+          </tr></thead>
+          <tbody>
+            {!righe.length && <tr><td colSpan={6} className="empty-state">Nessun conto di liquidità nel piano dei conti: si usano quelli predefiniti.</td></tr>}
+            {righe.map(c => {
+              const inEdit = edit && edit.codice === c.codice;
+              if (scoll && scoll.codice === c.codice) return (
+                <tr key={c.codice}>
+                  <td className="mono">{c.codice}</td>
+                  <td colSpan={3} style={{ fontSize: 12.5 }}>
+                    Togli <b>{String(c.nome).trim()}</b> dalla liquidità e spostalo in:{" "}
+                    <select value={scoll.cat} onChange={e => setScoll(x => ({ ...x, cat: e.target.value }))} style={{ width: "auto", display: "inline-block", marginLeft: 6 }}>
+                      {catSP.map(k => <option key={k} value={k}>{k}</option>)}
+                    </select>
+                    <div style={{ color: "var(--ink-3)", fontStyle: "italic", marginTop: 5 }}>Il conto resta nel piano dei conti con i suoi movimenti, ma esce da dashboard, rendiconto e cassa.</div>
+                  </td>
+                  <td colSpan={2} style={{ textAlign: "center", whiteSpace: "nowrap" }}>
+                    <button className="btn accent sm" disabled={lavoro} onClick={confermaScollega}>Conferma</button>
+                    <button className="btn ghost sm" onClick={() => setScoll(null)} style={{ marginLeft: 4 }}>✕</button>
+                  </td>
+                </tr>
+              );
+              return (
+                <tr key={c.codice}>
+                  <td className="mono">{c.codice}</td>
+                  <td>{inEdit
+                    ? <input type="text" value={edit.nome} autoFocus onChange={e => setEdit(x => ({ ...x, nome: e.target.value }))}
+                        onKeyDown={e => { if (e.key === "Enter") salvaEdit(); if (e.key === "Escape") setEdit(null); }} style={{ width: "100%" }} />
+                    : <b>{String(c.nome).trim()}</b>}</td>
+                  <td className="num">{inEdit
+                    ? <input type="text" inputMode="decimal" value={edit.ini} onChange={e => setEdit(x => ({ ...x, ini: e.target.value }))}
+                        onKeyDown={e => { if (e.key === "Enter") salvaEdit(); if (e.key === "Escape") setEdit(null); }} style={{ width: 110, textAlign: "right" }} />
+                    : <span className={c.ini < 0 ? "neg" : ""}>{fmt(c.ini)}</span>}</td>
+                  <td className={"num " + (c.saldo < 0 ? "neg" : "")} style={{ fontWeight: 600 }}>{fmt(c.saldo)}</td>
+                  <td className="num" style={{ fontSize: 12, color: "var(--ink-3)" }}>{c.mov}</td>
+                  <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
+                    {inEdit ? <>
+                      <button className="btn accent sm" disabled={lavoro} onClick={salvaEdit}>Salva</button>
+                      <button className="btn ghost sm" onClick={() => setEdit(null)} style={{ marginLeft: 4 }}>✕</button>
+                    </> : <>
+                      <button style={icona} title="Modifica nome e saldo iniziale" disabled={chiusa}
+                        onClick={() => { setScoll(null); setEdit({ codice: c.codice, nome: String(c.nome).trim(), ini: numIT(c.ini, 2) }); }}>✎</button>
+                      <button style={icona} title="Togli dalla liquidità (il conto resta nel piano dei conti)" disabled={chiusa}
+                        onClick={() => { setEdit(null); setScoll({ codice: c.codice, cat: catSP.includes("CREDITI") ? "CREDITI" : catSP[0] }); }}>⇱</button>
+                      <button onClick={() => elimina(c)} disabled={c.mov > 0 || chiusa}
+                        title={c.mov > 0 ? "Conto con movimenti: non eliminabile" : "Elimina dal piano dei conti"}
+                        style={{ ...icona, fontSize: 15, color: c.mov > 0 ? "var(--rule-2)" : "var(--danger)", cursor: c.mov > 0 ? "not-allowed" : "pointer" }}>✕</button>
+                    </>}
+                  </td>
+                </tr>
+              );
+            })}
+            {righe.length > 0 && (
+              <tr style={{ borderTop: "2px solid var(--ink)", fontWeight: 700, background: "var(--panel-2)" }}>
+                <td></td><td>Totale</td>
+                <td className="num">{fmt(totIni)}</td>
+                <td className={"num " + (totSaldo < 0 ? "neg" : "")}>{fmt(totSaldo)}</td>
+                <td colSpan={2}></td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 10, fontStyle: "italic", lineHeight: 1.6 }}>
+        ✎ modifica nome e saldo iniziale · ⇱ toglie il conto dalla liquidità lasciandolo nel piano dei conti · ✕ elimina (solo conti senza movimenti).
+        {ereditati && <><br />Questa stagione non ha ancora movimenti: i saldi iniziali mostrati sono quelli di chiusura della stagione precedente. Quelli che imposti qui valgono dal primo movimento registrato.</>}
+      </div>
+    </div>
+  );
+}
+
 function PagePianoConti({ conti, stagione, onToast }) {
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -10994,11 +11260,15 @@ const LIQ_ALIAS_IMP = {
 };
 function resolveLiqImp(v){
   if (v == null || v === "") return "";
-  if (typeof v === "number" && [1,3,4,5,9,10].includes(v)) return v;
+  const codiciLiq = CONTI_LIQUIDITA.map(c => c.codice);
+  if (typeof v === "number" && codiciLiq.includes(v)) return v;
   const k = normKimp(v);
-  if (/^\d+$/.test(k)) { const n = Number(k); return [1,3,4,5,9,10].includes(n) ? n : ""; }
-  if (LIQ_ALIAS_IMP[k] != null) return LIQ_ALIAS_IMP[k];
-  for (const a in LIQ_ALIAS_IMP){ if (k === a || k.includes(a) || a.includes(k)) return LIQ_ALIAS_IMP[a]; }
+  if (/^\d+$/.test(k)) { const n = Number(k); return codiciLiq.includes(n) ? n : ""; }
+  // prima i nomi veri dei conti di liquidità (anche quelli aggiunti dopo), poi gli alias storici
+  const perNome = CONTI_LIQUIDITA.find(c => normKimp(c.nome) === k);
+  if (perNome) return perNome.codice;
+  if (LIQ_ALIAS_IMP[k] != null && codiciLiq.includes(LIQ_ALIAS_IMP[k])) return LIQ_ALIAS_IMP[k];
+  for (const a in LIQ_ALIAS_IMP){ if ((k === a || k.includes(a) || a.includes(k)) && codiciLiq.includes(LIQ_ALIAS_IMP[a])) return LIQ_ALIAS_IMP[a]; }
   return "";
 }
 function parseDataImp(v){
@@ -18154,6 +18424,8 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const { conti, movimenti, movimentiFuoriStagione, cespiti, saldiIniziali, categorieRF, bu, loading, seedStagione } = useFirebaseData(stagione);
+  // lista dei conti di liquidità ricavata dal piano dei conti (vedi CONTI_LIQUIDITA)
+  const firmaLiquidita = useMemo(() => sincronizzaContiLiquidita(conti), [conti]);
   const categorieOpzioni = useMemo(() => mergeCategorie(categorieRF, movimenti), [categorieRF, movimenti]);
 
   // Carica lista stagioni esistenti su Firebase
@@ -18387,7 +18659,7 @@ function App() {
         meta: { stagione: key, creataIl: new Date().toISOString(), version: APP_VERSION, riapertaDa: stagione },
         conti: contiObj,
         movimenti: movsObj,
-        saldiIniziali: { 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 },
+        saldiIniziali: saldiInizialiAZero(),
         businessUnits: buObj,
       };
       if (categorieRF && Object.keys(categorieRF).length) upd.categorieRF = categorieRF;
@@ -18443,6 +18715,7 @@ function App() {
 
           <div className="section-label">Anagrafiche</div>
           <button className={"navlink " + (page==="conti"?"active":"")} onClick={() => setPage("conti")}><span className="ico">▦</span> Piano dei Conti</button>
+          <button className={"navlink " + (page==="liquidita"?"active":"")} onClick={() => setPage("liquidita")}><span className="ico">◈</span> Conti Liquidità</button>
           <button className={"navlink " + (page==="bu"?"active":"")} onClick={() => setPage("bu")}><span className="ico">⊟</span> Business Units</button>
 
           <div className="section-label">Reports contabili</div>
@@ -18502,7 +18775,9 @@ function App() {
                   {bannerEredita}
                 </div>
               )}
+              <React.Fragment key={"liq:" + firmaLiquidita}>
               {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} />}
+              {page === "liquidita" && <PageLiquidita conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} saldiInizialiEff={saldiInizialiEff} ereditati={!!saldiEreditati} stagione={stagione} onToast={showToast} />}
               {page === "nuovo" && <PageNuovo conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
               {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
@@ -18524,6 +18799,7 @@ function App() {
               {page === "cassa" && <PageCassa stagione={stagione} saldiCalcolati={{}} movimenti={movimenti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
               {page === "torneo" && <PageTorneo stagione={stagione} onToast={showToast} />}
               {page === "analisi" && <PageAnalisi stagione={stagione} stagioniDisponibili={stagioniDisponibili} conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} onToast={showToast} />}
+              </React.Fragment>
             </>
           )}
         </main>
@@ -18628,7 +18904,7 @@ function App() {
                     try {
                       await db.ref(`stagioni/${val}/movimenti`).remove();
                       await db.ref(`stagioni/${val}/cespiti`).remove();
-                      await db.ref(`stagioni/${val}/saldiIniziali`).set({ 1: 0, 3: 0, 4: 0, 5: 0, 9: 0, 10: 0 });
+                      await db.ref(`stagioni/${val}/saldiIniziali`).set(saldiInizialiAZero());
                       showToast(`Stagione ${val} svuotata`);
                       setPannelloStagioni(false);
                     } catch (e) {
