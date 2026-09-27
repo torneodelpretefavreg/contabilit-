@@ -912,6 +912,14 @@
   .an-kpi-val { font-family: 'Fraunces', serif; font-size: 27px; line-height: 1.15; font-weight: 500; }
   .an-kpi-sub { font-size: 11px; color: var(--ink-3); margin-top: 5px; display: flex; flex-wrap: wrap; gap: 2px 12px; }
   .an-kpi-sub b { color: var(--ink-2); font-weight: 600; }
+  .an-kpi-sub .an-pos, .an-kpic-badge.an-pos { color: #2d7a4a; } .an-kpi-sub .an-neg, .an-kpic-badge.an-neg { color: #b54343; }
+  .an-kpic-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .an-kpic-badge { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--ink-2); white-space: nowrap; }
+  .an-kpic-badge.an-pos { background: rgba(45,122,74,.12); } .an-kpic-badge.an-neg { background: rgba(181,67,67,.12); }
+  .an-kpic-barra { position: relative; height: 5px; border-radius: 3px; background: var(--rule); margin: 8px 0 2px; }
+  .an-kpic-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--ink-3); }
+  .an-kpic-fill.an-pos { background: #2d7a4a; } .an-kpic-fill.an-neg { background: #b54343; }
+  .an-kpic-tick { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
   .an-cl { cursor: pointer; }
   .an-filtro { display: flex; flex-direction: column; gap: 2px; }
   .an-cerca { margin-bottom: 6px; padding: 6px 9px !important; font-size: 12.5px; }
@@ -990,7 +998,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.42.0";
+const APP_VERSION = "3.44.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -6656,24 +6664,81 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     ? rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap) : null,
     [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap]);
 
+  // ---------- esercizio precedente: bilancio comparativo anche negli export ----------
+  // Stessa logica della pagina Schema di Bilancio: la stagione precedente si ricalcola
+  // con lo schema di QUESTA stagione, cosi' le colonne sono confrontabili voce per voce.
+  const [datiPrecEx, setDatiPrecEx] = useState(null);
+  const [confrontoEx, setConfrontoEx] = useState(true);
+  const [variazioniEx, setVariazioniEx] = useState(false);
+  useEffect(() => {
+    setDatiPrecEx(null);
+    const prec = stagionePrecedenteDi(stagione);
+    if (!firebaseReady || !prec) return;
+    let vivo = true;
+    (async () => {
+      try {
+        const [mv, si, ct] = await Promise.all([
+          db.ref(`stagioni/${prec}/movimenti`).once("value"),
+          db.ref(`stagioni/${prec}/saldiIniziali`).once("value"),
+          db.ref(`stagioni/${prec}/conti`).once("value"),
+        ]);
+        if (!vivo || !mv.exists()) return;
+        const r = intervalloStagione(prec);
+        const movs = Object.entries(mv.val() || {}).map(([k, m]) => ({ ...m, _id: k }))
+          .filter(m => !r || !m.data || (m.data >= r.da && m.data <= r.a));
+        setDatiPrecEx({ stagione: prec, movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}) });
+      } catch (e) { /* stagione precedente assente: niente confronto */ }
+    })();
+    return () => { vivo = false; };
+  }, [stagione]);
+  const calcPrecEx = useMemo(() => {
+    if (!datiPrecEx || !schemaBilancio) return null;
+    const cm = {};
+    datiPrecEx.conti.forEach(c => { if (c) cm[c.codice] = c; });
+    Object.values(contiMap).forEach(c => { if (!cm[c.codice]) cm[c.codice] = c; });
+    const mastPrec = calcolaMastrini(generaLibroGiornale(datiPrecEx.movimenti, datiPrecEx.saldiIniziali, cm));
+    const pr = calcolaProspetti(schemaBilancio, mastPrec);
+    const rf = rendicontoDiretto(schemaBilancio, datiPrecEx.movimenti, datiPrecEx.saldiIniziali);
+    return { stagione: datiPrecEx.stagione, prospetti: pr, rfDir: rf, mappa: mappaValoriProspetti(pr, rf) };
+  }, [datiPrecEx, schemaBilancio, contiMap]);
+  const precAttivo = (confrontoEx && calcPrecEx) ? { ...calcPrecEx, variazioni: variazioniEx } : null;
+  // cf: stesso oggetto usato dal PDF comparativo (colonna anno precedente, Var. €, Var. %)
+  const cfEx = precAttivo ? { stagione, precStagione: precAttivo.stagione, get: (k) => precAttivo.mappa[k] || 0, var: !!precAttivo.variazioni } : null;
+  const suffConfronto = precAttivo ? ` (confronto con ${precAttivo.stagione}${precAttivo.variazioni ? ", variazioni %" : ""})` : "";
+
   // Prospetti "ufficiali": stessi dati e stessa grafica della pagina Schema di Bilancio.
-  // Sostituiscono i vecchi export semplici di SP, CE e RF (il resto della pagina non cambia).
+  // Con il confronto attivo escono in versione comparativa (colonna anno precedente, ed eventualmente Var. € e Var. %).
   const exportSPUfficialePDF = () => {
     if (!prospettiSchema) return;
     setBusy(true);
-    try { generaPdfSP(prospettiSchema, stagione); setLastAction("Stato Patrimoniale (Schema di Bilancio) generato"); }
-    finally { setBusy(false); }
+    try {
+      if (precAttivo) generaPdfProspettiSchema(prospettiSchema, rfDirSchema, null, stagione, precAttivo, "sp");
+      else generaPdfSP(prospettiSchema, stagione);
+      setLastAction("Stato Patrimoniale generato" + suffConfronto);
+    } finally { setBusy(false); }
   };
   const exportCEUfficialePDF = () => {
     if (!prospettiSchema) return;
     setBusy(true);
-    try { generaPdfCE(prospettiSchema, stagione); setLastAction("Conto Economico (Schema di Bilancio) generato"); }
-    finally { setBusy(false); }
+    try {
+      if (precAttivo) generaPdfProspettiSchema(prospettiSchema, rfDirSchema, null, stagione, precAttivo, "ce");
+      else generaPdfCE(prospettiSchema, stagione);
+      setLastAction("Conto Economico generato" + suffConfronto);
+    } finally { setBusy(false); }
   };
   const exportRFUfficialePDF = () => {
     if (!rfDirSchema) return;
     setBusy(true);
-    try { generaPdfRF(rfDirSchema, stagione); setLastAction("Rendiconto Finanziario (Schema di Bilancio) generato"); }
+    try {
+      if (precAttivo) generaPdfProspettiSchema(prospettiSchema, rfDirSchema, null, stagione, precAttivo, "rf");
+      else generaPdfRF(rfDirSchema, stagione);
+      setLastAction("Rendiconto Finanziario generato" + suffConfronto);
+    } finally { setBusy(false); }
+  };
+  const exportProspettiTuttiPDF = () => {
+    if (!prospettiSchema || !rfDirSchema) return;
+    setBusy(true);
+    try { generaPdfProspettiSchema(prospettiSchema, rfDirSchema, null, stagione, precAttivo); setLastAction("Prospetti (SP, CE, RF) generati" + suffConfronto); }
     finally { setBusy(false); }
   };
 
@@ -7113,14 +7178,19 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
 
       const bSP = creaPdfBuilder(stagione, "portrait", doc);
-      const attivoRowsPk = prospettiSchema.sp.filter(c => c.lato === "attivo").flatMap(cl => bSP.righeClasse(cl, ". "));
+      const cfPk = cfEx;
+      const pcPk = (k, stile, cur) => celleConfrontoPdf(cfPk, k, stile, cur, bSP.money);
+      if (cfPk) { doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(110); doc.text(`Confronto con ${cfPk.precStagione}`, W - 14, 18, { align: "right" }); doc.setTextColor(0); }
+      const attivoRowsPk = prospettiSchema.sp.filter(c => c.lato === "attivo").flatMap(cl => bSP.righeClasse(cl, ". ", cfPk));
       attivoRowsPk.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
-                          { content: bSP.money(prospettiSchema.totAttivo), styles: { fontStyle: "bold", fillColor: bSP.VERDE_CHIARO } }]);
-      let y_sp2 = bSP.tabellaColorata(attivoRowsPk, "ATTIVO", 25, bSP.VERDE);
-      const passivoRowsPk = prospettiSchema.sp.filter(c => c.lato === "passivo").flatMap(cl => bSP.righeClasse(cl, ". "));
+                          { content: bSP.money(prospettiSchema.totAttivo), styles: { fontStyle: "bold", fillColor: bSP.VERDE_CHIARO } },
+                          ...pcPk("totAttivo", { fontStyle: "bold", fillColor: bSP.VERDE_CHIARO }, prospettiSchema.totAttivo)]);
+      let y_sp2 = bSP.tabellaColorata(attivoRowsPk, "ATTIVO", 25, bSP.VERDE, cfPk);
+      const passivoRowsPk = prospettiSchema.sp.filter(c => c.lato === "passivo").flatMap(cl => bSP.righeClasse(cl, ". ", cfPk));
       passivoRowsPk.push([{ content: "TOTALE PASSIVO E PN", styles: { fontStyle: "bold" } },
-                           { content: bSP.money(prospettiSchema.totPassivo), styles: { fontStyle: "bold", fillColor: bSP.ROSSO_CHIARO } }]);
-      y_sp2 = bSP.tabellaColorata(passivoRowsPk, "PASSIVO E PATRIMONIO NETTO", y_sp2 + 8, bSP.ROSSO);
+                           { content: bSP.money(prospettiSchema.totPassivo), styles: { fontStyle: "bold", fillColor: bSP.ROSSO_CHIARO } },
+                           ...pcPk("totPassivo", { fontStyle: "bold", fillColor: bSP.ROSSO_CHIARO }, prospettiSchema.totPassivo)]);
+      y_sp2 = bSP.tabellaColorata(passivoRowsPk, "PASSIVO E PATRIMONIO NETTO", y_sp2 + 8, bSP.ROSSO, cfPk);
       // Barra di quadratura solo quando c'e' uno sbilancio da segnalare: un
       // "QUADRATURA: OK" con accanto un trattino non dice niente a chi legge
       // il bilancio, mentre lo sbilancio va visto subito.
@@ -7136,23 +7206,32 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
 
       const bCE = creaPdfBuilder(stagione, "portrait", doc);
+      const pcCe = (k, stile, cur) => celleConfrontoPdf(cfPk, k, stile, cur, bCE.money);
+      if (cfPk) { doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(110); doc.text(`Confronto con ${cfPk.precStagione}`, W - 14, 18, { align: "right" }); doc.setTextColor(0); }
       const posCEpk = prospettiSchema.ce.filter(cl => cl.segno >= 0);
       const negCEpk = prospettiSchema.ce.filter(cl => cl.segno < 0);
       let y_ce2 = 25;
       if (posCEpk.length) {
-        const rows = posCEpk.flatMap(cl => bCE.righeClasse(cl, ") "));
+        const rows = posCEpk.flatMap(cl => bCE.righeClasse(cl, ") ", cfPk));
+        const tp = posCEpk.reduce((s, c) => s + c.totale, 0);
         rows.push([{ content: "Totale voci positive", styles: { fontStyle: "bold" } },
-                   { content: bCE.money(posCEpk.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: bCE.VERDE_CHIARO } }]);
-        y_ce2 = bCE.tabellaColorata(rows, "VOCI POSITIVE", y_ce2, bCE.VERDE) + 8;
+                   { content: bCE.money(tp), styles: { fontStyle: "bold", fillColor: bCE.VERDE_CHIARO } },
+                   ...pcCe("totPos", { fontStyle: "bold", fillColor: bCE.VERDE_CHIARO }, tp)]);
+        y_ce2 = bCE.tabellaColorata(rows, "VOCI POSITIVE", y_ce2, bCE.VERDE, cfPk) + 8;
       }
       if (negCEpk.length) {
-        const rows = negCEpk.flatMap(cl => bCE.righeClasse(cl, ") "));
+        const rows = negCEpk.flatMap(cl => bCE.righeClasse(cl, ") ", cfPk));
+        const tn = negCEpk.reduce((s, c) => s + c.totale, 0);
         rows.push([{ content: "Totale voci negative", styles: { fontStyle: "bold" } },
-                   { content: bCE.money(negCEpk.reduce((s, c) => s + c.totale, 0)), styles: { fontStyle: "bold", fillColor: bCE.ROSSO_CHIARO } }]);
-        y_ce2 = bCE.tabellaColorata(rows, "VOCI NEGATIVE", y_ce2, bCE.ROSSO) + 8;
+                   { content: bCE.money(tn), styles: { fontStyle: "bold", fillColor: bCE.ROSSO_CHIARO } },
+                   ...pcCe("totNeg", { fontStyle: "bold", fillColor: bCE.ROSSO_CHIARO }, tn)]);
+        y_ce2 = bCE.tabellaColorata(rows, "VOCI NEGATIVE", y_ce2, bCE.ROSSO, cfPk) + 8;
       }
+      const rPrec = cfPk ? cfPk.get("risultato") : 0;
       bCE.barraFinale(y_ce2, "RISULTATO D'ESERCIZIO",
-                       `${bCE.money(prospettiSchema.risultato)}  (${prospettiSchema.risultato >= 0 ? "Utile" : "Perdita"})`, bCE.NERO);
+                       `${bCE.money(prospettiSchema.risultato)}  (${prospettiSchema.risultato >= 0 ? "Utile" : "Perdita"})` +
+                       (cfPk ? `     ${cfPk.precStagione}: ${bCE.money(rPrec)}` +
+                         (cfPk.var && Math.abs(rPrec) > 0.004 ? `  (${prospettiSchema.risultato - rPrec >= 0 ? "+" : ""}${numIT((prospettiSchema.risultato - rPrec) / Math.abs(rPrec) * 100, 1)}%)` : "") : ""), bCE.NERO);
 
       // === 4. RENDICONTO FINANZIARIO — metodo diretto (landscape) ===
       doc.addPage("a4", "landscape");
@@ -7162,29 +7241,34 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const bRF = creaPdfBuilder(stagione, "landscape", doc);
+      const pcRf = (k, stile, cur) => celleConfrontoPdf(cfPk, k, stile, cur, bRF.money);
       const bodyRFpk = [];
       rfDirSchema.aree.forEach(a => {
         bodyRFpk.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: bRF.GRIGIO_CHIARO } },
-                       { content: bRF.money(a.totale), styles: { fontStyle: "bold", fillColor: bRF.GRIGIO_CHIARO } }]);
+                       { content: bRF.money(a.totale), styles: { fontStyle: "bold", fillColor: bRF.GRIGIO_CHIARO } },
+                       ...pcRf("a:" + a.id, { fontStyle: "bold", fillColor: bRF.GRIGIO_CHIARO }, a.totale)]);
         (a.voci || []).forEach(v => {
           bodyRFpk.push([{ content: `   ${v.codice ? v.codice + ". " : ""}${v.nome}`, styles: { fontStyle: "bold" } },
-                         { content: bRF.money(v.totale), styles: { fontStyle: "bold" } }]);
+                         { content: bRF.money(v.totale), styles: { fontStyle: "bold" } }, ...pcRf("rv:" + v.id, { fontStyle: "bold" }, v.totale)]);
         });
       });
       bodyRFpk.push([{ content: "VARIAZIONE DELLE DISPONIBILITA' LIQUIDE", styles: { fontStyle: "bold" } },
-                      { content: bRF.money(rfDirSchema.variazione), styles: { fontStyle: "bold", fillColor: bRF.VERDE_CHIARO } }]);
-      bodyRFpk.push(["Disponibilita' liquide iniziali", bRF.money(rfDirSchema.apertura)]);
-      rfDirSchema.dettaglioLiquidita.forEach(d => bodyRFpk.push([`      ${d.nome}`, bRF.money(d.apertura)]));
+                      { content: bRF.money(rfDirSchema.variazione), styles: { fontStyle: "bold", fillColor: bRF.VERDE_CHIARO } },
+                      ...pcRf("rfVar", { fontStyle: "bold", fillColor: bRF.VERDE_CHIARO }, rfDirSchema.variazione)]);
+      bodyRFpk.push(["Disponibilita' liquide iniziali", bRF.money(rfDirSchema.apertura), ...pcRf("rfAp", null, rfDirSchema.apertura)]);
+      rfDirSchema.dettaglioLiquidita.forEach(d => bodyRFpk.push([`      ${d.nome}`, bRF.money(d.apertura), ...pcRf("li:" + d.nome, null, d.apertura)]));
       bodyRFpk.push([{ content: "Disponibilita' liquide finali", styles: { fontStyle: "bold" } },
-                      { content: bRF.money(rfDirSchema.chiusura), styles: { fontStyle: "bold" } }]);
-      rfDirSchema.dettaglioLiquidita.forEach(d => bodyRFpk.push([`      ${d.nome}`, bRF.money(d.chiusura)]));
+                      { content: bRF.money(rfDirSchema.chiusura), styles: { fontStyle: "bold" } }, ...pcRf("rfCh", { fontStyle: "bold" }, rfDirSchema.chiusura)]);
+      rfDirSchema.dettaglioLiquidita.forEach(d => bodyRFpk.push([`      ${d.nome}`, bRF.money(d.chiusura), ...pcRf("lf:" + d.nome, null, d.chiusura)]));
+      const largPk = cfPk ? (cfPk.var ? 232 : 172) : 140;
       doc.autoTable({
-        startY: 20, head: [["Voce", "Importo"]], body: bodyRFpk, theme: "plain",
+        startY: 20, head: [cfPk ? ["Voce", cfPk.stagione, cfPk.precStagione, ...(cfPk.var ? ["Var. €", "Var. %"] : [])] : ["Voce", "Importo"]], body: bodyRFpk, theme: "plain",
         styles: { fontSize: 8, cellPadding: 1.6 },
         headStyles: { fillColor: bRF.VERDE, textColor: 240, fontStyle: "bold" },
-        columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" } },
+        columnStyles: { 0: { cellWidth: 108 }, 1: { cellWidth: 32, halign: "right" }, 2: { cellWidth: 32, halign: "right" }, 3: { cellWidth: 32, halign: "right" }, 4: { cellWidth: 28, halign: "right" } },
+        didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
         // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
-        margin: { left: (doc.internal.pageSize.width - 140) / 2 },
+        margin: { left: (doc.internal.pageSize.width - largPk) / 2 },
       });
 
 
@@ -7270,7 +7354,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         }
       }
 
-      doc.save(`Bilancio_Completo_FutsalFabbrico_${stagione}.pdf`);
+      doc.save(`Bilancio_Completo_FutsalFabbrico_${stagione}${cfEx ? "_vs_" + cfEx.precStagione + (cfEx.var ? "_variazioni" : "") : ""}.pdf`);
       setLastAction("📦 Pacchetto completo PDF esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7388,7 +7472,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   };
   // aoa: righe; opts.kind: { indiceRiga: "classe" | "voce" | ... }
   const XL_RIGA = { bottom: { style: "hair", color: { rgb: "DDDAD1" } } };
-  const xlFoglio = (aoa, { cols = [], headerRow = 3, moneyCols = [], kind = {}, numFmt = XL_MONEY, livelli = null } = {}) => {
+  const xlFoglio = (aoa, { cols = [], headerRow = 3, moneyCols = [], kind = {}, numFmt = XL_MONEY, livelli = null, percCols = [] } = {}) => {
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const nCols = Math.max(...aoa.map(r => (r || []).length), cols.length, 1);
     ws["!cols"] = (cols.length ? cols : Array(nCols).fill(16)).map(w => ({ wch: w }));
@@ -7403,6 +7487,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     const range = XLSX.utils.decode_range(ws["!ref"]);
     for (let r = Math.max(headerRow + 1, 0); r <= range.e.r; r++) {
       moneyCols.forEach(c => { const x = xlCella(ws, r, c); if (typeof x.v === "number") x.z = numFmt; });
+      percCols.forEach(c => { const x = xlCella(ws, r, c); if (typeof x.v === "number") x.z = '+0.0%;-0.0%;"-"'; });
       const vuota = !(aoa[r] || []).some(v => v !== undefined && v !== null && v !== "");
       if (vuota) continue;                       // righe di stacco: nessun filetto, nessun fondino
       const base = XL_STILI[kind[r]] || {};
@@ -7435,96 +7520,111 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     .filter(d => Math.abs(d.valore) > 0.005)
     .sort((a, b) => Math.abs(b.valore) - Math.abs(a.valore));
 
+  // Colonne di confronto per i fogli dei prospetti: [anno precedente, Var. €, Var. %].
+  // key = chiave di mappaValoriProspetti, cur = valore di questa stagione nella stessa riga.
+  const xlCmp = (key, cur) => {
+    if (!cfEx) return [];
+    if (!key) return cfEx.var ? ["", "", ""] : [""];
+    const pv = cfEx.get(key), c = Number(cur) || 0;
+    if (!cfEx.var) return [pv];
+    const d = Math.round((c - pv) * 100) / 100;
+    return [pv, d, Math.abs(pv) > 0.004 ? d / Math.abs(pv) : ""];
+  };
+  const xlCmpTesta = () => cfEx ? [cfEx.precStagione, ...(cfEx.var ? ["Var. €", "Var. %"] : [])] : [];
+  const xlCmpNota = () => cfEx ? ` · confronto con ${cfEx.precStagione} (ricalcolata con lo schema di ${stagione})` : "";
+
   // --- Stato Patrimoniale (schema di bilancio) ---
   const foglioSP = (P) => {
     const aoa = [["STATO PATRIMONIALE"],
-                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio · i conti sotto ogni voce si aprono con i pulsanti +/− a sinistra`], [],
-                 ["Voce", "Di cui conto", "Parziale", "Totale"]];
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio${xlCmpNota()} · i conti sotto ogni voce si aprono con i pulsanti +/− a sinistra`], [],
+                 ["Voce", "Di cui conto", "Parziale", cfEx ? stagione : "Totale", ...xlCmpTesta()]];
     const kind = {}, livelli = {};
-    const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
-    [["attivo", "ATTIVO", "sezione", "TOTALE ATTIVO", P.totAttivo],
-     ["passivo", "PASSIVO E PATRIMONIO NETTO", "sezioneNeg", "TOTALE PASSIVO E PATRIMONIO NETTO", P.totPassivo]]
-    .forEach(([lato, titolo, stile, labelTot, valTot]) => {
+    // key/cur: valore dell'anno precedente per la stessa riga (colonne di confronto)
+    const riga = (r, k, lv, key, cur) => { aoa.push(r.length ? [...r, ...xlCmp(key, cur)] : r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
+    [["attivo", "ATTIVO", "sezione", "TOTALE ATTIVO", P.totAttivo, "totAttivo"],
+     ["passivo", "PASSIVO E PATRIMONIO NETTO", "sezioneNeg", "TOTALE PASSIVO E PATRIMONIO NETTO", P.totPassivo, "totPassivo"]]
+    .forEach(([lato, titolo, stile, labelTot, valTot, keyTot]) => {
       riga([titolo, "", "", ""], stile);
       P.sp.filter(c => c.lato === lato).forEach(cl => {
-        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", "", cl.totale], "classe");
+        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", "", cl.totale], "classe", 0, "cl:" + cl.id, cl.totale);
         (cl.voci || []).forEach(v => {
           if (v.tipo === "sottosezione") { riga([`  ${v.nome}`, "", "", ""], "dettaglio", 1); return; }
-          riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, "", v.valore, ""], "voce", 1);
+          riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, "", v.valore, ""], "voce", 1, "v:" + v.id, v.valore);
           (v.sottovoci || []).forEach(sv => {
-            riga([`    ${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, "", sv.valore, ""], "voce", 2);
-            xlDettaglioConti(sv).forEach(d => riga([`       ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 3));
+            riga([`    ${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, "", sv.valore, ""], "voce", 2, "sv:" + sv.id, sv.valore);
+            xlDettaglioConti(sv).forEach(d => riga([`       ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 3, "d:" + sv.id + ":" + d.c, d.valore));
           });
-          xlDettaglioConti(v).forEach(d => riga([`     ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 2));
+          xlDettaglioConti(v).forEach(d => riga([`     ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 2, "d:" + v.id + ":" + d.c, d.valore));
         });
       });
-      riga([labelTot, "", "", valTot], "totale");
+      riga([labelTot, "", "", valTot], "totale", 0, keyTot, valTot);
       riga([]);
     });
     if (Math.abs(P.sbilancio) >= 0.01) {
       riga(["SBILANCIO ATTIVO / PASSIVO", "", "", P.sbilancio], "finale");
     }
-    return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
+    return xlFoglio(aoa, { cols: [46, 15, 15, 15, ...(cfEx ? [15, 15, 10] : [])], moneyCols: [1, 2, 3, ...(cfEx ? [4, 5] : [])], percCols: cfEx && cfEx.var ? [6] : [], kind, livelli });
   };
 
   // --- Conto Economico (schema di bilancio) ---
   const foglioCE = (P) => {
     const aoa = [["CONTO ECONOMICO"],
-                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio · i conti sotto ogni voce si aprono con i pulsanti +/− a sinistra`], [],
-                 ["Voce", "Di cui conto", "Parziale", "Totale"]];
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio${xlCmpNota()} · i conti sotto ogni voce si aprono con i pulsanti +/− a sinistra`], [],
+                 ["Voce", "Di cui conto", "Parziale", cfEx ? stagione : "Totale", ...xlCmpTesta()]];
     const kind = {}, livelli = {};
-    const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
+    const riga = (r, k, lv, key, cur) => { aoa.push(r.length ? [...r, ...xlCmp(key, cur)] : r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
     const pos = P.ce.filter(cl => cl.segno >= 0);
     const neg = P.ce.filter(cl => cl.segno < 0);
-    [[pos, "VOCI POSITIVE", "sezione", "Totale voci positive"],
-     [neg, "VOCI NEGATIVE", "sezioneNeg", "Totale voci negative"]]
-    .forEach(([gruppo, titolo, stile, labelTot]) => {
+    [[pos, "VOCI POSITIVE", "sezione", "Totale voci positive", "totPos"],
+     [neg, "VOCI NEGATIVE", "sezioneNeg", "Totale voci negative", "totNeg"]]
+    .forEach(([gruppo, titolo, stile, labelTot, keyTot]) => {
       if (!gruppo.length) return;
       riga([titolo, "", "", ""], stile);
       gruppo.forEach(cl => {
-        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", "", cl.totale], "classe");
+        riga([`${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, "", "", cl.totale], "classe", 0, "cl:" + cl.id, cl.totale);
         (cl.voci || []).forEach(v => {
           if (v.tipo === "sottosezione") { riga([`  ${v.nome}`, "", "", ""], "dettaglio", 1); return; }
-          riga([`  ${v.codice ? v.codice + ") " : ""}${v.nome}`, "", v.valore, ""], "voce", 1);
+          riga([`  ${v.codice ? v.codice + ") " : ""}${v.nome}`, "", v.valore, ""], "voce", 1, "v:" + v.id, v.valore);
           (v.sottovoci || []).forEach(sv => {
-            riga([`    ${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, "", sv.valore, ""], "voce", 2);
-            xlDettaglioConti(sv).forEach(d => riga([`       ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 3));
+            riga([`    ${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, "", sv.valore, ""], "voce", 2, "sv:" + sv.id, sv.valore);
+            xlDettaglioConti(sv).forEach(d => riga([`       ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 3, "d:" + sv.id + ":" + d.c, d.valore));
           });
-          xlDettaglioConti(v).forEach(d => riga([`     ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 2));
+          xlDettaglioConti(v).forEach(d => riga([`     ${d.c} ${d.nome}`, d.valore, "", ""], "dettaglio", 2, "d:" + v.id + ":" + d.c, d.valore));
         });
       });
-      riga([labelTot, "", "", gruppo.reduce((s, c) => s + c.totale, 0)], "totale");
+      const tot = gruppo.reduce((s, c) => s + c.totale, 0);
+      riga([labelTot, "", "", tot], "totale", 0, keyTot, tot);
       riga([]);
     });
-    riga([`RISULTATO D'ESERCIZIO (${P.risultato >= 0 ? "Utile" : "Perdita"})`, "", "", P.risultato], "finale");
-    return xlFoglio(aoa, { cols: [46, 15, 15, 15], moneyCols: [1, 2, 3], kind, livelli });
+    riga([`RISULTATO D'ESERCIZIO (${P.risultato >= 0 ? "Utile" : "Perdita"})`, "", "", P.risultato], "finale", 0, "risultato", P.risultato);
+    return xlFoglio(aoa, { cols: [46, 15, 15, 15, ...(cfEx ? [15, 15, 10] : [])], moneyCols: [1, 2, 3, ...(cfEx ? [4, 5] : [])], percCols: cfEx && cfEx.var ? [6] : [], kind, livelli });
   };
 
   // --- Rendiconto Finanziario, metodo diretto (schema di bilancio) ---
   const foglioRF = (R) => {
     const aoa = [["RENDICONTO FINANZIARIO · METODO DIRETTO"],
-                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio`], [],
-                 ["Voce", "Parziale", "Totale"]];
+                 [`Futsal Fabbrico ASD · Stagione ${stagione} · schema di bilancio${xlCmpNota()}`], [],
+                 ["Voce", "Parziale", cfEx ? stagione : "Totale", ...xlCmpTesta()]];
     const kind = {}, livelli = {};
-    const riga = (r, k, lv) => { aoa.push(r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
+    const riga = (r, k, lv, key, cur) => { aoa.push(r.length ? [...r, ...xlCmp(key, cur)] : r); const i = aoa.length - 1; if (k) kind[i] = k; if (lv) livelli[i] = lv; };
     R.aree.forEach(a => {
-      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", a.totale], "classe");
+      riga([`${a.codice ? a.codice + ") " : ""}${a.nome}`, "", a.totale], "classe", 0, "a:" + a.id, a.totale);
       (a.voci || []).forEach(v => {
-        riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.totale, ""], "voce", 1);
-        (v.righe || []).forEach(x => riga([`   · ${x.cat}`, x.val, ""], null, 2));
+        riga([`  ${v.codice ? v.codice + ". " : ""}${v.nome}`, v.totale, ""], "voce", 1, "rv:" + v.id, v.totale);
+        (v.righe || []).forEach(x => riga([`   · ${x.cat}`, x.val, ""], null, 2, "rr:" + v.id + ":" + x.cat, x.val));
       });
     });
     riga([]);
-    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", R.variazione], "totale");
+    riga(["VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", "", R.variazione], "totale", 0, "rfVar", R.variazione);
     riga([]);
-    riga(["Disponibilità liquide iniziali", "", R.apertura], "classe");
-    R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.apertura, ""], null, 1));
-    riga(["Disponibilità liquide finali", "", R.chiusura], "classe");
-    R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.chiusura, ""], null, 1));
+    riga(["Disponibilità liquide iniziali", "", R.apertura], "classe", 0, "rfAp", R.apertura);
+    R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.apertura, ""], null, 1, "li:" + d.nome, d.apertura));
+    riga(["Disponibilità liquide finali", "", R.chiusura], "classe", 0, "rfCh", R.chiusura);
+    R.dettaglioLiquidita.forEach(d => riga([`   · ${d.nome}`, d.chiusura, ""], null, 1, "lf:" + d.nome, d.chiusura));
     const scarto = Math.round((R.chiusura - R.apertura - R.variazione) * 100) / 100;
     riga([]);
     if (Math.abs(scarto) >= 0.01) riga(["SCARTO DI QUADRATURA CON LE DISPONIBILITÀ LIQUIDE", "", scarto], "finale");
-    return xlFoglio(aoa, { cols: [36, 13, 13], moneyCols: [1, 2], kind, livelli });
+    return xlFoglio(aoa, { cols: [36, 13, 13, ...(cfEx ? [13, 13, 9] : [])], moneyCols: [1, 2, ...(cfEx ? [3, 4] : [])], percCols: cfEx && cfEx.var ? [5] : [], kind, livelli });
   };
 
   // --- Riepilogo per Business Unit ---
@@ -7697,7 +7797,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         }))
       ), "Piano dei Conti");
 
-      XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagione}.xlsx`);
+      XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagione}${cfEx ? "_vs_" + cfEx.precStagione + (cfEx.var ? "_variazioni" : "") : ""}.xlsx`);
       setLastAction("Excel completo esportato — prospetti di bilancio e riepilogo BU inclusi");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7710,6 +7810,28 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <h2>Export</h2>
           <div className="sub">Esporta dati e bilanci in Excel o PDF</div>
         </div>
+      </div>
+
+      {/* BILANCIO COMPARATIVO: vale per pacchetto completo, SP, CE, RF ed Excel */}
+      <div className="card" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px" }}>
+          <h3 className="card-title" style={{ margin: 0 }}>⇄ Bilancio comparativo</h3>
+          <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 4 }}>
+            {calcPrecEx
+              ? <>Stato Patrimoniale, Conto Economico e Rendiconto escono con la colonna <b>{calcPrecEx.stagione}</b> accanto a {stagione}, ricalcolata con lo schema di bilancio di questa stagione. Vale per il pacchetto completo, i documenti singoli e l'Excel.</>
+              : stagionePrecedenteDi(stagione)
+                ? <>Carico i dati di {stagionePrecedenteDi(stagione)}… (se la stagione precedente non esiste, gli export restano a una colonna)</>
+                : <>Nessuna stagione precedente: gli export restano a una colonna.</>}
+          </div>
+        </div>
+        <label className="an-check" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, cursor: calcPrecEx ? "pointer" : "default", opacity: calcPrecEx ? 1 : .5 }}>
+          <input type="checkbox" disabled={!calcPrecEx} checked={confrontoEx} onChange={e => setConfrontoEx(e.target.checked)} />
+          Confronto con {calcPrecEx ? calcPrecEx.stagione : "anno precedente"}
+        </label>
+        <label className="an-check" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, cursor: (calcPrecEx && confrontoEx) ? "pointer" : "default", opacity: (calcPrecEx && confrontoEx) ? 1 : .5 }}>
+          <input type="checkbox" disabled={!calcPrecEx || !confrontoEx} checked={variazioniEx} onChange={e => setVariazioniEx(e.target.checked)} />
+          Con variazioni (Var. € e Var. %)
+        </label>
       </div>
 
       {/* PACCHETTO COMPLETO in evidenza */}
@@ -15356,14 +15478,20 @@ function mappaValoriProspetti(pr, rf) {
   return m;
 }
 
-function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
-  const b = creaPdfBuilder(stagione, "portrait");
+function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec, solo) {
+  // solo: "sp" | "ce" | "rf" per il documento singolo; vuoto = tutti e tre
+  const vuoi = (x) => !solo || solo === x;
+  let primaPagina = true;
+  const nuovaPagina = (orient) => { if (!primaPagina) b.doc.addPage("a4", orient); primaPagina = false; };
+  const b = creaPdfBuilder(stagione, solo === "rf" ? "landscape" : "portrait");
   // confronto con l'esercizio precedente: stessa struttura, una colonna in piu'
   const P = prec ? mappaValoriProspetti(prec.prospetti, prec.rfDir) : null;
   const cf = P ? { stagione, precStagione: prec.stagione, get: (k) => P[k] || 0, var: !!prec.variazioni } : null;
   const pc = (k, stile, cur) => celleConfrontoPdf(cf, k, stile, cur, b.money);
 
   // --- Stato Patrimoniale ---
+  if (vuoi("sp")) {
+  nuovaPagina("portrait");
   b.intestazioneP("Stato Patrimoniale" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
   const attivoRows = prospetti.sp.filter(c => c.lato === "attivo").flatMap(cl => b.righeClasse(cl, ". ", cf));
   attivoRows.push([{ content: "TOTALE ATTIVO", styles: { fontStyle: "bold" } },
@@ -15378,9 +15506,11 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
   if (Math.abs(prospetti.sbilancio) >= 0.01) {
     b.barraFinale(y + 6, "SBILANCIO ATTIVO / PASSIVO", b.money(prospetti.sbilancio), b.ROSSO);
   }
+  }
 
   // --- Conto Economico ---
-  b.doc.addPage(); b.intestazioneP("Conto Economico" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
+  if (vuoi("ce")) {
+  nuovaPagina("portrait"); b.intestazioneP("Conto Economico" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
   const posCE = prospetti.ce.filter(cl => cl.segno >= 0);
   const negCE = prospetti.ce.filter(cl => cl.segno < 0);
   let y2 = 34;
@@ -15403,8 +15533,11 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
                 (cf ? `     ${cf.precStagione}: ${b.money(cf.get("risultato"))}` +
                   (cf.var && Math.abs(cf.get("risultato")) > 0.004 ? `  (${prospetti.risultato - cf.get("risultato") >= 0 ? "+" : ""}${numIT((prospetti.risultato - cf.get("risultato")) / Math.abs(cf.get("risultato")) * 100, 1)}%)` : "") : ""), b.NERO);
 
+  }
+
   // --- Rendiconto: metodo diretto ---
-  b.doc.addPage("a4", "landscape"); b.intestazioneL("Rendiconto Finanziario · Metodo diretto");
+  if (vuoi("rf")) {
+  nuovaPagina("landscape"); b.intestazioneL("Rendiconto Finanziario · Metodo diretto" + (cf ? ` · confronto con ${cf.precStagione}` : ""));
   const bodyD = [];
   rfDir.aree.forEach(a => {
     bodyD.push([{ content: `${a.codice ? a.codice + ") " : ""}${a.nome}`, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } },
@@ -15437,9 +15570,11 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec) {
     margin: { left: (b.doc.internal.pageSize.width - larg) / 2 },
   });
 
+  }
   // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
 
-  b.doc.save(`Prospetti_Civilistici_${stagione}${cf ? "_vs_" + cf.precStagione + (cf.var ? "_variazioni" : "") : ""}.pdf`);
+  const nomeDoc = { sp: "Stato_Patrimoniale", ce: "Conto_Economico", rf: "Rendiconto_Finanziario" }[solo] || "Prospetti_Civilistici";
+  b.doc.save(`${nomeDoc}_${stagione}${cf ? "_vs_" + cf.precStagione + (cf.var ? "_variazioni" : "") : ""}.pdf`);
 }
 
 function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
@@ -17014,6 +17149,7 @@ function anFormatoMisura(m, fonte, formato) {
 const anFormatta = (v, formato) => {
   const n = Number(v) || 0;
   if (formato === "euro") return "€ " + numIT(n, 2);
+  if (formato === "perc") return numIT(n, 1) + " %";
   return numIT(n, Number.isInteger(n) ? 0 : 2);
 };
 // ---------- confronto tra colonne della pivot (Δ e Δ %) ----------
@@ -17061,7 +17197,7 @@ function anTitoloAuto(w) {
   return `${mis} per ${w.dim || "?"}${w.dim2 && w.tipo !== "torta" ? " e " + w.dim2 : ""}`;
 }
 
-function anDatiWidget(w, fonte, sel) {
+function anDatiWidget(w, fonte, sel, ctx) {
   if (!fonte) return { errore: "Fonte dati non trovata: la tabella potrebbe essere stata eliminata." };
   if (w.tipo === "filtro") {
     if (!anHaCampo(fonte, w.dim)) return { errore: "Scegli il campo del filtro." };
@@ -17078,13 +17214,30 @@ function anDatiWidget(w, fonte, sel) {
   const m0 = (w.misure || [])[0] || { agg: "conteggio" };
   if (m0.agg !== "conteggio" && !anHaCampo(fonte, m0.campo)) return { errore: "Scegli la misura." };
   if (w.tipo === "kpi") {
-    const valore = anAggrega(righe, m0);
-    let perStag = null;
-    if (w.perStagione !== false && anHaCampo(fonte, "Stagione")) {
+    let valore = anAggrega(righe, m0);
+    let serie = null;
+    if (anHaCampo(fonte, "Stagione")) {
       const g = anGruppi(righe, "Stagione");
-      if (g.size > 1) perStag = anOrdinaVal([...g.keys()], "testo").map(s => ({ s, v: anAggrega(g.get(s), m0) }));
+      serie = anOrdinaVal([...g.keys()], "testo").map(s => ({ s, v: anAggrega(g.get(s), m0) }));
     }
-    return { valore, perStag };
+    // Rapporto %: questo valore diviso il valore di un altro KPI del foglio (es. utile / ricavi = margine)
+    if (w.kpiRapporto) {
+      const rw = ctx && (ctx.widgets || []).find(x => x.id === w.kpiRapporto && x.tipo === "kpi" && x.id !== w.id);
+      if (!rw) return { errore: "Il KPI di riferimento per il rapporto non esiste più: modifica l'oggetto." };
+      const rd = anDatiWidget({ ...rw, kpiRapporto: "", kpiVista: "totale" }, ctx.fonti[rw.fonte], sel);
+      if (rd.errore) return rd;
+      const div = (a, b) => Math.abs(b) > 1e-9 ? a / b * 100 : 0;
+      valore = div(valore, rd.valore);
+      if (serie) { const mp = new Map((rd.serie || []).map(x => [x.s, x.v])); serie = serie.map(x => ({ s: x.s, v: div(x.v, mp.get(x.s) || 0) })); }
+    }
+    const perStag = serie && serie.length > 1 && w.perStagione !== false ? serie : null;
+    let cmp = null;
+    if (w.kpiVista === "confronto" && serie && serie.length >= 2) {
+      const cur = serie[serie.length - 1], prev = serie[serie.length - 2];
+      cmp = { cur, prev, delta: cur.v - prev.v, perc: w.kpiRapporto ? null : anPerc(prev.v, cur.v) };
+      valore = cur.v;
+    }
+    return { valore, perStag, serie, cmp, rapporto: !!w.kpiRapporto };
   }
   if (w.tipo === "tabella") {
     const dims = (w.dims || []).filter(d => anHaCampo(fonte, d));
@@ -17176,6 +17329,12 @@ function anTabellare(w, dati, fonte) {
   if (!dati || dati.errore) return { intestazioni: ["Nota"], righe: [[dati ? dati.errore : "Nessun dato"]] };
   const m0 = (w.misure || [])[0];
   if (w.tipo === "kpi") {
+    if (dati.cmp) {
+      const c = dati.cmp;
+      const r = [["Stagione " + c.cur.s, c.cur.v], ["Stagione " + c.prev.s, c.prev.v], [dati.rapporto ? "Variazione (punti %)" : "Variazione", c.delta]];
+      if (c.perc !== null) r.push(["Variazione %", c.perc]);
+      return { intestazioni: ["Misura", "Valore"], righe: r };
+    }
     const r = [[anEtichettaMisura(m0) || "Valore", dati.valore]];
     (dati.perStag || []).forEach(x => r.push(["Stagione " + x.s, x.v]));
     return { intestazioni: ["Misura", "Valore"], righe: r };
@@ -17252,7 +17411,7 @@ function AnGrafico({ w, dati, formato, onEtichetta, registra }) {
 }
 
 // ---------- un oggetto della dashboard ----------
-function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, registra, drag, onRidimensiona }) {
+function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, registra, drag, onRidimensiona, ctx }) {
   const [ridim, setRidim] = useState(null);   // {w, h} mentre trascini l'angolo
   const ridimRef = useRef(false);
   const iniziaRidim = (e) => {
@@ -17278,14 +17437,42 @@ function AnWidget({ w, fonte, selezioni, onSeleziona, modifica, strumenti, regis
     };
     window.addEventListener("pointermove", muovi); window.addEventListener("pointerup", fine);
   };
-  const dati = useMemo(() => anDatiWidget(w, fonte, selezioni), [w, fonte, selezioni]);
+  const dati = useMemo(() => anDatiWidget(w, fonte, selezioni, ctx), [w, fonte, selezioni, ctx]);
   const [cerca, setCerca] = useState("");
   const m0 = (w.misure || [])[0];
-  const formato = anFormatoMisura(m0, fonte, w.formato);
+  const formato = w.kpiRapporto ? "perc" : anFormatoMisura(m0, fonte, w.formato);
   const titolo = w.titolo || anTitoloAuto(w);
   let corpo;
   if (dati.errore) corpo = <div className="an-vuoto">{dati.errore}</div>;
-  else if (w.tipo === "kpi") {
+  else if (w.tipo === "kpi" && dati.cmp) {
+    const c = dati.cmp;
+    const inv = w.kpiMeglio === "basso";
+    const piatto = Math.abs(c.delta) < 1e-7;
+    const bene = !piatto && ((c.delta > 0) !== inv);
+    const cls = piatto ? "" : bene ? " an-pos" : " an-neg";
+    const freccia = piatto ? "＝" : c.delta > 0 ? "▲" : "▼";
+    const fmtD = dati.rapporto ? (Math.abs(c.delta) < 1e-7 ? "0" : (c.delta > 0 ? "+" : "−") + numIT(Math.abs(c.delta), 1)) + " p.p." : anFmtDelta(c.delta, formato);
+    const max = Math.max(Math.abs(c.cur.v), Math.abs(c.prev.v)) || 1;
+    corpo = (
+      <div className="an-kpic">
+        <div className="an-kpic-top">
+          <div className="an-kpi-val" style={w.colore ? { color: w.colore } : {}}>{anFormatta(c.cur.v, formato)}</div>
+          <span className={"an-kpic-badge" + cls} title={"Variazione rispetto a " + c.prev.s}>
+            {freccia} {c.perc !== null ? anFmtPerc(c.perc) : fmtD}
+          </span>
+        </div>
+        <div className="an-kpic-barra" title={`${c.cur.s}: ${anFormatta(c.cur.v, formato)} — ${c.prev.s}: ${anFormatta(c.prev.v, formato)}`}>
+          <span className={"an-kpic-fill" + cls} style={{ width: (Math.abs(c.cur.v) / max * 100) + "%", ...(w.colore && !cls ? { background: w.colore } : {}) }} />
+          <span className="an-kpic-tick" style={{ left: (Math.abs(c.prev.v) / max * 100) + "%" }} />
+        </div>
+        <div className="an-kpi-sub">
+          <span className="an-cl" onClick={() => onSeleziona("Stagione", c.cur.s)}><b>{c.cur.s}</b></span>
+          <span className="an-cl" onClick={() => onSeleziona("Stagione", c.prev.s)}>vs {c.prev.s}: <b>{anFormatta(c.prev.v, formato)}</b></span>
+          {c.perc !== null && <span className={cls.trim()}>{fmtD}</span>}
+        </div>
+      </div>
+    );
+  } else if (w.tipo === "kpi") {
     corpo = (
       <div>
         <div className="an-kpi-val" style={w.colore ? { color: w.colore } : {}}>{anFormatta(dati.valore, formato)}</div>
@@ -17405,7 +17592,7 @@ function anDefaultPerTipo(tipo) {
   if (tipo === "pivot" || tipo === "tabella") return { w: 12, h: 3 };
   return { w: 6, h: 2 };
 }
-function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
+function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi, widgets }) {
   const [d, setD] = useState(() => anPulisci(iniziale));
   const [cercaF, setCercaF] = useState({});
   const set = (patch) => setD(x => ({ ...x, ...patch }));
@@ -17548,10 +17735,36 @@ function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
               )}
 
               {d.tipo === "kpi" && (
-                <label className="an-check">
-                  <input type="checkbox" checked={d.perStagione !== false} onChange={e => set({ perStagione: e.target.checked })} />
-                  Mostra il dettaglio per stagione
-                </label>
+                <div className="an-fs" style={{ display: "grid", gap: 8 }}>
+                  <div className="an-field"><label>Visualizzazione</label>
+                    <select value={d.kpiVista || "totale"} onChange={e => set({ kpiVista: e.target.value })}>
+                      <option value="totale">Totale (somma delle stagioni)</option>
+                      <option value="confronto">Ultima stagione vs precedente (Δ, Δ %, freccia)</option>
+                    </select>
+                  </div>
+                  {d.kpiVista === "confronto" && (
+                    <div className="an-field"><label>Un aumento è</label>
+                      <select value={d.kpiMeglio || "alto"} onChange={e => set({ kpiMeglio: e.target.value })}>
+                        <option value="alto">Positivo (verde) — es. ricavi, utile</option>
+                        <option value="basso">Negativo (rosso) — es. costi, spese</option>
+                      </select>
+                    </div>
+                  )}
+                  <div className="an-field"><label>Rapporto %</label>
+                    <select value={d.kpiRapporto || ""} onChange={e => set({ kpiRapporto: e.target.value })}>
+                      <option value="">Nessuno: mostra il valore</option>
+                      {(widgets || []).filter(x => x.tipo === "kpi" && x.id !== d.id && !x.kpiRapporto).map(x => (
+                        <option key={x.id} value={x.id}>Diviso «{x.titolo || anTitoloAuto(x)}» (es. margine = utile / ricavi)</option>
+                      ))}
+                    </select>
+                  </div>
+                  {d.kpiVista !== "confronto" && (
+                    <label className="an-check">
+                      <input type="checkbox" checked={d.perStagione !== false} onChange={e => set({ perStagione: e.target.checked })} />
+                      Mostra il dettaglio per stagione
+                    </label>
+                  )}
+                </div>
               )}
 
               {(d.tipo === "kpi" || ((d.tipo === "barre" || d.tipo === "barreO" || d.tipo === "linee") && !d.dim2)) && (
@@ -17682,7 +17895,7 @@ function AnEditor({ iniziale, fonti, selezioni, onSalva, onChiudi }) {
             <div>
               <div className="an-nota" style={{ marginBottom: 6 }}>Anteprima con le selezioni attuali</div>
               <div className="an-grid an-grid-anteprima">
-                <AnWidget w={{ ...anteprima, w: 12 }} fonte={fonte} selezioni={selezioni} onSeleziona={() => {}} />
+                <AnWidget w={{ ...anteprima, w: 12 }} fonte={fonte} selezioni={selezioni} onSeleziona={() => {}} ctx={{ widgets: widgets || [], fonti }} />
               </div>
             </div>
           </div>
@@ -17973,6 +18186,7 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
   }, [stagioniDash.join("|"), datiStagioni, stagione, conti, movimenti, cespiti, saldiIniziali]);
   const inCaricamento = stagioniDash.some(s => perStagione[s] && perStagione[s].loading);
   const fonti = useMemo(() => anCostruisciFonti(perStagione, tabelle), [perStagione, tabelle]);
+  const ctxKpi = useMemo(() => ({ widgets, fonti }), [widgets, fonti]);
 
   // ----- selezioni -----
   const seleziona = useCallback((campo, valore) => {
@@ -18096,7 +18310,7 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
     const usati = new Set(["info"]);
     widgets.forEach((w, i) => {
       const f = fonti[w.fonte];
-      const t = anTabellare(w, anDatiWidget(w, f, selezioni), f);
+      const t = anTabellare(w, anDatiWidget(w, f, selezioni, { widgets, fonti }), f);
       const ws = XLSX.utils.aoa_to_sheet([t.intestazioni, ...t.righe]);
       const colPerc = new Set(t.perc || []);
       Object.keys(ws).forEach(ref => { if (ref[0] !== "!" && ws[ref].t === "n") ws[ref].z = colPerc.has(XLSX.utils.decode_cell(ref).c) ? "0.0%" : "#,##0.00"; });
@@ -18139,17 +18353,26 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
     const titolo = (t, xx, yy) => { doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(70); doc.text(anPdfTxt(t), xx, yy, { maxWidth: pieno }); doc.setTextColor(0); doc.setFont("helvetica", "normal"); };
     widgets.forEach(w => {
       const f = fonti[w.fonte];
-      const dati = anDatiWidget(w, f, selezioni);
+      const dati = anDatiWidget(w, f, selezioni, { widgets, fonti });
       const tit = w.titolo || anTitoloAuto(w);
-      const formato = anFormatoMisura((w.misure || [])[0], f, w.formato);
+      const formato = w.kpiRapporto ? "perc" : anFormatoMisura((w.misure || [])[0], f, w.formato);
       if (w.tipo === "kpi" && !dati.errore) {
-        const h = dati.perStag ? 24 : 18;
+        const h = dati.perStag || dati.cmp ? 24 : 18;
         if (x + quarto > W - M + 0.1) aCapo();
         spazio(h);
         doc.setDrawColor(220); doc.roundedRect(x, y, quarto, h, 2, 2);
         titolo(tit, x + 3, y + 5);
         doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.text(anPdfTxt(anFormatta(dati.valore, formato)), x + 3, y + 12); doc.setFont("helvetica", "normal");
-        if (dati.perStag) { doc.setFontSize(7); doc.setTextColor(110); doc.text(anPdfTxt(dati.perStag.map(p => `${p.s}: ${anFormatta(p.v, formato)}`).join("  ")), x + 3, y + 18, { maxWidth: quarto - 6 }); doc.setTextColor(0); }
+        if (dati.cmp) {
+          const c = dati.cmp; const inv = w.kpiMeglio === "basso";
+          const bene = (c.delta > 0) !== inv; const piatto = Math.abs(c.delta) < 1e-7;
+          const dTxt = dati.rapporto ? (c.delta >= 0 ? "+" : "-") + numIT(Math.abs(c.delta), 1) + " p.p." : anFmtDelta(c.delta, formato) + (c.perc !== null ? "  (" + anFmtPerc(c.perc) + ")" : "");
+          doc.setFontSize(8); doc.setFont("helvetica", "bold");
+          if (piatto) doc.setTextColor(110); else if (bene) doc.setTextColor(45, 122, 74); else doc.setTextColor(181, 67, 67);
+          doc.text(anPdfTxt((piatto ? "= " : c.delta > 0 ? "+ " : "- ") + dTxt.replace(/^[+−-]/, "")), x + 3, y + 17.5, { maxWidth: quarto - 6 });
+          doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(110);
+          doc.text(anPdfTxt(`${c.cur.s} vs ${c.prev.s}: ${anFormatta(c.prev.v, formato)}`), x + 3, y + 21.5, { maxWidth: quarto - 6 }); doc.setTextColor(0);
+        } else if (dati.perStag) { doc.setFontSize(7); doc.setTextColor(110); doc.text(anPdfTxt(dati.perStag.map(p => `${p.s}: ${anFormatta(p.v, formato)}`).join("  ")), x + 3, y + 18, { maxWidth: quarto - 6 }); doc.setTextColor(0); }
         x += quarto + G; rigaH = Math.max(rigaH, h);
         return;
       }
@@ -18404,7 +18627,7 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
               onDragOver={e => { if (trascina) e.preventDefault(); }}
               onDrop={e => { if (!trascina) return; e.preventDefault(); if (trascina.a === null) spostaA(trascina.da, widgets.length - 1, true); else spostaA(trascina.da, trascina.a, trascina.dopo); setTrascina(null); }}>
               {widgets.map((w, i) => (
-                <AnWidget key={w.id} w={w} fonte={fonti[w.fonte]} selezioni={selezioni} onSeleziona={seleziona} modifica={modifica} registra={registra}
+                <AnWidget key={w.id} w={w} fonte={fonti[w.fonte]} selezioni={selezioni} onSeleziona={seleziona} modifica={modifica} registra={registra} ctx={ctxKpi}
                   drag={dragDi(i)} onRidimensiona={(dim) => ridimensiona(i, dim)}
                   strumenti={(
                     <span className="an-w-tools">
@@ -18424,7 +18647,7 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
         </div>
       )}
 
-      {editor && <AnEditor iniziale={editor} fonti={fonti} selezioni={selezioni} onSalva={salvaWidget} onChiudi={() => setEditor(null)} />}
+      {editor && <AnEditor iniziale={editor} fonti={fonti} selezioni={selezioni} widgets={widgets} onSalva={salvaWidget} onChiudi={() => setEditor(null)} />}
       {importa && <AnImport esistente={importa.id ? importa : null} onChiudi={() => setImporta(null)} onToast={onToast} />}
       {anteprimaTab && tabelle[anteprimaTab] && (() => {
         const f = fonti["tab:" + anteprimaTab];
