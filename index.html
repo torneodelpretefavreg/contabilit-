@@ -998,7 +998,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.46.0";
+const APP_VERSION = "3.47.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -6595,7 +6595,7 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast }) 
 // ============================================================
 // PAGINA: EXPORT
 // ============================================================
-function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, categorieRF, bu }) {
+function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, categorieRF, bu, stagioniDisponibili }) {
   const [busy, setBusy] = useState(false);
   const [lastAction, setLastAction] = useState(null);
 
@@ -6747,6 +6747,30 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         precAttivo ? { R: precAttivo.rfRicl, stagione: precAttivo.stagione, variazioni: precAttivo.variazioni } : null);
       doc.save(`Rendiconto_Riclassificato_${stagione}${precAttivo ? "_vs_" + precAttivo.stagione + (precAttivo.variazioni ? "_variazioni" : "") : ""}${conDettaglio ? "_conti" : ""}.pdf`);
       setLastAction("Rendiconto Riclassificato generato" + suffConfronto);
+    } catch (e) { alert("Errore: " + e.message); }
+    finally { setBusy(false); }
+  };
+  // ---------- indici di bilancio: stesse scelte e commento della scheda "Indici" ----------
+  const [impIdx] = useImpostazioniIndici(stagione);
+  const confrontoIdx = useMemo(() => {
+    const altre = (stagioniDisponibili || []).filter(s => s !== stagione);
+    const p = stagionePrecedenteDi(stagione);
+    return impIdx && Array.isArray(impIdx.confronto) ? impIdx.confronto.filter(s => altre.includes(s)) : (altre.includes(p) ? [p] : []);
+  }, [impIdx, stagioniDisponibili, stagione]);
+  const { calcolate: calcIdx, inCaricamento: caricIdx } = useStagioniCalcolate(confrontoIdx, schemaBilancio, contiMap);
+  const datiIndici = () => {
+    const colonne = [{ label: stagione, g: grandezzeBilancio({ prospetti: prospettiSchema, rfDir: rfDirSchema, rfRicl: rfRiclSchema }) },
+      ...confrontoIdx.slice().sort().reverse().map(s => ({ label: s, g: grandezzeBilancio(calcIdx[s]) }))];
+    return { colonne, gruppi: tabellaIndici(impIdx || {}, colonne), commento: (impIdx && impIdx.commento) || "" };
+  };
+  const exportIndiciPDF = () => {
+    if (!rfRiclSchema) return;
+    setBusy(true);
+    try {
+      const d = datiIndici();
+      const doc = generaPdfIndici({ stagione, ...d });
+      doc.save(`Indici_di_bilancio_${stagione}${confrontoIdx.length ? "_vs_" + confrontoIdx.join("_") : ""}.pdf`);
+      setLastAction("Indici di bilancio generati");
     } catch (e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
   };
@@ -7119,8 +7143,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         "6.  Riepilogo per Business Unit",
         "7.  Libro Cespiti",
         "8.  Elenco Movimenti",
+        "9.  Indici di bilancio",
       ];
-      indice.forEach((s, i) => doc.text(s, 35, 125 + i * 7));
+      indice.forEach((s, i) => doc.text(s, 35, 125 + i * 6.5));
 
       // KPI di sintesi nel frontespizio
       doc.setFontSize(11); doc.setFont("helvetica","bold");
@@ -7358,6 +7383,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         headStyles: { fillColor: [26,26,26], textColor: 240, fontStyle: "bold", fontSize: 7 },
         columnStyles: { 6: { halign: "right" } },
       });
+
+      // === 9. INDICI DI BILANCIO (con il commento scritto nell'app) ===
+      if (rfRiclSchema) {
+        doc.addPage("a4", "portrait");
+        const di = datiIndici();
+        generaPdfIndici({ stagione, ...di, doc, titolo: "9. Indici di bilancio" });
+      }
 
       // === FOOTER su tutte le pagine ===
       const totPages = doc.internal.getNumberOfPages();
@@ -7721,6 +7753,27 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       XLSX.utils.book_append_sheet(wb, foglioSP(prospettiSchema), "Stato Patrimoniale");
       XLSX.utils.book_append_sheet(wb, foglioCE(prospettiSchema), "Conto Economico");
       XLSX.utils.book_append_sheet(wb, foglioRF(rfDirSchema), "Rendiconto Finanziario");
+      // Indici di bilancio (stesse scelte della scheda Indici), valori numerici con il formato giusto per riga
+      {
+        const di = datiIndici();
+        const aoa = [["INDICI DI BILANCIO"], [`Futsal Fabbrico ASD · Stagione ${stagione}`], [], ["Indice", "Formula", ...di.colonne.map(c => c.label)]];
+        const formati = [];
+        di.gruppi.forEach(g => {
+          aoa.push([g.nome.toUpperCase()]); formati.push(null);
+          g.righe.forEach(r => { aoa.push([r.nome, r.formula, ...r.valori.map(v => v === null || !isFinite(v) ? "n.d." : v)]); formati.push(r.unita); });
+        });
+        if (di.commento.trim()) { aoa.push([]); aoa.push(["Commento"]); aoa.push([di.commento]); }
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        ws["!cols"] = [{ wch: 38 }, { wch: 44 }, ...di.colonne.map(() => ({ wch: 14 }))];
+        formati.forEach((u, i) => {
+          if (!u) return;
+          di.colonne.forEach((_, j) => {
+            const c = ws[XLSX.utils.encode_cell({ r: 4 + i, c: 2 + j })];
+            if (c && typeof c.v === "number") c.z = u === "%" ? "0.0%" : u === "x" ? '0.00"x"' : u === "mesi" ? '0.0" mesi"' : "#,##0";
+          });
+        });
+        XLSX.utils.book_append_sheet(wb, ws, "Indici");
+      }
 
       // Raccordo voce di bilancio -> conti del piano dei conti
       const voceDiConto = {};
@@ -7911,6 +7964,17 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <button className="btn" onClick={exportRFUfficialePDF} disabled={busy || !rfDirSchema}>
             {!rfDirSchema ? "Caricamento…" : "PDF"}
           </button>
+        </div>
+        <div className="card">
+          <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
+            <h3 className="card-title" style={{margin:0}}>📐 Indici di bilancio</h3>
+            <span className="pill" style={{background:"var(--ink)", borderColor:"var(--ink)", color:"#fff", fontSize:9.5}}>SCHEMA DI BILANCIO</span>
+          </div>
+          <p style={{fontSize:12.5, color:"var(--ink-2)", margin:"0 0 12px"}}>
+            Redditività, solidità, liquidità e flussi di cassa{confrontoIdx.length ? `, a confronto con ${confrontoIdx.join(", ")}` : ""}, con il tuo commento in fondo.
+            Indici, anni e commento si scelgono in Schema di Bilancio → Indici.
+          </p>
+          <button className="btn" onClick={exportIndiciPDF} disabled={busy || !rfRiclSchema || caricIdx}>{!rfRiclSchema || caricIdx ? "Caricamento…" : "PDF"}</button>
         </div>
         <div className="card">
           <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:6, flexWrap:"wrap"}}>
@@ -16146,7 +16210,396 @@ function SBEditorArea({ area, api, categorieTutte, assegnateAltrove }) {
 
 // ---------- PAGINA ----------
 
-function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast }) {
+// ============================================================
+// INDICI DI BILANCIO — analisi per indici sui prospetti dello schema
+// ============================================================
+// Le grandezze di base si leggono dai prospetti dello Schema di Bilancio e dal
+// RF Riclassificato; gli indici sono rapporti fra queste grandezze. Le altre
+// stagioni si ricalcolano con lo schema della stagione aperta (come il confronto
+// dei prospetti), cosi' i valori sono omogenei.
+const IDX_PATH = (stag) => `stagioni/${stag}/analisiIndici`;
+
+function calcolaBilancioStagione(schema, movs, si, cm) {
+  const mast = calcolaMastrini(generaLibroGiornale(movs, si, cm));
+  const mastIni = calcolaMastrini(generaLibroGiornale(movs.filter(isAperturaMov), si, cm));
+  const prospetti = calcolaProspetti(schema, mast);
+  const rfDir = rendicontoDiretto(schema, movs, si);
+  const rfRicl = rendicontoRiclassificato(schema, prospetti, mast, mastIni, cm);
+  return { prospetti, rfDir, rfRicl };
+}
+
+// Carica e calcola le stagioni richieste (dati letti una volta sola per stagione)
+function useStagioniCalcolate(stagioni, schema, contiMap) {
+  const [raw, setRaw] = useState({});
+  const richiesteRef = useRef(new Set());
+  const chiave = (stagioni || []).slice().sort().join("|");
+  useEffect(() => {
+    if (!firebaseReady) return;
+    (stagioni || []).forEach(s => {
+      if (!s || richiesteRef.current.has(s)) return;
+      richiesteRef.current.add(s);
+      Promise.all(["movimenti", "saldiIniziali", "conti"].map(n => db.ref(`stagioni/${s}/${n}`).once("value")))
+        .then(([mv, si, ct]) => {
+          const r = intervalloStagione(s);
+          const movs = Object.entries(mv.val() || {}).map(([k, m]) => ({ ...m, _id: k }))
+            .filter(m => !r || !m.data || (m.data >= r.da && m.data <= r.a));
+          setRaw(p => ({ ...p, [s]: { movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}) } }));
+        })
+        .catch(() => setRaw(p => ({ ...p, [s]: { errore: true } })));
+    });
+  }, [chiave]);
+  const calcolate = useMemo(() => {
+    const out = {};
+    if (!schema) return out;
+    (stagioni || []).forEach(s => {
+      const d = raw[s];
+      if (!d || d.errore || !d.movimenti.length) return;
+      const cm = {};
+      d.conti.forEach(c => { if (c) cm[c.codice] = c; });
+      Object.values(contiMap || {}).forEach(c => { if (!cm[c.codice]) cm[c.codice] = c; });
+      out[s] = calcolaBilancioStagione(schema, d.movimenti, d.saldiIniziali, cm);
+    });
+    return out;
+  }, [raw, schema, contiMap, chiave]);
+  const inCaricamento = (stagioni || []).some(s => !raw[s]);
+  return { calcolate, inCaricamento };
+}
+
+// Impostazioni salvate per stagione: indici scelti, indici personalizzati, anni a confronto, commento
+function useImpostazioniIndici(stagione) {
+  const [imp, setImp] = useState(null);
+  useEffect(() => {
+    if (!firebaseReady || !stagione) { setImp({}); return; }
+    const ref = db.ref(IDX_PATH(stagione));
+    const cb = ref.on("value", snap => setImp(snap.val() || {}));
+    return () => ref.off("value", cb);
+  }, [stagione]);
+  const salva = (patch) => {
+    setImp(p => ({ ...(p || {}), ...patch }));
+    if (firebaseReady && stagione) db.ref(IDX_PATH(stagione)).update({ ...patch, aggiornatoIl: new Date().toISOString() }).catch(() => {});
+  };
+  return [imp, salva];
+}
+
+// Grandezze di base (valori assoluti, in euro)
+const IDX_GRANDEZZE = [
+  ["ricavi", "Ricavi operativi"], ["costiOp", "Costi operativi"], ["ebitda", "EBITDA"], ["ammortamenti", "Ammortamenti e svalutazioni"],
+  ["ebit", "EBIT"], ["oneriFin", "Oneri finanziari netti"], ["imposte", "Imposte"], ["risultato", "Risultato d'esercizio"],
+  ["totAttivo", "Totale attivo"], ["immobilizzazioni", "Immobilizzazioni"], ["attivoCirc", "Attivo circolante"], ["crediti", "Crediti"],
+  ["liquidita", "Disponibilità liquide finali"], ["liquiditaIni", "Disponibilità liquide iniziali"], ["pn", "Patrimonio netto"],
+  ["fondi", "Fondi rischi e oneri"], ["debiti", "Debiti"],
+  ["flussoOp", "Flusso di cassa operativo"], ["investimenti", "Investimenti"], ["fcff", "Free cash flow operativo (FCFF)"],
+  ["varLiquidita", "Variazione della liquidità"],
+];
+function grandezzeBilancio(calc) {
+  if (!calc || !calc.prospetti || !calc.rfRicl) return null;
+  const pr = calc.prospetti, R = calc.rfRicl;
+  const cls = (lato, re) => (pr.sp || []).filter(c => c.lato === lato && re.test(c.nome || ""));
+  const tot = (l) => l.reduce((s, c) => s + (Number(c.totale) || 0), 0);
+  const immob = cls("attivo", /immobilizz/i);
+  const circ = cls("attivo", /circolante/i);
+  const crediti = (pr.sp || []).filter(c => c.lato === "attivo").reduce((s, c) => {
+    if (/credit/i.test(c.nome || "")) return s + (Number(c.totale) || 0);
+    return s + (c.voci || []).filter(v => /credit/i.test(v.nome || "")).reduce((a, v) => a + (Number(v.valore) || 0), 0);
+  }, 0);
+  return {
+    ricavi: R.ricavi, costiOp: -R.costi, ebitda: R.ebitda, ammortamenti: -R.da, ebit: R.ebit,
+    oneriFin: -R.finanziaria, imposte: -R.imposte, risultato: R.risultato,
+    totAttivo: pr.totAttivo, immobilizzazioni: tot(immob), attivoCirc: tot(circ), crediti,
+    liquidita: R.liqFin, liquiditaIni: R.liqIni,
+    pn: tot(cls("passivo", /patrimonio/i)), fondi: tot(cls("passivo", /fondi/i)), debiti: tot(cls("passivo", /debit/i)),
+    flussoOp: R.flussoOperativo, investimenti: -R.investimenti, fcff: R.fcff, varLiquidita: R.variazione,
+  };
+}
+
+const idxDiv = (a, b) => (Math.abs(Number(b) || 0) > 0.005 ? (Number(a) || 0) / b : null);
+// unita: "%" (rapporto x100) · "x" (volte) · "€" · "mesi"; meglio: "alto" | "basso" | null
+const IDX_CATALOGO = [
+  { id: "margine_ebitda", gruppo: "Redditività", nome: "Margine EBITDA", formula: "EBITDA / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.ebitda, g.ricavi) },
+  { id: "margine_ebit", gruppo: "Redditività", nome: "Margine operativo (ROS)", formula: "EBIT / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.ebit, g.ricavi) },
+  { id: "margine_netto", gruppo: "Redditività", nome: "Margine netto", formula: "Risultato / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.risultato, g.ricavi) },
+  { id: "roe", gruppo: "Redditività", nome: "ROE", formula: "Risultato / Patrimonio netto", unita: "%", meglio: "alto", f: g => idxDiv(g.risultato, g.pn) },
+  { id: "roi", gruppo: "Redditività", nome: "ROI", formula: "EBIT / Totale attivo", unita: "%", meglio: "alto", f: g => idxDiv(g.ebit, g.totAttivo) },
+  { id: "incidenza_costi", gruppo: "Redditività", nome: "Incidenza costi operativi", formula: "Costi operativi / Ricavi operativi", unita: "%", meglio: "basso", f: g => idxDiv(g.costiOp, g.ricavi) },
+  { id: "incidenza_amm", gruppo: "Redditività", nome: "Incidenza ammortamenti", formula: "Ammortamenti / Ricavi operativi", unita: "%", meglio: null, f: g => idxDiv(g.ammortamenti, g.ricavi) },
+  { id: "indip_fin", gruppo: "Solidità patrimoniale", nome: "Indipendenza finanziaria", formula: "Patrimonio netto / Totale passivo e PN", unita: "%", meglio: "alto", f: g => idxDiv(g.pn, g.totAttivo) },
+  { id: "leverage", gruppo: "Solidità patrimoniale", nome: "Leverage", formula: "Totale attivo / Patrimonio netto", unita: "x", meglio: "basso", f: g => idxDiv(g.totAttivo, g.pn) },
+  { id: "debiti_attivo", gruppo: "Solidità patrimoniale", nome: "Peso dei debiti", formula: "Debiti / Totale attivo", unita: "%", meglio: "basso", f: g => idxDiv(g.debiti, g.totAttivo) },
+  { id: "copertura_imm", gruppo: "Solidità patrimoniale", nome: "Copertura delle immobilizzazioni", formula: "Patrimonio netto / Immobilizzazioni", unita: "x", meglio: "alto", f: g => idxDiv(g.pn, g.immobilizzazioni) },
+  { id: "margine_struttura", gruppo: "Solidità patrimoniale", nome: "Margine di struttura", formula: "Patrimonio netto − Immobilizzazioni", unita: "€", meglio: "alto", f: g => g.pn - g.immobilizzazioni },
+  { id: "current_ratio", gruppo: "Liquidità", nome: "Indice di disponibilità (current ratio)", formula: "Attivo circolante / Debiti", unita: "x", meglio: "alto", f: g => idxDiv(g.attivoCirc, g.debiti) },
+  { id: "quick_ratio", gruppo: "Liquidità", nome: "Liquidità immediata (quick ratio)", formula: "Disponibilità liquide / Debiti", unita: "x", meglio: "alto", f: g => idxDiv(g.liquidita, g.debiti) },
+  { id: "margine_tesoreria", gruppo: "Liquidità", nome: "Margine di tesoreria", formula: "Liquidità + Crediti − Debiti", unita: "€", meglio: "alto", f: g => g.liquidita + g.crediti - g.debiti },
+  { id: "autonomia", gruppo: "Liquidità", nome: "Mesi di autonomia", formula: "Liquidità / costi operativi medi mensili", unita: "mesi", meglio: "alto", f: g => idxDiv(g.liquidita, g.costiOp / 12) },
+  { id: "peso_liquidita", gruppo: "Liquidità", nome: "Peso della liquidità", formula: "Disponibilità liquide / Totale attivo", unita: "%", meglio: null, f: g => idxDiv(g.liquidita, g.totAttivo) },
+  { id: "flusso_op", gruppo: "Flussi di cassa", nome: "Flusso di cassa operativo", formula: "dal RF Riclassificato", unita: "€", meglio: "alto", f: g => g.flussoOp },
+  { id: "cash_conv", gruppo: "Flussi di cassa", nome: "Conversione in cassa", formula: "Flusso di cassa operativo / EBITDA", unita: "%", meglio: "alto", f: g => idxDiv(g.flussoOp, g.ebitda) },
+  { id: "fcff", gruppo: "Flussi di cassa", nome: "Free cash flow operativo", formula: "Flusso operativo − Investimenti", unita: "€", meglio: "alto", f: g => g.fcff },
+  { id: "invest_ricavi", gruppo: "Flussi di cassa", nome: "Investimenti su ricavi", formula: "Investimenti / Ricavi operativi", unita: "%", meglio: null, f: g => idxDiv(g.investimenti, g.ricavi) },
+  { id: "copertura_inv", gruppo: "Flussi di cassa", nome: "Copertura degli investimenti", formula: "Flusso di cassa operativo / Investimenti", unita: "x", meglio: "alto", f: g => idxDiv(g.flussoOp, g.investimenti) },
+  { id: "var_liq", gruppo: "Flussi di cassa", nome: "Variazione della liquidità", formula: "Liquidità finale − iniziale", unita: "€", meglio: "alto", f: g => g.varLiquidita },
+];
+const IDX_DEFAULT = ["margine_ebitda", "margine_netto", "roe", "indip_fin", "current_ratio", "quick_ratio", "autonomia", "cash_conv", "fcff", "invest_ricavi"];
+const IDX_UNITA_PERS = [["%", "Rapporto in %"], ["x", "Rapporto (volte)"], ["€", "Differenza in €"]];
+
+function fmtIndice(v, unita, pdf) {
+  if (v === null || v === undefined || !isFinite(v)) return "n.d.";
+  const s = unita === "%" ? numIT(v * 100, 1) + "%"
+    : unita === "x" ? numIT(v, 2) + "x"
+    : unita === "mesi" ? numIT(v, 1) + " mesi"
+    : (pdf ? "" : "€ ") + numIT(Math.round(v), 0);
+  return pdf ? s.replace(/−/g, "-") : s;
+}
+// indicatore personalizzato: { id, nome, a, b, unita } → a/b (%, x) oppure a − b (€)
+function idxDaPersonalizzato(p) {
+  return {
+    id: p.id, gruppo: "Indicatori personalizzati", nome: p.nome || "Indicatore", personalizzato: true, unita: p.unita || "%", meglio: p.meglio || null,
+    formula: `${(IDX_GRANDEZZE.find(x => x[0] === p.a) || [0, "?"])[1]} ${p.unita === "€" ? "−" : "/"} ${p.b ? (IDX_GRANDEZZE.find(x => x[0] === p.b) || [0, "?"])[1] : (p.unita === "€" ? "0" : "1")}`,
+    f: g => p.unita === "€" ? (g[p.a] || 0) - (p.b ? g[p.b] || 0 : 0) : (p.b ? idxDiv(g[p.a], g[p.b]) : g[p.a]),
+  };
+}
+
+// Tabella indici: righe per gruppo, una colonna per stagione (la prima e' quella aperta)
+function tabellaIndici(imp, colonne) {
+  const sel = (imp && Array.isArray(imp.selezionati)) ? imp.selezionati : IDX_DEFAULT;
+  const pers = ((imp && imp.personalizzati) || []).filter(Boolean).map(idxDaPersonalizzato);
+  const elenco = [...IDX_CATALOGO.filter(i => sel.includes(i.id)), ...pers];
+  const gruppi = [];
+  elenco.forEach(i => {
+    let g = gruppi.find(x => x.nome === i.gruppo);
+    if (!g) { g = { nome: i.gruppo, righe: [] }; gruppi.push(g); }
+    g.righe.push({ ...i, valori: colonne.map(c => c.g ? i.f(c.g) : null) });
+  });
+  return gruppi;
+}
+
+function generaPdfIndici({ stagione, colonne, gruppi, commento, doc: docEsistente, titolo }) {
+  const b = creaPdfBuilder(stagione, "portrait", docEsistente);
+  const doc = b.doc;
+  if (docEsistente) {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+    doc.text(titolo || "Indici di bilancio", 14, 18);
+    doc.setDrawColor(26, 26, 26); doc.line(14, 21, doc.internal.pageSize.width - 14, 21);
+  } else b.intestazioneP("Indici di bilancio");
+  const body = [];
+  gruppi.forEach(g => {
+    body.push([{ content: g.nome.toUpperCase(), colSpan: 2 + colonne.length, styles: { fontStyle: "bold", fillColor: b.NERO, textColor: 240 } }]);
+    g.righe.forEach(r => {
+      const celle = r.valori.map((v, i) => {
+        const st = { halign: "right", fontStyle: i === 0 ? "bold" : "normal" };
+        if (i > 0) st.textColor = [110, 110, 110];
+        if (i === 0 && r.meglio && r.valori.length > 1 && v !== null && r.valori[1] !== null && Math.abs(v - r.valori[1]) > 1e-9) {
+          const bene = (v > r.valori[1]) === (r.meglio === "alto");
+          st.textColor = bene ? [45, 122, 74] : [181, 67, 67];
+        }
+        return { content: fmtIndice(v, r.unita, true), styles: st };
+      });
+      body.push([{ content: r.nome, styles: { fontStyle: "bold" } }, { content: r.formula.replace(/−/g, "-"), styles: { fontSize: 7, textColor: [120, 120, 120] } }, ...celle]);
+    });
+  });
+  const W = doc.internal.pageSize.width;
+  const wVal = colonne.length > 2 ? 22 : 26;
+  doc.autoTable({
+    startY: docEsistente ? 26 : 36, head: [["Indice", "Formula", ...colonne.map(c => c.label)]], body, theme: "plain",
+    styles: { fontSize: 8.5, cellPadding: 1.8, valign: "middle" },
+    headStyles: { fillColor: b.VERDE, textColor: 240, fontStyle: "bold" },
+    columnStyles: Object.assign({ 0: { cellWidth: 58 }, 1: { cellWidth: W - 28 - 58 - wVal * colonne.length } },
+      ...colonne.map((_, i) => ({ [2 + i]: { cellWidth: wVal, halign: "right" } }))),
+    didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 1) dd.cell.styles.halign = "right"; },
+    margin: { left: 14, right: 14 },
+  });
+  let y = doc.lastAutoTable.finalY + 6;
+  doc.setFont("helvetica", "italic"); doc.setFontSize(7.5); doc.setTextColor(120);
+  doc.text("Valori calcolati sui prospetti dello Schema di Bilancio; le altre stagioni sono ricalcolate con lo schema della stagione " + stagione + ". In verde/rosso il miglioramento o peggioramento rispetto alla colonna successiva.", 14, y, { maxWidth: W - 28 });
+  doc.setTextColor(0); y += 10;
+  if (commento && commento.trim()) {
+    if (y > doc.internal.pageSize.height - 40) { doc.addPage(); y = 20; }
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.text("Commento", 14, y); y += 6;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9.5);
+    const righe = doc.splitTextToSize(commento.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/−/g, "-"), W - 28);
+    righe.forEach(t => { if (y > doc.internal.pageSize.height - 15) { doc.addPage(); y = 20; } doc.text(t, 14, y); y += 4.6; });
+  }
+  return doc;
+}
+
+// Scheda "Indici" della pagina Schema di Bilancio
+function SBIndici({ schema, stagione, stagioniDisponibili, corrente, contiMap, onToast }) {
+  const [imp, salva] = useImpostazioniIndici(stagione);
+  const [gestisci, setGestisci] = useState(false);
+  const [bozzaCommento, setBozzaCommento] = useState(null);
+  const [vediGrandezze, setVediGrandezze] = useState(false);
+  const altre = (stagioniDisponibili || []).filter(s => s !== stagione).sort().reverse();
+  const precDefault = stagionePrecedenteDi(stagione);
+  const confronto = imp && Array.isArray(imp.confronto) ? imp.confronto.filter(s => altre.includes(s))
+    : (altre.includes(precDefault) ? [precDefault] : []);
+  const { calcolate, inCaricamento } = useStagioniCalcolate(confronto, schema, contiMap);
+  if (!imp) return <div className="empty-state">Caricamento indici…</div>;
+  const colonne = [{ label: stagione, g: grandezzeBilancio(corrente) },
+    ...confronto.slice().sort().reverse().map(s => ({ label: s, g: grandezzeBilancio(calcolate[s]) }))];
+  const gruppi = tabellaIndici(imp, colonne);
+  const sel = Array.isArray(imp.selezionati) ? imp.selezionati : IDX_DEFAULT;
+  const pers = (imp.personalizzati || []).filter(Boolean);
+  const commento = bozzaCommento !== null ? bozzaCommento : (imp.commento || "");
+  const commentoSporco = bozzaCommento !== null && bozzaCommento !== (imp.commento || "");
+  const salvaCommento = () => { salva({ commento: bozzaCommento || "" }); setBozzaCommento(null); onToast && onToast("Commento salvato"); };
+  const toggleIdx = (id) => salva({ selezionati: sel.includes(id) ? sel.filter(x => x !== id) : [...sel, id] });
+  const toggleStag = (s) => salva({ confronto: confronto.includes(s) ? confronto.filter(x => x !== s) : [...confronto, s] });
+  const setPers = (arr) => salva({ personalizzati: arr });
+  const pdf = () => {
+    const doc = generaPdfIndici({ stagione, colonne, gruppi, commento: imp.commento || "" });
+    doc.save(`Indici_di_bilancio_${stagione}${confronto.length ? "_vs_" + confronto.join("_") : ""}.pdf`);
+  };
+  const cellaCls = (r, i) => {
+    if (i !== 0 || !r.meglio || r.valori.length < 2) return "";
+    const v = r.valori[0], p = r.valori[1];
+    if (v === null || p === null || Math.abs(v - p) < 1e-9) return "";
+    return (v > p) === (r.meglio === "alto") ? "pos" : "neg";
+  };
+  const freccia = (r) => {
+    if (r.valori.length < 2) return null;
+    const v = r.valori[0], p = r.valori[1];
+    if (v === null || p === null || Math.abs(v - p) < 1e-9) return null;
+    return v > p ? "▲" : "▼";
+  };
+  const gruppiCat = [...new Set(IDX_CATALOGO.map(i => i.gruppo))];
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="card" style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ flex: "1 1 260px" }}>
+          <div className="card-title" style={{ margin: 0 }}>Indici di bilancio · {stagione}</div>
+          <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 4, lineHeight: 1.5 }}>
+            Calcolati sui prospetti di questo schema e sul RF Riclassificato. Le stagioni a confronto sono ricalcolate con lo stesso schema.
+            Scelte e commento si salvano per la stagione e valgono anche per l'export.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
+          <span style={{ color: "var(--ink-3)", fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em" }}>Confronta con</span>
+          {altre.length === 0 && <span style={{ color: "var(--ink-3)" }}>nessun'altra stagione</span>}
+          {altre.map(s => (
+            <label key={s} style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+              <input type="checkbox" checked={confronto.includes(s)} onChange={() => toggleStag(s)} /> {s}
+            </label>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className={"btn " + (gestisci ? "" : "ghost")} onClick={() => setGestisci(x => !x)}>⚙ Scegli indici</button>
+          <button className="btn accent" onClick={pdf}>↧ PDF indici</button>
+        </div>
+      </div>
+
+      {gestisci && (
+        <div className="card">
+          <div className="card-title">Indici da mostrare</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 14 }}>
+            {gruppiCat.map(g => (
+              <div key={g}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", marginBottom: 6 }}>{g}</div>
+                {IDX_CATALOGO.filter(i => i.gruppo === g).map(i => (
+                  <label key={i.id} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 13, marginBottom: 5, cursor: "pointer" }}>
+                    <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggleIdx(i.id)} style={{ marginTop: 2 }} />
+                    <span>{i.nome}<br /><span style={{ fontSize: 11, color: "var(--ink-3)" }}>{i.formula}</span></span>
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button className="btn ghost sm" onClick={() => salva({ selezionati: IDX_CATALOGO.map(i => i.id) })}>Tutti</button>
+            <button className="btn ghost sm" onClick={() => salva({ selezionati: IDX_DEFAULT })}>Selezione base</button>
+            <button className="btn ghost sm" onClick={() => salva({ selezionati: [] })}>Nessuno</button>
+          </div>
+
+          <div className="card-title" style={{ marginTop: 18 }}>Indicatori personalizzati</div>
+          <div style={{ fontSize: 12, color: "var(--ink-3)", marginBottom: 8 }}>
+            Crea un indicatore tuo scegliendo due grandezze: rapporto in %, rapporto in "volte" oppure differenza in euro.
+          </div>
+          {pers.map((p, i) => {
+            const upd = (patch) => setPers(pers.map((x, j) => j === i ? { ...x, ...patch } : x));
+            return (
+              <div key={p.id} style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+                <input value={p.nome || ""} placeholder="Nome indicatore" onChange={e => upd({ nome: e.target.value })} style={{ minWidth: 180 }} />
+                <select value={p.a || ""} onChange={e => upd({ a: e.target.value })}>{IDX_GRANDEZZE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                <select value={p.unita || "%"} onChange={e => upd({ unita: e.target.value })}>
+                  {IDX_UNITA_PERS.map(([k, l]) => <option key={k} value={k}>{k === "€" ? "−" : "÷"} ({l})</option>)}
+                </select>
+                <select value={p.b || ""} onChange={e => upd({ b: e.target.value })}>
+                  <option value="">{(p.unita || "%") === "€" ? "(niente)" : "(nessuno: valore)"}</option>
+                  {IDX_GRANDEZZE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                </select>
+                <select value={p.meglio || ""} onChange={e => upd({ meglio: e.target.value })} title="Quando l'indicatore migliora">
+                  <option value="">neutro</option><option value="alto">meglio se sale</option><option value="basso">meglio se scende</option>
+                </select>
+                <button className="btn danger sm" onClick={() => setPers(pers.filter((_, j) => j !== i))}>✕</button>
+              </div>
+            );
+          })}
+          <button className="btn ghost sm" onClick={() => setPers([...pers, { id: "p" + Date.now().toString(36), nome: "", a: "ricavi", b: "totAttivo", unita: "%", meglio: "" }])}>+ Indicatore personalizzato</button>
+        </div>
+      )}
+
+      <div className="card" style={{ overflowX: "auto" }}>
+        {inCaricamento && <div style={{ fontSize: 12, color: "var(--ink-3)", marginBottom: 8 }}>Carico le stagioni a confronto…</div>}
+        {!gruppi.length ? <div className="empty-state">Nessun indice selezionato: usa «Scegli indici».</div> : (
+          <table className="tbl" style={{ minWidth: 560 }}>
+            <thead>
+              <tr><th>Indice</th><th style={{ color: "var(--ink-3)", fontWeight: 500 }}>Formula</th>
+                {colonne.map((c, i) => <th key={c.label} className="num">{c.label}{i > 0 && !c.g ? " …" : ""}</th>)}</tr>
+            </thead>
+            <tbody>
+              {gruppi.map(g => (
+                <React.Fragment key={g.nome}>
+                  <tr><td colSpan={2 + colonne.length} style={{ fontFamily: "'Fraunces',serif", fontSize: 14, paddingTop: 14, borderBottom: "1px solid var(--rule-2)" }}>{g.nome}</td></tr>
+                  {g.righe.map(r => (
+                    <tr key={r.id}>
+                      <td style={{ fontWeight: 600 }}>{r.nome}</td>
+                      <td style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{r.formula}</td>
+                      {r.valori.map((v, i) => (
+                        <td key={i} className={"num " + cellaCls(r, i)} style={{ fontWeight: i === 0 ? 700 : 400, color: i === 0 ? undefined : "var(--ink-3)", whiteSpace: "nowrap" }}>
+                          {i === 0 && freccia(r) ? <span style={{ fontSize: 10, marginRight: 4 }}>{freccia(r)}</span> : null}{fmtIndice(v, r.unita)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div style={{ marginTop: 10 }}>
+          <button className="btn ghost sm" onClick={() => setVediGrandezze(x => !x)}>{vediGrandezze ? "▾" : "▸"} Grandezze di base usate nei calcoli</button>
+        </div>
+        {vediGrandezze && (
+          <table className="tbl" style={{ marginTop: 8, minWidth: 460 }}>
+            <thead><tr><th>Grandezza</th>{colonne.map(c => <th key={c.label} className="num">{c.label}</th>)}</tr></thead>
+            <tbody>
+              {IDX_GRANDEZZE.map(([k, l]) => (
+                <tr key={k}><td>{l}</td>{colonne.map((c, i) => <td key={i} className="num" style={{ color: i ? "var(--ink-3)" : undefined }}>{c.g ? fmtIndice(c.g[k], "€") : "…"}</td>)}</tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <div className="card-title" style={{ margin: 0 }}>Commento all'analisi</div>
+          <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
+            {commentoSporco ? "Modifiche non salvate" : imp.aggiornatoIl ? "Salvato il " + new Date(imp.aggiornatoIl).toLocaleString("it-IT") : ""}
+          </span>
+        </div>
+        <textarea value={commento} onChange={e => setBozzaCommento(e.target.value)} rows={7}
+          placeholder="Scrivi qui il tuo commento sugli indici: andamento, punti di forza, criticità, azioni per la prossima stagione… Esce in fondo al PDF."
+          style={{ width: "100%", marginTop: 10, fontFamily: "inherit", fontSize: 14, lineHeight: 1.5, padding: 10, boxSizing: "border-box" }} />
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <button className="btn accent" disabled={!commentoSporco} onClick={salvaCommento}>Salva commento</button>
+          {commentoSporco && <button className="btn ghost" onClick={() => setBozzaCommento(null)}>Annulla</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast, stagioniDisponibili }) {
   const [tab, setTab] = useState("sp");   // sp | ce | rf | rfr | prospetti | controlli
   const [schema, setSchema] = useState(null);
   const [esclusi, setEsclusi] = useState([]);
@@ -16722,7 +17175,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
       <div className="filters" style={{ marginBottom: 14, display: "flex", gap: 6, flexWrap: "wrap" }}>
         {[["sp", "Struttura SP"], ["ce", "Struttura CE"], ["rf", "Struttura RF"], ["rfr", "RF Riclassificato"],
-          ["prospetti", "Anteprima prospetti"],
+          ["prospetti", "Anteprima prospetti"], ["indici", "Indici"],
           ["controlli", `Controlli${controlli.mancanti.length + controlli.doppi.length > 0 ? " ⚠" : ""}`]]
           .map(([k, label]) => (
             <button key={k} className={"btn " + (tab === k ? "" : "ghost")} onClick={() => setTab(k)}>{label}</button>
@@ -17031,6 +17484,11 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
               indiretto resta solo come controllo, nella scheda Controlli. */}
           <SBRfRiclassificato R={rfRicl} Rp={conf ? calcPrec.rfRicl : null} precStagione={calcPrec ? calcPrec.stagione : ""} variazioni={variazioni} stagione={stagione} />
         </div>
+      )}
+
+      {tab === "indici" && (
+        <SBIndici schema={schema} stagione={stagione} stagioniDisponibili={stagioniDisponibili}
+          corrente={{ prospetti, rfDir, rfRicl }} contiMap={contiMap} onToast={onToast} />
       )}
 
       {tab === "controlli" && (
@@ -19375,13 +19833,13 @@ function App() {
               {page === "crediti" && <PageCrediti conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} bu={bu} onToast={showToast} />}
               {page === "libro" && <PageLibroGiornale conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} />}
               {page === "bilancio" && <PageBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} />}
-              {page === "schema" && <PageSchemaBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
+              {page === "schema" && <PageSchemaBilancio conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} stagioniDisponibili={stagioniDisponibili} />}
               {page === "chiusura" && <PageChiusuraMensile conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} bu={bu} categorieRF={categorieRF} onToast={showToast} />}
               {page === "rf" && <PageRendiconto conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} onToast={showToast} />}
               {page === "controller" && <PageController conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "budget" && <PageBudget conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} bu={bu} stagione={stagione} onToast={showToast} />}
               {page === "snapshot" && <PageSnapshot conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
-              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} bu={bu} />}
+              {page === "export" && <PageExport conti={conti} movimenti={movimenti} cespiti={cespiti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorieRF={categorieRF} bu={bu} stagioniDisponibili={stagioniDisponibili} />}
               {page === "riapertura" && <PageRiapertura conti={conti} movimenti={movimenti} stagione={stagione} stagioniDisponibili={stagioniDisponibili} onToast={showToast} />}
               {page === "cespiti" && <PageCespiti cespiti={cespiti} stagione={stagione} onToast={showToast} />}
               {page === "ammortamenti" && <PageAmmortamenti cespiti={cespiti} movimenti={movimenti} conti={conti} bu={bu} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
