@@ -999,7 +999,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.48.0";
+const APP_VERSION = "3.49.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -6661,9 +6661,11 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     [schemaBilancio, movimenti, saldiIniziali]);
   const rfIndSchema = useMemo(() => schemaBilancio ? rendicontoIndiretto(schemaBilancio, dati.mastrini, mastriniIniziali, contiMap) : null,
     [schemaBilancio, dati.mastrini, mastriniIniziali, contiMap]);
+  const flagsAdjEx = useRettificheEbitda(stagione);
+  const flagsAdjExPrec = useRettificheEbitda(stagionePrecedenteDi(stagione));
   const rfRiclSchema = useMemo(() => (schemaBilancio && prospettiSchema)
-    ? rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap) : null,
-    [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap]);
+    ? applicaAdjusted(rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap), movimenti, flagsAdjEx) : null,
+    [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap, movimenti, flagsAdjEx]);
 
   // ---------- esercizio precedente: bilancio comparativo anche negli export ----------
   // Stessa logica della pagina Schema di Bilancio: la stagione precedente si ricalcola
@@ -6701,9 +6703,9 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     const pr = calcolaProspetti(schemaBilancio, mastPrec);
     const rf = rendicontoDiretto(schemaBilancio, datiPrecEx.movimenti, datiPrecEx.saldiIniziali);
     const mastIniPrec = calcolaMastrini(generaLibroGiornale(datiPrecEx.movimenti.filter(isAperturaMov), datiPrecEx.saldiIniziali, cm));
-    const rfRicl = rendicontoRiclassificato(schemaBilancio, pr, mastPrec, mastIniPrec, cm);
+    const rfRicl = applicaAdjusted(rendicontoRiclassificato(schemaBilancio, pr, mastPrec, mastIniPrec, cm), datiPrecEx.movimenti, flagsAdjExPrec);
     return { stagione: datiPrecEx.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf) };
-  }, [datiPrecEx, schemaBilancio, contiMap]);
+  }, [datiPrecEx, schemaBilancio, contiMap, flagsAdjExPrec]);
   const precAttivo = (confrontoEx && calcPrecEx) ? { ...calcPrecEx, variazioni: variazioniEx } : null;
   // cf: stesso oggetto usato dal PDF comparativo (colonna anno precedente, Var. €, Var. %)
   const cfEx = precAttivo ? { stagione, precStagione: precAttivo.stagione, get: (k) => precAttivo.mappa[k] || 0, var: !!precAttivo.variazioni } : null;
@@ -15229,6 +15231,12 @@ function righeRfRiclassificato(R, conDettaglio, forza) {
   const iRic = add("voce", "Ricavi operativi", R.ricavi); det(R.ce.ricavi);
   const iCos = add("voce", "Costi operativi", R.costi); det(R.ce.costi);
   const iEbitda = add("tot", "EBITDA · Margine operativo lordo", R.ebitda, { parti: [iRic, iCos] });
+  // EBITDA adjusted (solo analisi): rettifica per le componenti non ricorrenti segnate
+  if (R.nonRicorrenti !== undefined && (Math.abs(R.nonRicorrenti) >= 0.005 || (forza && forza.adj))) {
+    const iNr = add("voce", "Rettifica componenti non ricorrenti", R.nonRicorrenti);
+    if (conDettaglio) (R.dettaglioNonRicorrenti || []).forEach(d => add("det", `${(d.data || "").split("-").reverse().join("/")} ${d.descrizione}`, d.val));
+    add("tot", "EBITDA ADJUSTED (senza non ricorrenti)", R.ebitdaAdj, { parti: [iEbitda, iNr] });
+  }
   const iDa = add("voce", "Ammortamenti e svalutazioni", R.da); det(R.ce.da);
   const iEbit = add("tot", "EBIT · Risultato operativo", R.ebit, { parti: [iEbitda, iDa] });
   const iFin = add("voce", "Gestione finanziaria", R.finanziaria); det(R.ce.finanziaria);
@@ -15264,7 +15272,8 @@ function righeRfRiclassificato(R, conDettaglio, forza) {
 // Le righe si abbinano per etichetta (e ordine, per quelle che compaiono due volte);
 // i conti di dettaglio presenti solo l'anno prima si aggiungono sotto la stessa voce, a zero.
 function righeRfConfronto(R, Rp, conDettaglio) {
-  const forza = { nonClass: Math.abs(R.nonClassificato) >= 0.5 || !!(Rp && Math.abs(Rp.nonClassificato) >= 0.5) };
+  const forza = { nonClass: Math.abs(R.nonClassificato) >= 0.5 || !!(Rp && Math.abs(Rp.nonClassificato) >= 0.5),
+                  adj: Math.abs(R.nonRicorrenti || 0) >= 0.005 || !!(Rp && Math.abs(Rp.nonRicorrenti || 0) >= 0.005) };
   const chiavi = (rr) => { const n = {}; let par = null;
     return rr.map(r => {
       if (r.tipo === "det") return { ...r, k: par + "|" + r.label, parent: par };
@@ -16212,6 +16221,140 @@ function SBEditorArea({ area, api, categorieTutte, assegnateAltrove }) {
 // ---------- PAGINA ----------
 
 // ============================================================
+// EBITDA ADJUSTED — rettifiche per componenti non ricorrenti
+// ============================================================
+// Le rettifiche sono un'analisi, non una scrittura: si segnano i movimenti non
+// ricorrenti (per stagione, in stagioni/{s}/rettificheEbitda/{idMovimento}) e il
+// RF Riclassificato mostra EBITDA ed EBITDA adjusted. La contabilita' non cambia.
+const ADJ_PATH = (stag) => `stagioni/${stag}/rettificheEbitda`;
+
+// effetto sul risultato di un movimento su un conto economico: costo > 0, ricavo < 0
+function effettoCostoMovimento(m) {
+  const imp = Number(m.importo) || 0;
+  if (m.scritturaComposta || m.dare !== undefined || m.avere !== undefined) {
+    const d = Number(m.dare) || 0, a = Number(m.avere) || 0;
+    if (d || a) return d - a;
+  }
+  if (m.tipo === "uscita") return imp;
+  if (m.tipo === "entrata") return -imp;
+  return 0;
+}
+// aggiunge a un RF Riclassificato le rettifiche: R.nonRicorrenti (da sommare all'EBITDA) e R.ebitdaAdj
+function applicaAdjusted(R, movimenti, flags) {
+  if (!R) return R;
+  const ids = Object.keys(flags || {});
+  const byId = new Map((movimenti || []).map(m => [m._id, m]));
+  const dettaglio = ids.map(id => {
+    const m = byId.get(id); if (!m) return null;
+    const val = Math.round(effettoCostoMovimento(m) * 100) / 100;
+    return { id, data: m.data, descrizione: m.descrizione || m.categoria || "", conto: m.contoPdC, val, nota: (flags[id] && flags[id].nota) || "" };
+  }).filter(Boolean).sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
+  const tot = Math.round(dettaglio.reduce((s, x) => s + x.val, 0) * 100) / 100;
+  return { ...R, nonRicorrenti: tot, ebitdaAdj: Math.round((R.ebitda + tot) * 100) / 100, dettaglioNonRicorrenti: dettaglio };
+}
+function useRettificheEbitda(stagione) {
+  const [flags, setFlags] = useState({});
+  useEffect(() => {
+    setFlags({});
+    if (!firebaseReady || !stagione) return;
+    const ref = db.ref(ADJ_PATH(stagione));
+    const cb = ref.on("value", snap => setFlags(snap.val() || {}));
+    return () => ref.off("value", cb);
+  }, [stagione]);
+  return flags;
+}
+
+// Pannello per segnare i movimenti non ricorrenti (stagione corrente o precedente)
+function SBRettifiche({ stagioni, onToast }) {
+  // stagioni: [{ stagione, movimenti, flags, contiMap }]
+  const [idx, setIdx] = useState(0);
+  const [aperto, setAperto] = useState(false);
+  const [cerca, setCerca] = useState("");
+  const s = stagioni[Math.min(idx, stagioni.length - 1)];
+  if (!s) return null;
+  const flags = s.flags || {};
+  const cm = s.contiMap || {};
+  const isCE = (cod) => cm[cod] && String(cm[cod].prospetto || "").includes("CE");
+  const segnati = Object.keys(flags);
+  const byId = new Map((s.movimenti || []).map(m => [m._id, m]));
+  const tot = segnati.reduce((a, id) => a + (byId.get(id) ? effettoCostoMovimento(byId.get(id)) : 0), 0);
+  const q = anNorm(cerca);
+  const candidati = (s.movimenti || [])
+    .filter(m => !isAperturaMov(m) && !m.nonMonetario && isCE(m.contoPdC) && !flags[m._id] && Math.abs(effettoCostoMovimento(m)) > 0.005)
+    .filter(m => !q || anNorm(`${m.descrizione} ${m.categoria} ${m.bu} ${cm[m.contoPdC]?.nome || ""}`).includes(q))
+    .sort((a, b) => Math.abs(effettoCostoMovimento(b)) - Math.abs(effettoCostoMovimento(a)))
+    .slice(0, q ? 60 : 25);
+  const segna = (m) => db.ref(`${ADJ_PATH(s.stagione)}/${m._id}`).set({ nota: "", il: new Date().toISOString() })
+    .then(() => onToast && onToast("Segnato come non ricorrente")).catch(e => alert(e.message));
+  const togli = (id) => db.ref(`${ADJ_PATH(s.stagione)}/${id}`).remove().catch(e => alert(e.message));
+  const nota = (id, t) => db.ref(`${ADJ_PATH(s.stagione)}/${id}/nota`).set(t).catch(() => {});
+  const eur = (v) => (v < 0 ? "−" : "") + "€ " + numIT(Math.abs(v), 2);
+  const riga = (m, azione) => (
+    <tr key={m._id}>
+      <td className="mono" style={{ fontSize: 12, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{(m.data || "").split("-").reverse().join("/")}</td>
+      <td style={{ fontSize: 13 }}>{m.descrizione || m.categoria}<div style={{ fontSize: 11, color: "var(--ink-3)" }}>{m.contoPdC} {(cm[m.contoPdC]?.nome || "").trim()}{m.bu ? " · " + m.bu : ""}</div></td>
+      <td className="num">{eur(effettoCostoMovimento(m))}</td>
+      <td style={{ textAlign: "right" }}>{azione}</td>
+    </tr>
+  );
+  return (
+    <div className="card" style={{ maxWidth: 860, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", cursor: "pointer" }} onClick={() => setAperto(x => !x)}>
+        <div className="card-title" style={{ margin: 0 }}>{aperto ? "▾" : "▸"} EBITDA adjusted · componenti non ricorrenti</div>
+        <div style={{ fontSize: 12.5, color: "var(--ink-2)" }}>
+          {stagioni.map(x => {
+            const b = new Map((x.movimenti || []).map(m => [m._id, m]));
+            const t = Object.keys(x.flags || {}).reduce((a, id) => a + (b.get(id) ? effettoCostoMovimento(b.get(id)) : 0), 0);
+            return <span key={x.stagione} style={{ marginLeft: 12 }}>{x.stagione}: <b>{Object.keys(x.flags || {}).length}</b> voci, <b>{eur(t)}</b></span>;
+          })}
+        </div>
+      </div>
+      {aperto && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12.5, color: "var(--ink-3)", lineHeight: 1.5, marginBottom: 10 }}>
+            Segna i costi (o ricavi) che non si ripeteranno: nel RF Riclassificato e negli indici compare l'<b>EBITDA adjusted</b> = EBITDA + costi non ricorrenti − ricavi non ricorrenti.
+            È solo analisi: le scritture contabili e il risultato non cambiano.
+          </div>
+          {stagioni.length > 1 && (
+            <div className="tipo-switch" style={{ marginBottom: 10 }}>
+              {stagioni.map((x, i) => <button key={x.stagione} type="button" className={i === idx ? "active entrata" : ""} onClick={() => setIdx(i)}>{x.stagione}</button>)}
+            </div>
+          )}
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", margin: "6px 0" }}>
+            Non ricorrenti {s.stagione} · totale rettifica {eur(tot)}
+          </div>
+          {!segnati.length ? <div style={{ fontSize: 13, color: "var(--ink-3)", marginBottom: 10 }}>Nessun movimento segnato.</div> : (
+            <table className="tbl" style={{ marginBottom: 12 }}>
+              <tbody>
+                {segnati.map(id => byId.get(id)).filter(Boolean).sort((a, b) => Math.abs(effettoCostoMovimento(b)) - Math.abs(effettoCostoMovimento(a))).map(m => (
+                  <React.Fragment key={m._id}>
+                    {riga(m, <button className="btn danger sm" onClick={() => togli(m._id)}>✕</button>)}
+                    <tr><td></td><td colSpan={3} style={{ paddingTop: 0 }}>
+                      <input defaultValue={flags[m._id]?.nota || ""} placeholder="Nota (perché è non ricorrente)…" onBlur={e => nota(m._id, e.target.value)}
+                        style={{ width: "100%", fontSize: 12, padding: "4px 6px", boxSizing: "border-box" }} />
+                    </td></tr>
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
+            <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)" }}>Aggiungi</span>
+            <input className="an-cerca" placeholder="Cerca movimento (es. cena, Saretina, stralcio)…" value={cerca} onChange={e => setCerca(e.target.value)} style={{ flex: 1 }} />
+          </div>
+          <div style={{ maxHeight: 340, overflowY: "auto" }}>
+            <table className="tbl"><tbody>
+              {candidati.map(m => riga(m, <button className="btn ghost sm" onClick={() => segna(m)}>+ non ricorrente</button>))}
+            </tbody></table>
+            {!candidati.length && <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>Nessun movimento trovato.</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // INDICI DI BILANCIO — analisi per indici sui prospetti dello schema
 // ============================================================
 // Le grandezze di base si leggono dai prospetti dello Schema di Bilancio e dal
@@ -16239,12 +16382,12 @@ function useStagioniCalcolate(stagioni, schema, contiMap) {
     (stagioni || []).forEach(s => {
       if (!s || richiesteRef.current.has(s)) return;
       richiesteRef.current.add(s);
-      Promise.all(["movimenti", "saldiIniziali", "conti"].map(n => db.ref(`stagioni/${s}/${n}`).once("value")))
-        .then(([mv, si, ct]) => {
+      Promise.all(["movimenti", "saldiIniziali", "conti", "rettificheEbitda"].map(n => db.ref(`stagioni/${s}/${n}`).once("value")))
+        .then(([mv, si, ct, adj]) => {
           const r = intervalloStagione(s);
           const movs = Object.entries(mv.val() || {}).map(([k, m]) => ({ ...m, _id: k }))
             .filter(m => !r || !m.data || (m.data >= r.da && m.data <= r.a));
-          setRaw(p => ({ ...p, [s]: { movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}) } }));
+          setRaw(p => ({ ...p, [s]: { movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}), flags: adj.val() || {} } }));
         })
         .catch(() => setRaw(p => ({ ...p, [s]: { errore: true } })));
     });
@@ -16258,7 +16401,8 @@ function useStagioniCalcolate(stagioni, schema, contiMap) {
       const cm = {};
       d.conti.forEach(c => { if (c) cm[c.codice] = c; });
       Object.values(contiMap || {}).forEach(c => { if (!cm[c.codice]) cm[c.codice] = c; });
-      out[s] = calcolaBilancioStagione(schema, d.movimenti, d.saldiIniziali, cm);
+      const c = calcolaBilancioStagione(schema, d.movimenti, d.saldiIniziali, cm);
+      out[s] = { ...c, rfRicl: applicaAdjusted(c.rfRicl, d.movimenti, d.flags) };
     });
     return out;
   }, [raw, schema, contiMap, chiave]);
@@ -16284,7 +16428,7 @@ function useImpostazioniIndici(stagione) {
 
 // Grandezze di base (valori assoluti, in euro)
 const IDX_GRANDEZZE = [
-  ["ricavi", "Ricavi operativi"], ["costiOp", "Costi operativi"], ["ebitda", "EBITDA"], ["ammortamenti", "Ammortamenti e svalutazioni"],
+  ["ricavi", "Ricavi operativi"], ["costiOp", "Costi operativi"], ["ebitda", "EBITDA"], ["nonRicorrenti", "Rettifica non ricorrenti"], ["ebitdaAdj", "EBITDA adjusted"], ["ammortamenti", "Ammortamenti e svalutazioni"],
   ["ebit", "EBIT"], ["oneriFin", "Oneri finanziari netti"], ["imposte", "Imposte"], ["risultato", "Risultato d'esercizio"],
   ["totAttivo", "Totale attivo"], ["immobilizzazioni", "Immobilizzazioni"], ["attivoCirc", "Attivo circolante"], ["crediti", "Crediti"],
   ["liquidita", "Disponibilità liquide finali"], ["liquiditaIni", "Disponibilità liquide iniziali"], ["pn", "Patrimonio netto"],
@@ -16304,7 +16448,8 @@ function grandezzeBilancio(calc) {
     return s + (c.voci || []).filter(v => /credit/i.test(v.nome || "")).reduce((a, v) => a + (Number(v.valore) || 0), 0);
   }, 0);
   return {
-    ricavi: R.ricavi, costiOp: -R.costi, ebitda: R.ebitda, ammortamenti: -R.da, ebit: R.ebit,
+    ricavi: R.ricavi, costiOp: -R.costi, ebitda: R.ebitda, nonRicorrenti: R.nonRicorrenti || 0, ebitdaAdj: R.ebitdaAdj !== undefined ? R.ebitdaAdj : R.ebitda,
+    ammortamenti: -R.da, ebit: R.ebit,
     oneriFin: -R.finanziaria, imposte: -R.imposte, risultato: R.risultato,
     totAttivo: pr.totAttivo, immobilizzazioni: tot(immob), attivoCirc: tot(circ), crediti,
     liquidita: R.liqFin, liquiditaIni: R.liqIni,
@@ -16317,6 +16462,8 @@ const idxDiv = (a, b) => (Math.abs(Number(b) || 0) > 0.005 ? (Number(a) || 0) / 
 // unita: "%" (rapporto x100) · "x" (volte) · "€" · "mesi"; meglio: "alto" | "basso" | null
 const IDX_CATALOGO = [
   { id: "margine_ebitda", gruppo: "Redditività", nome: "Margine EBITDA", formula: "EBITDA / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.ebitda, g.ricavi) },
+  { id: "margine_ebitda_adj", gruppo: "Redditività", nome: "Margine EBITDA adjusted", formula: "EBITDA adjusted / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.ebitdaAdj, g.ricavi) },
+  { id: "ebitda_adj", gruppo: "Redditività", nome: "EBITDA adjusted", formula: "EBITDA + costi non ricorrenti − ricavi non ricorrenti", unita: "€", meglio: "alto", f: g => g.ebitdaAdj },
   { id: "margine_ebit", gruppo: "Redditività", nome: "Margine operativo (ROS)", formula: "EBIT / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.ebit, g.ricavi) },
   { id: "margine_netto", gruppo: "Redditività", nome: "Margine netto", formula: "Risultato / Ricavi operativi", unita: "%", meglio: "alto", f: g => idxDiv(g.risultato, g.ricavi) },
   { id: "roe", gruppo: "Redditività", nome: "ROE", formula: "Risultato / Patrimonio netto", unita: "%", meglio: "alto", f: g => idxDiv(g.risultato, g.pn) },
@@ -17037,8 +17184,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const correzioniSchema = useMemo(() => calcolaCorrezioniSchema(schema, contiMap), [schema, contiMap]);
 
   const rfDir = useMemo(() => schema ? rendicontoDiretto(schema, movimenti, saldiIniziali) : null, [schema, movimenti, saldiIniziali]);
-  const rfRicl = useMemo(() => (schema && prospetti) ? rendicontoRiclassificato(schema, prospetti, mastrini, mastriniIniziali, contiMap) : null,
-    [schema, prospetti, mastrini, mastriniIniziali, contiMap]);
+  const flagsAdj = useRettificheEbitda(stagione);
+  const flagsAdjPrec = useRettificheEbitda(stagionePrecedenteDi(stagione));
+  const rfRicl = useMemo(() => (schema && prospetti) ? applicaAdjusted(rendicontoRiclassificato(schema, prospetti, mastrini, mastriniIniziali, contiMap), movimenti, flagsAdj) : null,
+    [schema, prospetti, mastrini, mastriniIniziali, contiMap, movimenti, flagsAdj]);
   const rfInd = useMemo(() => schema ? rendicontoIndiretto(schema, mastrini, mastriniIniziali, contiMap) : null,
     [schema, mastrini, mastriniIniziali, contiMap]);
 
@@ -17080,10 +17229,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     const rf = rendicontoDiretto(schema, datiPrec.movimenti, datiPrec.saldiIniziali);
     const mancanti = controlliSchema(schema, mastPrec, []).mancanti;
     const mastIniPrec = calcolaMastrini(generaLibroGiornale(datiPrec.movimenti.filter(isAperturaMov), datiPrec.saldiIniziali, cm));
-    const rfRicl = rendicontoRiclassificato(schema, pr, mastPrec, mastIniPrec, cm);
+    const rfRicl = applicaAdjusted(rendicontoRiclassificato(schema, pr, mastPrec, mastIniPrec, cm), datiPrec.movimenti, flagsAdjPrec);
     return { stagione: datiPrec.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf), mancanti,
-             scritture: scrPrec, movimenti: datiPrec.movimenti };
-  }, [datiPrec, schema, contiMap]);
+             scritture: scrPrec, movimenti: datiPrec.movimenti, contiMap: cm };
+  }, [datiPrec, schema, contiMap, flagsAdjPrec]);
 
   if (!caricato || !schema) return <div className="empty-state">Caricamento schema…</div>;
 
@@ -17616,6 +17765,10 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
       {tab === "rfr" && (
         <div style={{ display: "grid", gap: 10 }}>
+          <SBRettifiche onToast={onToast} stagioni={[
+            { stagione, movimenti, flags: flagsAdj, contiMap },
+            ...(calcPrec ? [{ stagione: calcPrec.stagione, movimenti: calcPrec.movimenti, flags: flagsAdjPrec, contiMap: calcPrec.contiMap }] : []),
+          ]} />
           <SBRfRiclassificato R={rfRicl} Rp={conf ? calcPrec.rfRicl : null} precStagione={calcPrec ? calcPrec.stagione : ""} variazioni={variazioni} stagione={stagione} />
         </div>
       )}
