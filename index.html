@@ -999,7 +999,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.49.0";
+const APP_VERSION = "3.50.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -15797,6 +15797,39 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
         columnStyles: { 0: { cellWidth: 14, halign: "right" }, 1: { cellWidth: 80 }, 2: { cellWidth: 45 },
                         3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" },
                         6: { cellWidth: 12, halign: "center" } },
+      });
+    }
+
+    // Flussi di cassa della BU (metodo diretto, per categoria): incassi, pagamenti operativi,
+    // investimenti e flusso netto. Aperture, giroconti e movimenti non monetari esclusi.
+    const rf = x.rf || {};
+    const somma = (mappa) => Object.entries(mappa || {}).map(([cat, perMese]) => [cat, Object.values(perMese || {}).reduce((a, v) => a + (Number(v) || 0), 0)])
+      .filter(([, v]) => Math.abs(v) >= 0.005).sort((p, q) => Math.abs(q[1]) - Math.abs(p[1]));
+    const ent = somma(rf.entrate), usc = somma(rf.usciteOp), inv = somma(rf.investimenti);
+    if (ent.length || usc.length || inv.length) {
+      let yc = (doc.lastAutoTable ? doc.lastAutoTable.finalY : y) + 7;
+      if (yc > H - 42) { doc.addPage("a4", "landscape"); yc = 18; }
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(90);
+      doc.text(`${x.nome} · flussi di cassa`, 14, yc);
+      doc.setTextColor(0);
+      const tE = ent.reduce((a, r) => a + r[1], 0), tU = usc.reduce((a, r) => a + r[1], 0), tI = inv.reduce((a, r) => a + r[1], 0);
+      const sez = (t) => [{ content: t, colSpan: 2, styles: { fontStyle: "bold", fillColor: b.GRIGIO_CHIARO } }];
+      const tot = (t, v) => [{ content: t, styles: { fontStyle: "bold" } }, { content: b.money(v), styles: { fontStyle: "bold", halign: "right" } }];
+      const body = [];
+      if (ent.length) { body.push(sez("Incassi")); ent.forEach(([c, v]) => body.push(["   " + c, b.money(v)])); body.push(tot("Totale incassi", tE)); }
+      if (usc.length) { body.push(sez("Pagamenti operativi")); usc.forEach(([c, v]) => body.push(["   " + c, b.money(-v)])); body.push(tot("Totale pagamenti operativi", -tU)); }
+      if (inv.length) { body.push(sez("Investimenti")); inv.forEach(([c, v]) => body.push(["   " + c, b.money(-v)])); body.push(tot("Totale investimenti", -tI)); }
+      doc.autoTable({
+        startY: yc + 3,
+        head: [["Categoria", "Importo"]],
+        body,
+        foot: [[{ content: "FLUSSO DI CASSA NETTO " + x.nome, styles: { fontStyle: "bold" } },
+                { content: b.money(tE - tU - tI), styles: { fontStyle: "bold", halign: "right" } }]],
+        theme: "plain", showFoot: "lastPage",
+        styles: { fontSize: 8, cellPadding: 1.4 },
+        headStyles: { fillColor: [45, 94, 140], textColor: 240, fontStyle: "bold" },
+        footStyles: { fillColor: b.GRIGIO_CHIARO, textColor: 20 },
+        columnStyles: { 0: { cellWidth: 139 }, 1: { cellWidth: 40, halign: "right" } },
       });
     }
   });
