@@ -999,7 +999,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.50.0";
+const APP_VERSION = "3.51.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -15228,14 +15228,23 @@ function righeRfRiclassificato(R, conDettaglio, forza) {
   const det = (lista) => { if (conDettaglio) (lista || []).forEach(d => add("det", `${d.codice != null ? d.codice + " " : ""}${d.nome}`, d.val)); };
 
   add("sez", "CONTO ECONOMICO RICLASSIFICATO");
-  const iRic = add("voce", "Ricavi operativi", R.ricavi); det(R.ce.ricavi);
-  const iCos = add("voce", "Costi operativi", R.costi); det(R.ce.costi);
-  const iEbitda = add("tot", "EBITDA · Margine operativo lordo", R.ebitda, { parti: [iRic, iCos] });
-  // EBITDA adjusted (solo analisi): rettifica per le componenti non ricorrenti segnate
-  if (R.nonRicorrenti !== undefined && (Math.abs(R.nonRicorrenti) >= 0.005 || (forza && forza.adj))) {
-    const iNr = add("voce", "Rettifica componenti non ricorrenti", R.nonRicorrenti);
-    if (conDettaglio) (R.dettaglioNonRicorrenti || []).forEach(d => add("det", `${(d.data || "").split("-").reverse().join("/")} ${d.descrizione}`, d.val));
-    add("tot", "EBITDA ADJUSTED (senza non ricorrenti)", R.ebitdaAdj, { parti: [iEbitda, iNr] });
+  let iEbitda;
+  const conAdj = R.nonRicorrenti !== undefined && (Math.abs(R.nonRicorrenti) >= 0.005 || (forza && forza.adj));
+  if (conAdj) {
+    // Con le rettifiche: prima l'EBITDA adjusted (solo componenti ricorrenti), poi i non
+    // ricorrenti e infine l'EBITDA contabile, da cui si scende a EBIT e risultato.
+    const iRic = add("voce", "Ricavi operativi ricorrenti", Math.round((R.ricavi + (R.adjRicavi || 0)) * 100) / 100); det(R.ce.ricavi);
+    if (conDettaglio && Math.abs(R.adjRicavi || 0) >= 0.005) add("det", "meno: ricavi non ricorrenti (esposti sotto)", R.adjRicavi);
+    const iCos = add("voce", "Costi operativi ricorrenti", Math.round((R.costi + (R.adjCosti || 0)) * 100) / 100); det(R.ce.costi);
+    if (conDettaglio && Math.abs(R.adjCosti || 0) >= 0.005) add("det", "meno: costi non ricorrenti (esposti sotto)", R.adjCosti);
+    const iAdj = add("tot", "EBITDA ADJUSTED · margine operativo ricorrente", R.ebitdaAdj, { parti: [iRic, iCos] });
+    const iNr = add("voce", "Componenti non ricorrenti", -R.nonRicorrenti);
+    if (conDettaglio) (R.dettaglioNonRicorrenti || []).forEach(d => add("det", `${(d.data || "").split("-").reverse().join("/")} ${d.descrizione}`, -d.val));
+    iEbitda = add("tot", "EBITDA · Margine operativo lordo", R.ebitda, { parti: [iAdj, iNr] });
+  } else {
+    const iRic = add("voce", "Ricavi operativi", R.ricavi); det(R.ce.ricavi);
+    const iCos = add("voce", "Costi operativi", R.costi); det(R.ce.costi);
+    iEbitda = add("tot", "EBITDA · Margine operativo lordo", R.ebitda, { parti: [iRic, iCos] });
   }
   const iDa = add("voce", "Ammortamenti e svalutazioni", R.da); det(R.ce.da);
   const iEbit = add("tot", "EBIT · Risultato operativo", R.ebit, { parti: [iEbitda, iDa] });
@@ -16282,8 +16291,11 @@ function applicaAdjusted(R, movimenti, flags) {
     const val = Math.round(effettoCostoMovimento(m) * 100) / 100;
     return { id, data: m.data, descrizione: m.descrizione || m.categoria || "", conto: m.contoPdC, val, nota: (flags[id] && flags[id].nota) || "" };
   }).filter(Boolean).sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
-  const tot = Math.round(dettaglio.reduce((s, x) => s + x.val, 0) * 100) / 100;
-  return { ...R, nonRicorrenti: tot, ebitdaAdj: Math.round((R.ebitda + tot) * 100) / 100, dettaglioNonRicorrenti: dettaglio };
+  const r2 = n => Math.round(n * 100) / 100;
+  const tot = r2(dettaglio.reduce((s, x) => s + x.val, 0));
+  const adjCosti = r2(dettaglio.filter(x => x.val > 0).reduce((s, x) => s + x.val, 0));     // costi non ricorrenti (da togliere dai costi)
+  const adjRicavi = r2(dettaglio.filter(x => x.val < 0).reduce((s, x) => s + x.val, 0));    // ricavi non ricorrenti (negativi)
+  return { ...R, nonRicorrenti: tot, adjCosti, adjRicavi, ebitdaAdj: r2(R.ebitda + tot), dettaglioNonRicorrenti: dettaglio };
 }
 function useRettificheEbitda(stagione) {
   const [flags, setFlags] = useState({});
