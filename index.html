@@ -921,6 +921,7 @@
   .an-kpic-fill.an-pos { background: #2d7a4a; } .an-kpic-fill.an-neg { background: #b54343; }
   .an-kpic-tick { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
   .an-cl { cursor: pointer; }
+  .esp-riga:hover td { background: var(--panel-2); }
   .an-filtro { display: flex; flex-direction: column; gap: 2px; }
   .an-cerca { margin-bottom: 6px; padding: 6px 9px !important; font-size: 12.5px; }
   .an-filtro-item { display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px; border-radius: 5px; cursor: pointer; font-size: 12.5px; border: 1px solid transparent; }
@@ -998,7 +999,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.47.0";
+const APP_VERSION = "3.48.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -16599,6 +16600,282 @@ function SBIndici({ schema, stagione, stagioniDisponibili, corrente, contiMap, o
   );
 }
 
+// ============================================================
+// ESPLORA BILANCIO — drill-down stile Excel: classe → voce → conto → scrittura
+// ============================================================
+const ESP_RANGO = { sez: 0, classe: 1, voce: 2, sottovoce: 3, conto: 4, riga: 5 };
+const ESP_LIVELLI = [["classe", "Classi"], ["voce", "Voci"], ["conto", "Conti"], ["riga", "Scritture"]];
+
+// Albero di un prospetto (SP / CE dallo schema, RF diretto per categorie)
+function espAlbero(pr, rfDir, tipo) {
+  const nodi = [];
+  if (!pr) return nodi;
+  const conti = (lista, vid) => (lista || []).map(d => ({ key: "d:" + vid + ":" + d.c, tipo: "conto", label: `${String(d.c).padStart(2, "0")} · ${(d.nome || "").trim()}`, v: d.valore, codice: Number(d.c) }));
+  const voce = (v, sep) => {
+    if (v.tipo === "sottosezione") return null;
+    const figli = [
+      ...(v.sottovoci || []).map(sv => ({ key: "sv:" + sv.id, tipo: "sottovoce", label: `${sv.codice ? sv.codice + ") " : ""}${sv.nome}`, v: sv.valore, figli: conti(sv.dettaglio, sv.id) })),
+      ...conti(v.dettaglio, v.id),
+    ];
+    return { key: "v:" + v.id, tipo: "voce", label: `${v.codice ? v.codice + sep : ""}${v.nome}${v.speciale === "risultato" ? " (dal CE)" : ""}`, v: v.valore, figli };
+  };
+  const classe = (cl, sep) => ({ key: "cl:" + cl.id, tipo: "classe", label: `${cl.codice ? cl.codice + ") " : ""}${cl.nome}`, v: cl.totale, figli: (cl.voci || []).map(v => voce(v, sep)).filter(Boolean) });
+  if (tipo === "sp") {
+    [["attivo", "ATTIVO", "totAttivo", pr.totAttivo], ["passivo", "PASSIVO E PATRIMONIO NETTO", "totPassivo", pr.totPassivo]].forEach(([lato, t, k, tot]) => {
+      nodi.push({ key: k, tipo: "sez", label: t, v: tot, figli: (pr.sp || []).filter(c => c.lato === lato).map(c => classe(c, ". ")) });
+    });
+  } else if (tipo === "ce") {
+    const pos = (pr.ce || []).filter(c => c.segno >= 0), neg = (pr.ce || []).filter(c => c.segno < 0);
+    if (pos.length) nodi.push({ key: "totPos", tipo: "sez", label: "VOCI POSITIVE", v: pos.reduce((a, c) => a + c.totale, 0), figli: pos.map(c => classe(c, ") ")) });
+    if (neg.length) nodi.push({ key: "totNeg", tipo: "sez", label: "VOCI NEGATIVE", v: neg.reduce((a, c) => a + c.totale, 0), figli: neg.map(c => classe(c, ") ")) });
+    nodi.push({ key: "risultato", tipo: "sez", label: "RISULTATO D'ESERCIZIO", v: pr.risultato, figli: [], finale: true });
+  } else if (rfDir) {
+    (rfDir.aree || []).forEach(a => nodi.push({
+      key: "a:" + a.id, tipo: "classe", label: `${a.codice ? a.codice + ") " : ""}${a.nome}`, v: a.totale,
+      figli: (a.voci || []).map(v => ({ key: "rv:" + v.id, tipo: "voce", label: `${v.codice ? v.codice + ". " : ""}${v.nome}`, v: v.totale,
+        figli: (v.righe || []).map(r => ({ key: "rr:" + v.id + ":" + r.cat, tipo: "conto", label: r.cat, v: r.val, categoria: r.cat })) })),
+    }));
+    nodi.push({ key: "rfVar", tipo: "sez", label: "VARIAZIONE DELLE DISPONIBILITÀ LIQUIDE", v: rfDir.variazione, figli: [], finale: true });
+    nodi.push({ key: "rfAp", tipo: "sez", label: "Disponibilità liquide iniziali", v: rfDir.apertura, figli: [] });
+    nodi.push({ key: "rfCh", tipo: "sez", label: "Disponibilità liquide finali", v: rfDir.chiusura, figli: [] });
+  }
+  return nodi;
+}
+// Unisce l'albero corrente con quello dell'anno prima (p = valore anno prima); i nodi solo-precedenti si aggiungono a zero
+function espUnisci(a, b) {
+  const mb = new Map((b || []).map(n => [n.key, n])), ka = new Set((a || []).map(n => n.key));
+  const out = (a || []).map(n => { const o = mb.get(n.key); return { ...n, p: o ? o.v : 0, figli: espUnisci(n.figli || [], o ? o.figli || [] : []) }; });
+  (b || []).forEach(n => { if (!ka.has(n.key)) out.push({ ...n, v: 0, p: n.v, figli: espUnisci([], n.figli || []) }); });
+  return out;
+}
+// righe del libro giornale per conto
+function espIndiceRighe(scritture) {
+  const m = new Map();
+  (scritture || []).forEach((s, i) => (s.righe || []).forEach(r => {
+    const k = Number(r.codice); if (!m.has(k)) m.set(k, []);
+    m.get(k).push({ s, r, i });
+  }));
+  return m;
+}
+// righe di dettaglio (livello "Scritture") per un conto o una categoria del RF
+function espRigheFoglia(nodo, ctx) {
+  const out = [];
+  const perStag = (lato, valore) => {
+    const src = ctx[lato]; if (!src) return;
+    if (nodo.categoria !== undefined) {
+      (src.movimenti || []).filter(m => (m.categoria || "(senza categoria)") === nodo.categoria && (m.tipo === "entrata" || m.tipo === "uscita") && !isAperturaMov(m) && !m.nonMonetario)
+        .forEach(m => out.push({ lato, data: m.data || "", label: m.descrizione || m.categoria || "", val: (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0), mov: m, stagione: src.stagione }));
+      return;
+    }
+    const righe = src.indice.get(nodo.codice) || [];
+    const tot = righe.reduce((a, x) => a + (x.r.dare || 0) - (x.r.avere || 0), 0);
+    const k = Math.abs(tot) > 0.005 && Math.abs(valore) > 0.005 ? Math.sign(valore / tot) : (valore < 0 ? -1 : 1);
+    righe.forEach(x => {
+      const contro = (x.s.righe || []).filter(r => r !== x.r).map(r => `${r.codice} ${(r.nome || "").trim()}`).slice(0, 3).join(", ");
+      out.push({ lato, data: x.s.data || "", label: x.s.descrizione || "", contro, val: k * ((x.r.dare || 0) - (x.r.avere || 0)), dare: x.r.dare || 0, avere: x.r.avere || 0, scr: x.s, stagione: src.stagione });
+    });
+  };
+  perStag("cur", nodo.v || 0);
+  perStag("prec", nodo.p || 0);
+  return out.sort((a, b) => (a.lato === b.lato ? String(a.data).localeCompare(String(b.data)) : a.lato === "cur" ? -1 : 1));
+}
+
+function SBEsplora({ stagione, prospetti, rfDir, movimenti, saldiIniziali, contiMap, prec, variazioni }) {
+  const [tipo, setTipo] = useState("ce");
+  const [aperti, setAperti] = useState({});
+  const [cerca, setCerca] = useState("");
+  const [dett, setDett] = useState(null);
+  const scrCur = useMemo(() => generaLibroGiornale(movimenti || [], saldiIniziali || {}, contiMap), [movimenti, saldiIniziali, contiMap]);
+  const ctx = useMemo(() => ({
+    cur: { stagione, indice: espIndiceRighe(scrCur), movimenti: movimenti || [] },
+    prec: prec ? { stagione: prec.stagione, indice: espIndiceRighe(prec.scritture), movimenti: prec.movimenti || [] } : null,
+  }), [scrCur, movimenti, prec, stagione]);
+  const albero = useMemo(() => espUnisci(espAlbero(prospetti, rfDir, tipo), prec ? espAlbero(prec.prospetti, prec.rfDir, tipo) : []),
+    [prospetti, rfDir, prec, tipo]);
+  const conf = !!prec;
+  const q = anNorm(cerca);
+  // livello: apre tutti i nodi di rango inferiore a quello scelto
+  const apriFino = (liv) => {
+    const r = ESP_RANGO[liv], m = {};
+    const giro = (ns) => ns.forEach(n => { if (ESP_RANGO[n.tipo] < r && (n.figli && n.figli.length || n.tipo === "conto")) m[n.key] = true; giro(n.figli || []); });
+    giro(albero); setAperti(m);
+  };
+  useEffect(() => { apriFino("voce"); }, [tipo, albero.length]);
+  const f2 = (n) => { const x = Number(n) || 0; if (Math.abs(x) < 0.005) return "–"; const s = numIT(Math.abs(x), 2); return x < 0 ? "(" + s + ")" : s; };
+  const colDelta = (v, p, stile) => {
+    if (!conf) return null;
+    const d = Math.round(((v || 0) - (p || 0)) * 100) / 100;
+    return [
+      <td key="p" className="num" style={{ ...stile, color: "var(--ink-3)" }}>{f2(p)}</td>,
+      <td key="d" className="num" style={{ ...stile, fontSize: 11.5, color: Math.abs(d) < 0.005 ? "var(--ink-3)" : "var(--ink-2)" }}>{Math.abs(d) < 0.005 ? "–" : (d > 0 ? "+" : "−") + numIT(Math.abs(d), 2)}</td>,
+      ...(variazioni ? [<td key="pc" className="num" style={{ ...stile, fontSize: 11.5, color: "var(--ink-3)" }}>{Math.abs(p || 0) > 0.004 ? (d > 0 ? "+" : d < 0 ? "−" : "") + numIT(Math.abs(d) / Math.abs(p) * 100, 1) + "%" : "–"}</td>] : []),
+    ];
+  };
+  const nCol = 2 + (conf ? (variazioni ? 3 : 2) : 0);
+  // filtro di ricerca: tiene i rami con un conto/categoria (o una sua scrittura) che contiene il testo
+  const corrisponde = (n) => {
+    if (!q) return true;
+    if (anNorm(n.label).includes(q)) return true;
+    if (n.tipo === "conto") return espRigheFoglia(n, ctx).some(r => anNorm(r.label).includes(q));
+    return (n.figli || []).some(corrisponde);
+  };
+  const righe = [];
+  const giro = (ns, prof) => ns.forEach(n => {
+    if (!corrisponde(n)) return;
+    const foglia = n.tipo === "conto";
+    const haFigli = (n.figli && n.figli.length) || foglia;
+    const aperto = q ? (!foglia || aperti[n.key]) : aperti[n.key];
+    righe.push({ n, prof, haFigli, aperto });
+    if (!aperto) return;
+    if (foglia) {
+      const rr = espRigheFoglia(n, ctx).filter(r => !q || anNorm(n.label).includes(q) || anNorm(r.label).includes(q));
+      rr.forEach((r, i) => righe.push({ riga: r, prof: prof + 1, k: n.key + "#" + i }));
+      if (!rr.length) righe.push({ vuoto: true, prof: prof + 1, k: n.key + "#0" });
+    } else giro(n.figli || [], prof + 1);
+  });
+  giro(albero, 0);
+
+  // ---------- export Excel con i gruppi +/- (livelli come in Excel) ----------
+  const esportaExcel = () => {
+    const tit = { sp: "STATO PATRIMONIALE", ce: "CONTO ECONOMICO", rf: "RENDICONTO FINANZIARIO (metodo diretto)" }[tipo];
+    const aoa = [[`${tit} · dettaglio fino alle scritture`], [`Futsal Fabbrico ASD · ${stagione}${conf ? " vs " + prec.stagione : ""} · apri e chiudi i livelli con i pulsanti 1-2-3-4 a sinistra`], [],
+      ["Voce / scrittura", "Data", "Contropartita", stagione, ...(conf ? [prec.stagione, "Δ", ...(variazioni ? ["Δ %"] : [])] : [])]];
+    const livelli = [], stili = [];
+    const push = (row, lv, st) => { aoa.push(row); livelli[aoa.length - 1] = lv; stili[aoa.length - 1] = st; };
+    const cmp = (v, p) => conf ? [p || 0, Math.round(((v || 0) - (p || 0)) * 100) / 100, ...(variazioni ? [Math.abs(p || 0) > 0.004 ? ((v || 0) - (p || 0)) / Math.abs(p) : ""] : [])] : [];
+    const tutto = (ns, prof) => ns.forEach(n => {
+      push(["  ".repeat(prof) + n.label, "", "", n.v || 0, ...cmp(n.v, n.p)], prof, n.tipo);
+      if (n.tipo === "conto") espRigheFoglia(n, ctx).forEach(r => {
+        const inCur = r.lato === "cur";
+        push(["  ".repeat(prof + 1) + (r.label || ""), r.data, r.contro || (r.mov ? (r.mov.bu || "") : ""), inCur ? r.val : "", ...(conf ? [inCur ? "" : r.val, "", ...(variazioni ? [""] : [])] : [])], prof + 1, "riga");
+      });
+      else tutto(n.figli || [], prof + 1);
+    });
+    tutto(albero, 0);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const nc = aoa[3].length;
+    ws["!cols"] = [{ wch: 58 }, { wch: 11 }, { wch: 34 }, ...Array(nc - 3).fill({ wch: 14 })];
+    const rows = [];
+    for (let r = 0; r < aoa.length; r++) {
+      const lv = livelli[r];
+      rows[r] = lv ? { level: Math.min(lv, 7), hidden: lv >= 4 } : {};
+      for (let c = 0; c < nc; c++) {
+        const ref = XLSX.utils.encode_cell({ r, c }); if (!ws[ref]) continue;
+        if (r === 3) ws[ref].s = { font: { bold: true, color: { rgb: "FFFFFF" } }, fill: { fgColor: { rgb: "1A1A1A" } } };
+        if (r > 3 && c >= 3 && typeof ws[ref].v === "number") ws[ref].z = (variazioni && conf && c === nc - 1) ? "0.0%" : '#,##0.00;(#,##0.00);"-"';
+        const st = stili[r];
+        if (r > 3 && st && st !== "riga") ws[ref].s = { ...(ws[ref].s || {}), font: { bold: st !== "conto", italic: false } , ...(st === "sez" ? { fill: { fgColor: { rgb: "EDEBE3" } } } : {}) };
+        if (r > 3 && st === "riga") ws[ref].s = { font: { sz: 9, color: { rgb: "6B675E" } } };
+      }
+    }
+    ws["!rows"] = rows; ws["!outline"] = { above: true };
+    Object.assign(ws["A1"], { s: { font: { bold: true, sz: 14 } } });
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, tipo.toUpperCase());
+    XLSX.writeFile(wb, `Esplora_${tipo.toUpperCase()}_${stagione}${conf ? "_vs_" + prec.stagione : ""}.xlsx`);
+  };
+
+  const pesi = { sez: 700, classe: 700, voce: 600, sottovoce: 500, conto: 400 };
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div className="card" style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="tipo-switch">
+          {[["sp", "Stato Patrimoniale"], ["ce", "Conto Economico"], ["rf", "Rendiconto (diretto)"]].map(([k, l]) => (
+            <button key={k} type="button" className={tipo === k ? "active entrata" : ""} onClick={() => setTipo(k)}>{l}</button>))}
+        </div>
+        <div style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: ".04em", marginRight: 4 }}>Livello</span>
+          {ESP_LIVELLI.map(([k, l], i) => (
+            <button key={k} className="btn ghost sm" title={"Apri fino a: " + l} onClick={() => apriFino(k)}
+              style={{ minWidth: 28 }}>{i + 1} <span style={{ color: "var(--ink-3)" }}>{l}</span></button>))}
+        </div>
+        <input className="an-cerca" style={{ flex: "1 1 200px", maxWidth: 280 }} placeholder="Cerca conto o descrizione…" value={cerca} onChange={e => setCerca(e.target.value)} />
+        <button className="btn ghost" onClick={esportaExcel}>↧ Excel con livelli</button>
+      </div>
+      <div className="card" style={{ overflowX: "auto", padding: "8px 12px" }}>
+        <table className="tbl" style={{ minWidth: conf ? 820 : 560 }}>
+          <thead><tr>
+            <th>Voce · conto · scrittura</th><th className="num">{stagione}</th>
+            {conf && <th className="num">{prec.stagione}</th>}{conf && <th className="num">Δ</th>}{conf && variazioni && <th className="num">Δ %</th>}
+          </tr></thead>
+          <tbody>
+            {righe.map((x, i) => {
+              if (x.vuoto) return <tr key={x.k}><td colSpan={nCol} style={{ paddingLeft: 12 + x.prof * 18, fontSize: 11.5, color: "var(--ink-3)", fontStyle: "italic" }}>nessuna scrittura</td></tr>;
+              if (x.riga) {
+                const r = x.riga, inCur = r.lato === "cur";
+                return (
+                  <tr key={x.k} className="esp-riga" style={{ fontSize: 12, cursor: "pointer" }} onClick={() => setDett(r)} title="Apri la scrittura completa">
+                    <td style={{ paddingLeft: 12 + x.prof * 18, color: "var(--ink-2)" }}>
+                      <span className="mono" style={{ color: "var(--ink-3)", marginRight: 8 }}>{(r.data || "").split("-").reverse().join("/")}</span>
+                      {r.label}{r.contro && <span style={{ color: "var(--ink-3)" }}> · {r.contro}</span>}
+                      {!inCur && <span className="pill" style={{ marginLeft: 6, fontSize: 9.5 }}>{r.stagione}</span>}
+                    </td>
+                    <td className="num" style={{ color: "var(--ink-2)" }}>{inCur ? f2(r.val) : ""}</td>
+                    {conf && <td className="num" style={{ color: "var(--ink-3)" }}>{inCur ? "" : f2(r.val)}</td>}
+                    {conf && <td></td>}{conf && variazioni && <td></td>}
+                  </tr>
+                );
+              }
+              const n = x.n, fin = n.finale;
+              const st = { fontWeight: pesi[n.tipo] || 400 };
+              const bg = fin ? { background: "var(--ink)", color: "#fff" } : n.tipo === "sez" ? { background: "var(--panel-2)" } : {};
+              return (
+                <tr key={n.key + i} style={bg}>
+                  <td style={{ paddingLeft: 12 + x.prof * 18, cursor: x.haFigli ? "pointer" : "default", ...st, fontSize: n.tipo === "conto" ? 12.5 : 13.5 }}
+                      onClick={() => x.haFigli && setAperti(p => ({ ...p, [n.key]: !p[n.key] }))}>
+                    {x.haFigli ? <span style={{ display: "inline-block", width: 14, color: fin ? "#fff" : "var(--ink-3)" }}>{x.aperto ? "▾" : "▸"}</span> : <span style={{ display: "inline-block", width: 14 }} />}
+                    {n.label}
+                  </td>
+                  <td className="num" style={st}>{f2(n.v)}</td>
+                  {colDelta(n.v, n.p, fin ? { ...st, color: "rgba(255,255,255,.75)" } : st)}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 8 }}>
+          Clic su ▸ per aprire un livello, clic su una scrittura per vederla completa. Negativi fra parentesi. {conf ? `Le scritture ${prec.stagione} compaiono nella colonna del loro anno.` : ""}
+        </div>
+      </div>
+
+      {dett && (
+        <div className="modal-bg" onClick={() => setDett(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 680, width: "94%" }}>
+            <div className="modal-head">
+              <h3>{dett.scr ? "Scrittura contabile" : "Movimento"} · {(dett.data || "").split("-").reverse().join("/")} <span style={{ fontSize: 12, fontWeight: 400, color: "var(--ink-3)" }}>· {dett.stagione}</span></h3>
+              <button className="btn ghost sm" onClick={() => setDett(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ marginBottom: 10, fontSize: 14 }}>{dett.label || "—"}</div>
+              {dett.scr ? (
+                <table className="tbl">
+                  <thead><tr><th>Conto</th><th className="num">Dare</th><th className="num">Avere</th></tr></thead>
+                  <tbody>
+                    {(dett.scr.righe || []).map((r, i) => (
+                      <tr key={i}><td><span className="mono">{String(r.codice).padStart(2, "0")}</span> {(r.nome || "").trim()}</td>
+                        <td className="num">{r.dare ? numIT(r.dare, 2) : ""}</td><td className="num">{r.avere ? numIT(r.avere, 2) : ""}</td></tr>
+                    ))}
+                    <tr style={{ fontWeight: 700 }}><td>Totale</td>
+                      <td className="num">{numIT((dett.scr.righe || []).reduce((a, r) => a + (r.dare || 0), 0), 2)}</td>
+                      <td className="num">{numIT((dett.scr.righe || []).reduce((a, r) => a + (r.avere || 0), 0), 2)}</td></tr>
+                  </tbody>
+                </table>
+              ) : dett.mov ? (
+                <table className="tbl"><tbody>
+                  {[["Tipo", dett.mov.tipo], ["Categoria", dett.mov.categoria], ["Importo", "€ " + numIT(Number(dett.mov.importo) || 0, 2)],
+                    ["Conto liquidità", (contiMap[dett.mov.contoLiquidita]?.nome || dett.mov.contoLiquidita || "").toString().trim()],
+                    ["Contropartita", dett.mov.contoPdC ? `${dett.mov.contoPdC} ${(contiMap[dett.mov.contoPdC]?.nome || "").trim()}` : ""], ["BU", dett.mov.bu || ""]]
+                    .map(([k, v]) => <tr key={k}><td style={{ color: "var(--ink-3)", width: 150 }}>{k}</td><td>{v}</td></tr>)}
+                </tbody></table>
+              ) : null}
+              {dett.scr && (dett.scr.bu || dett.scr.origine === "apertura" || dett.scr.origine === "composta") && <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 8 }}>{dett.scr.origine === "apertura" ? "Scrittura di apertura" : dett.scr.origine === "composta" ? "Scrittura composta" : ""}{dett.scr.bu ? (dett.scr.origine === "apertura" || dett.scr.origine === "composta" ? " · " : "") + "BU " + dett.scr.bu : ""}</div>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast, stagioniDisponibili }) {
   const [tab, setTab] = useState("sp");   // sp | ce | rf | rfr | prospetti | controlli
   const [schema, setSchema] = useState(null);
@@ -16797,13 +17074,15 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
     const cm = {};
     datiPrec.conti.forEach(c => { if (c) cm[c.codice] = c; });
     Object.values(contiMap).forEach(c => { if (!cm[c.codice]) cm[c.codice] = c; });
-    const mastPrec = calcolaMastrini(generaLibroGiornale(datiPrec.movimenti, datiPrec.saldiIniziali, cm));
+    const scrPrec = generaLibroGiornale(datiPrec.movimenti, datiPrec.saldiIniziali, cm);
+    const mastPrec = calcolaMastrini(scrPrec);
     const pr = calcolaProspetti(schema, mastPrec);
     const rf = rendicontoDiretto(schema, datiPrec.movimenti, datiPrec.saldiIniziali);
     const mancanti = controlliSchema(schema, mastPrec, []).mancanti;
     const mastIniPrec = calcolaMastrini(generaLibroGiornale(datiPrec.movimenti.filter(isAperturaMov), datiPrec.saldiIniziali, cm));
     const rfRicl = rendicontoRiclassificato(schema, pr, mastPrec, mastIniPrec, cm);
-    return { stagione: datiPrec.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf), mancanti };
+    return { stagione: datiPrec.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf), mancanti,
+             scritture: scrPrec, movimenti: datiPrec.movimenti };
   }, [datiPrec, schema, contiMap]);
 
   if (!caricato || !schema) return <div className="empty-state">Caricamento schema…</div>;
@@ -17175,7 +17454,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
       <div className="filters" style={{ marginBottom: 14, display: "flex", gap: 6, flexWrap: "wrap" }}>
         {[["sp", "Struttura SP"], ["ce", "Struttura CE"], ["rf", "Struttura RF"], ["rfr", "RF Riclassificato"],
-          ["prospetti", "Anteprima prospetti"], ["indici", "Indici"],
+          ["prospetti", "Anteprima prospetti"], ["esplora", "Esplora (drill-down)"], ["indici", "Indici"],
           ["controlli", `Controlli${controlli.mancanti.length + controlli.doppi.length > 0 ? " ⚠" : ""}`]]
           .map(([k, label]) => (
             <button key={k} className={"btn " + (tab === k ? "" : "ghost")} onClick={() => setTab(k)}>{label}</button>
@@ -17484,6 +17763,11 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
               indiretto resta solo come controllo, nella scheda Controlli. */}
           <SBRfRiclassificato R={rfRicl} Rp={conf ? calcPrec.rfRicl : null} precStagione={calcPrec ? calcPrec.stagione : ""} variazioni={variazioni} stagione={stagione} />
         </div>
+      )}
+
+      {tab === "esplora" && (
+        <SBEsplora stagione={stagione} prospetti={prospetti} rfDir={rfDir} movimenti={movimenti} saldiIniziali={saldiIniziali}
+          contiMap={contiMap} prec={conf ? calcPrec : null} variazioni={variazioni} />
       )}
 
       {tab === "indici" && (
