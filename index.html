@@ -999,7 +999,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.51.0";
+const APP_VERSION = "3.52.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -15253,6 +15253,8 @@ function righeRfRiclassificato(R, conDettaglio, forza) {
   const iImp = add("voce", "Imposte", R.imposte); det(R.ce.imposte);
   add("fin", "RISULTATO D'ESERCIZIO", R.risultato, { parti: [iEbit, iFin, iStr, iImp] });
 
+  // le righe del conto economico riclassificato hanno anche l'incidenza % sui ricavi operativi
+  out.forEach(r => { r.ce = true; });
   add("sez", "DALLA REDDITIVITÀ ALLA CASSA");
   const iEbitda2 = add("tot", "EBITDA", R.ebitda);
   const pOp = [iEbitda2];
@@ -15289,13 +15291,18 @@ function righeRfConfronto(R, Rp, conDettaglio) {
       const b = r.tipo + ":" + r.label; n[b] = (n[b] || 0) + 1; par = b + "#" + n[b];
       return { ...r, k: par };
     }); };
-  const a = chiavi(righeRfRiclassificato(R, conDettaglio, forza));
+  const base = (rr) => { const x = rr.find(r => r.ce && r.tipo === "voce"); return x ? x.val : 0; };
+  const a0 = righeRfRiclassificato(R, conDettaglio, forza);
+  const cb = base(a0);
+  const a = chiavi(a0).map(r => ({ ...r, cb }));
   if (!Rp) return a;
-  const b = chiavi(righeRfRiclassificato(Rp, conDettaglio, forza));
+  const b0 = righeRfRiclassificato(Rp, conDettaglio, forza);
+  const pb = base(b0);
+  const b = chiavi(b0);
   const mb = new Map(b.map(r => [r.k, r])), ka = new Set(a.map(r => r.k));
   const out = []; let par = null;
-  const aggiungiSoloPrec = () => { if (par) b.filter(r => r.tipo === "det" && r.parent === par && !ka.has(r.k)).forEach(r => out.push({ ...r, val: 0, pv: r.val })); };
-  a.forEach(r => { if (r.tipo !== "det") { aggiungiSoloPrec(); par = r.k; } out.push({ ...r, pv: mb.has(r.k) ? mb.get(r.k).val : 0 }); });
+  const aggiungiSoloPrec = () => { if (par) b.filter(r => r.tipo === "det" && r.parent === par && !ka.has(r.k)).forEach(r => out.push({ ...r, val: 0, pv: r.val, cb, pb })); };
+  a.forEach(r => { if (r.tipo !== "det") { aggiungiSoloPrec(); par = r.k; } out.push({ ...r, pv: mb.has(r.k) ? mb.get(r.k).val : 0, pb }); });
   aggiungiSoloPrec();
   return out;
 }
@@ -15338,30 +15345,39 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio, prec)
   // lo zero scritto "-". Prendo money() dal builder cosi' non puo' divergere.
   const { money, NERO, GRIGIO_CHIARO: GRIGIO } = creaPdfBuilder(stagione, "portrait", doc);
   const cf = Rp ? { stagione, precStagione: prec.stagione, get: () => 0, var: !!prec.variazioni } : null;
-  const nCol = cf ? (cf.var ? 5 : 3) : 2;
-  const extra = (r, stile) => { if (!cf) return [];
-    return celleConfrontoPdf({ ...cf, get: () => r.pv || 0 }, "", stile, r.val, money); };
+  // colonne: Voce | anno | % ricavi | [anno prec. | % ricavi | [Var. € | Var. %]]
+  const nCol = 3 + (cf ? 2 + (cf.var ? 2 : 0) : 0);
+  const pcTxt = (v, b) => Math.abs(b || 0) > 0.5 ? numIT((v || 0) / Math.abs(b) * 100, 1) + "%" : "-";
+  const celle = (r, stile, coloreBase) => {
+    const grig = { ...(stile || {}), textColor: coloreBase || [120, 120, 120], fontSize: 7.5 };
+    const out = [{ content: r.ce ? pcTxt(r.val, r.cb) : "", styles: grig }];
+    if (!cf) return out;
+    const pvCells = celleConfrontoPdf({ ...cf, get: () => r.pv || 0 }, "", stile, r.val, money);
+    out.push(pvCells[0], { content: r.ce ? pcTxt(r.pv, r.pb) : "", styles: grig }, ...pvCells.slice(1));
+    return out;
+  };
   const body = righeRfConfronto(R, Rp, !!conDettaglio).map(r => {
     const imp = money(r.val);
     if (r.tipo === "sez") return [{ content: r.label, colSpan: nCol, styles: { fontStyle: "bold", fillColor: NERO, textColor: 240 } }];
     if (r.tipo === "det") { const st = { fontSize: 7, textColor: [130, 130, 130] };
-      return [{ content: `      ${r.label}`, styles: st }, { content: imp, styles: st }, ...extra(r, { fontSize: 7 })]; }
+      return [{ content: `      ${r.label}`, styles: st }, { content: imp, styles: st }, ...celle(r, { fontSize: 7 })]; }
     if (r.tipo === "tot") { const st = { fontStyle: "bold", fillColor: GRIGIO };
-      return [{ content: `  ${r.label}`, styles: st }, { content: imp, styles: st }, ...extra(r, st)]; }
+      return [{ content: `  ${r.label}`, styles: st }, { content: imp, styles: st }, ...celle(r, st)]; }
     if (r.tipo === "fin") { const st = { fontStyle: "bold", fillColor: NERO, textColor: 240 };
       return [{ content: `  ${r.label}`, styles: st }, { content: imp, styles: st },
-              ...extra(r, { fontStyle: "bold", fillColor: NERO }).map(c => ({ ...c, styles: { ...c.styles, textColor: 225 } }))]; }
-    return [`     ${r.label}`, imp, ...extra(r, null)];
+              ...celle(r, { fontStyle: "bold", fillColor: NERO }, [200, 200, 200]).map(c => ({ ...c, styles: { ...c.styles, textColor: (c.styles && c.styles.fontSize === 7.5) ? [200, 200, 200] : 225 } }))]; }
+    return [`     ${r.label}`, imp, ...celle(r, null)];
   });
-  const largT = cf ? (cf.var ? 184 : 150) : 160;
-  const larg0 = cf ? (cf.var ? 90 : 90) : 126;
+  const wN = 24, wP = 13;
+  const larg0 = cf ? (cf.var ? 72 : 96) : 110;
+  const largT = larg0 + wN + wP + (cf ? wN + wP + (cf.var ? 20 + 14 : 0) : 0);
+  const cs = { 0: { cellWidth: larg0 }, 1: { cellWidth: wN, halign: "right" }, 2: { cellWidth: wP, halign: "right" } };
+  if (cf) { cs[3] = { cellWidth: wN, halign: "right" }; cs[4] = { cellWidth: wP, halign: "right" }; if (cf.var) { cs[5] = { cellWidth: 20, halign: "right" }; cs[6] = { cellWidth: 14, halign: "right" }; } }
   doc.autoTable({
-    startY: 30, head: [cf ? ["Voce", cf.stagione, cf.precStagione, ...(cf.var ? ["Var. €", "Var. %"] : [])] : ["Voce", "Importo"]], body, theme: "plain",
+    startY: 30, head: [["Voce", cf ? cf.stagione : "Importo", "% ric.", ...(cf ? [cf.precStagione, "% ric.", ...(cf.var ? ["Var. €", "Var. %"] : [])] : [])]], body, theme: "plain",
     styles: { fontSize: cf ? 8 : 8.5, cellPadding: 1.6 },
     headStyles: { fillColor: NERO, textColor: 240, fontStyle: "bold" },
-    columnStyles: cf
-      ? { 0: { cellWidth: larg0 }, 1: { cellWidth: 30, halign: "right" }, 2: { cellWidth: 30, halign: "right" }, ...(cf.var ? { 3: { cellWidth: 20, halign: "right" }, 4: { cellWidth: 14, halign: "right" } } : {}) }
-      : { 0: { cellWidth: 126 }, 1: { cellWidth: 34, halign: "right" } },
+    columnStyles: cs,
     didParseCell: (dd) => { if (dd.section === "head" && dd.column.index > 0) dd.cell.styles.halign = "right"; },
     margin: { left: (W - largT) / 2 },
   });
@@ -15371,7 +15387,7 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio, prec)
     const yN = doc.lastAutoTable.finalY + 5;
     doc.setFont("helvetica", "italic"); doc.setFontSize(7.5); doc.setTextColor(120);
     doc.text("Importi in unità di euro: ogni riga è arrotondata singolarmente, quindi una somma può differire di 1 dal totale esposto. I valori reali quadrano al centesimo.",
-             (W - (cf ? largT : 160)) / 2, yN, { maxWidth: cf ? largT : 160 });
+             (W - largT) / 2, yN, { maxWidth: largT });
     doc.setFont("helvetica", "normal"); doc.setTextColor(0);
   }
 
@@ -15389,22 +15405,29 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio, prec)
 // Vista a schermo (componente a livello di modulo, come gli altri editor dello schema)
 function SBRfRiclassificato({ R, Rp, precStagione, variazioni, stagione }) {
   const [dettaglio, setDettaglio] = useState(false);
+  const [perc, setPerc] = useState(true);
   if (!R) return null;
   const conf = !!Rp;
+  // incidenza % sui ricavi operativi (solo righe del conto economico)
+  const pc = (v, b) => Math.abs(b || 0) > 0.5 ? numIT(v / Math.abs(b) * 100, 1) + "%" : "–";
+  const cellaPerc = (r, prec, stile) => perc ? <td key={prec ? "pp" : "pc0"} className="num" style={{ fontSize: 11, color: "var(--ink-3)", ...(stile || {}) }}>{r.ce && r.tipo !== "sez" ? pc(prec ? r.pv || 0 : r.val || 0, prec ? r.pb : r.cb) : ""}</td> : null;
   // m0: colonne di importi → negativi fra parentesi. m0s: righe discorsive → segno meno.
   const m0 = (n) => { const r = Math.round(Number(n) || 0); if (r === 0) return "-";
                       const s = Math.abs(r).toLocaleString("it-IT"); return r < 0 ? "(" + s + ")" : s; };
   const m0s = (n) => { const r = Math.round(Number(n) || 0); return r === 0 ? "-" : r.toLocaleString("it-IT"); };
   const righe = righeRfRiclassificato(R, dettaglio);
   const righeV = righeRfConfronto(R, Rp, dettaglio);
-  const nCol = conf ? (variazioni ? 5 : 4) : 2;
+  const nCol = (conf ? (variazioni ? 5 : 4) : 2) + (perc ? (conf ? 2 : 1) : 0);
   // colonne aggiuntive: esercizio precedente, Δ ed eventualmente Δ %
   const extra = (r, stile, bianco) => {
-    if (!conf) return null;
-    const pv = r.pv || 0, d = Math.round(((r.val || 0) - pv) * 100) / 100;
     const grigio = bianco ? "rgba(255,255,255,.7)" : "var(--ink-3)";
+    const pcCur = cellaPerc(r, false, bianco ? { color: grigio } : null);
+    if (!conf) return pcCur;
+    const pv = r.pv || 0, d = Math.round(((r.val || 0) - pv) * 100) / 100;
     return [
+      pcCur,
       <td key="p" className="num" style={{ ...(stile || {}), color: grigio }}>{m0(pv)}</td>,
+      cellaPerc(r, true, bianco ? { color: grigio } : null),
       <td key="d" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>{Math.abs(d) < 0.5 ? "–" : (d > 0 ? "+" : "−") + m0(Math.abs(d))}</td>,
       ...(variazioni ? [<td key="pc" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>
         {Math.abs(pv) > 0.5 ? (d > 0.004 ? "+" : d < -0.004 ? "−" : "") + numIT(Math.abs(d) / Math.abs(pv) * 100, 1) + "%" : "–"}</td>] : []),
@@ -15416,10 +15439,16 @@ function SBRfRiclassificato({ R, Rp, precStagione, variazioni, stagione }) {
     <div className="card" style={{ maxWidth: conf ? 860 : 640, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <div className="card-title" style={{ margin: 0 }}>RF Riclassificato{conf ? ` · confronto con ${precStagione}` : ""}</div>
-        <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
-          <input type="checkbox" checked={dettaglio} onChange={e => setDettaglio(e.target.checked)} />
-          Mostra i conti
-        </label>
+        <div style={{ display: "flex", gap: 14 }}>
+          <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
+            <input type="checkbox" checked={perc} onChange={e => setPerc(e.target.checked)} />
+            % sui ricavi
+          </label>
+          <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
+            <input type="checkbox" checked={dettaglio} onChange={e => setDettaglio(e.target.checked)} />
+            Mostra i conti
+          </label>
+        </div>
       </div>
       <div style={{ fontSize: 12, color: "var(--ink-3)", margin: "6px 0 12px", lineHeight: 1.5 }}>
         Dall'EBITDA al free cash flow. Legge le voci del conto economico dallo schema e le variazioni
@@ -15427,10 +15456,10 @@ function SBRfRiclassificato({ R, Rp, precStagione, variazioni, stagione }) {
       </div>
       <table style={{ width: "100%" }}>
         <tbody>
-          {conf && (
+          {(conf || perc) && (
             <tr>
               <td></td>
-              {[stagione || "", precStagione, "Δ", ...(variazioni ? ["Δ %"] : [])].map(t => (
+              {[stagione || "", ...(perc ? ["% ric."] : []), ...(conf ? [precStagione, ...(perc ? ["% ric. "] : []), "Δ", ...(variazioni ? ["Δ %"] : [])] : [])].map(t => (
                 <td key={t} className="num" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3 }}>{t}</td>
               ))}
             </tr>
