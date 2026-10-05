@@ -922,6 +922,32 @@
   .an-kpic-tick { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
   .an-cl { cursor: pointer; }
   .esp-riga:hover td { background: var(--panel-2); }
+  /* Tesoreria: righe etichetta/importo, leggibili anche su telefono */
+  .tes-riga { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 9px 4px; border-bottom: 1px solid var(--rule); }
+  .tes-riga.forte { font-weight: 700; border-bottom: none; border-top: 1px solid var(--rule-2); }
+  .tes-sx { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .tes-dx { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tes-sotto { font-size: 12px; color: var(--ink-3); font-weight: 400; margin-top: 2px; white-space: normal; }
+  .tes-dx .pos { color: var(--accent); } .tes-dx .neg { color: var(--danger); }
+  .tes-nota { font-size: 12.5px; color: var(--ink-3); margin-top: 10px; line-height: 1.5; }
+  .tes-check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin-top: 10px; cursor: pointer; }
+  .tes-check input { margin-top: 3px; }
+  .tes-blocco { padding: 8px 10px; background: var(--panel-2); border-radius: 8px; margin-bottom: 8px; }
+  .tes-blocco .tes-riga { border-bottom-color: transparent; padding: 5px 0; }
+  .tes-azioni { display: flex; gap: 8px; flex-wrap: wrap; margin: -6px 0 14px; }
+  .tes-hero { border-width: 2px; border-style: solid; margin-bottom: 16px; }
+  .tes-hero-val { font-family: 'Fraunces', serif; font-size: 34px; line-height: 1.15; margin: 2px 0 6px; }
+  .tes-hero-val.neg { color: var(--danger); }
+  .tes-ponte { margin-top: 10px; max-width: 520px; }
+  .tes-griglia { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; }
+  .tes-form { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 14px; padding: 12px; background: var(--panel-2); border-radius: 8px; }
+  .tes-form > div { flex: 1 1 140px; min-width: 0; }
+  .tes-form input, .tes-form select { width: 100%; box-sizing: border-box; }
+  @media (max-width: 768px) {
+    .tes .card { padding: 14px; }
+    .tes-azioni .btn { flex: 1 1 auto; }
+    .tes-hero-val { font-size: 30px; }
+  }
   .an-filtro { display: flex; flex-direction: column; gap: 2px; }
   .an-cerca { margin-bottom: 6px; padding: 6px 9px !important; font-size: 12.5px; }
   .an-filtro-item { display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px; border-radius: 5px; cursor: pointer; font-size: 12.5px; border: 1px solid transparent; }
@@ -999,7 +1025,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.53.0";
+const APP_VERSION = "3.54.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2012,180 +2038,155 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
 
   if (!imp) return <div className="empty-state">Caricamento…</div>;
   const lbl = { display: "block", fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", marginBottom: 4 };
+  const dataIT = (d) => d ? d.split("-").reverse().join("/") : "";
+  // riga "etichetta a sinistra, importo a destra": leggibile sia su desktop sia su telefono
+  const Riga = ({ sx, sotto, dx, dxSotto, cl, forte, onClick, sfondo, rientro, children }) => (
+    <div className={"tes-riga" + (forte ? " forte" : "")} onClick={onClick} style={{ cursor: onClick ? "pointer" : "default", background: sfondo, paddingLeft: rientro }}>
+      <div className="tes-sx"><div>{sx}</div>{sotto && <div className="tes-sotto">{sotto}</div>}{children}</div>
+      <div className="tes-dx"><div className={cl || ""}>{dx}</div>{dxSotto && <div className="tes-sotto">{dxSotto}</div>}</div>
+    </div>
+  );
+  const nettoImp = impEnt - impUsc + budEnt - budUsc;
   return (
-    <div>
+    <div className="tes">
       <div className="page-head">
         <div>
           <h2>Tesoreria</h2>
-          <div className="sub">Cassa di oggi, soldi fermi in crediti e debiti, impegni in arrivo e cassa davvero disponibile · {stagione}</div>
+          <div className="sub">Cassa di oggi, soldi fermi in crediti e debiti, impegni e cassa davvero disponibile · {stagione}</div>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn ghost" onClick={() => aggiungi("uscita", { categoria: "Dividendi", descrizione: "Distribuzione dividendi ai soci" })}>+ Dividendi</button>
-          <button className="btn ghost" onClick={() => aggiungi("uscita")}>+ Uscita prevista</button>
-          <button className="btn ghost" onClick={() => aggiungi("entrata")}>+ Entrata prevista</button>
+      </div>
+      <div className="tes-azioni">
+        <button className="btn ghost" onClick={() => aggiungi("uscita", { categoria: "Dividendi", descrizione: "Distribuzione dividendi ai soci" })}>+ Dividendi</button>
+        <button className="btn ghost" onClick={() => aggiungi("uscita")}>+ Uscita prevista</button>
+        <button className="btn ghost" onClick={() => aggiungi("entrata")}>+ Entrata prevista</button>
+      </div>
+
+      {/* CASSA LIBERA: il numero che conta, in evidenza */}
+      <div className="card tes-hero" style={{ borderColor: cassaLibera < soglia ? "var(--danger)" : "var(--accent)" }}>
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--ink-3)" }}>Cassa libera</div>
+        <div className={"tes-hero-val " + (cassaLibera < 0 || cassaLibera < soglia ? "neg" : "")}>{eur(cassaLibera)}</div>
+        {soglia > 0 && <div style={{ fontSize: 12.5, color: cassaLibera < soglia ? "var(--danger)" : "var(--ink-3)" }}>{cassaLibera < soglia ? "⚠ sotto" : "sopra"} la soglia di {eur(soglia)}</div>}
+        <div className="tes-ponte">
+          <Riga sx="Liquidità oggi" dx={eur(totLiq)} />
+          <Riga sx="+ crediti e anticipi da recuperare" dx={"+" + fmt(totCred)} cl="pos" />
+          <Riga sx="− debiti e somme da girare" dx={"−" + fmt(totDeb)} cl="neg" />
+          <Riga sx={"± impegni" + (budSel.length ? " e budget" : "")} sotto={`${impegni.length} impegni${budSel.length ? ` · ${budSel.length} budget` : ""}`} dx={(nettoImp >= 0 ? "+" : "−") + fmt(Math.abs(nettoImp))} cl={cls(nettoImp)} />
+          <Riga sx="= Cassa libera" dx={eur(cassaLibera)} forte />
         </div>
       </div>
 
-      {/* KPI */}
-      <div className="kpi-grid" style={{ marginBottom: 16 }}>
-        <div className="kpi accent"><div className="label">Liquidità oggi</div><div className="value">{eur(totLiq)}</div><div className="hint">{liquidita.length} conti</div></div>
-        <div className="kpi"><div className="label">Crediti e anticipi da recuperare</div><div className="value pos">+{eur(totCred)}</div><div className="hint">{crediti.length} partite aperte</div></div>
-        <div className="kpi"><div className="label">Debiti e somme da girare</div><div className="value neg">−{eur(totDeb)}</div><div className="hint">{debiti.length} partite aperte</div></div>
-        <div className="kpi"><div className="label">Impegni e budget</div><div className={"value " + cls(impEnt - impUsc + budEnt - budUsc)}>{(impEnt - impUsc + budEnt - budUsc) >= 0 ? "+" : "−"}{eur(Math.abs(impEnt - impUsc + budEnt - budUsc))}</div><div className="hint">{impegni.length} impegni{budSel.length ? ` · ${budSel.length} budget` : ""}</div></div>
-        <div className="kpi" style={{ border: "2px solid " + (cassaLibera < soglia ? "var(--danger)" : "var(--accent)") }}>
-          <div className="label">Cassa libera</div><div className={"value " + (cassaLibera < 0 ? "neg" : "")}>{eur(cassaLibera)}</div>
-          <div className="hint">{soglia ? (cassaLibera < soglia ? `⚠ sotto la soglia di ${eur(soglia)}` : `sopra la soglia di ${eur(soglia)}`) : "liquidità + crediti − debiti ± impegni"}</div>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 16 }}>
+      <div className="tes-griglia">
         {/* LIQUIDITÀ */}
         <div className="card">
           <h3 className="card-title">Dove sono i soldi oggi</h3>
-          <table className="tbl"><thead><tr><th>Conto</th><th>Ultimo movimento</th><th className="num">Saldo</th></tr></thead>
-            <tbody>
-              {liquidita.map(l => <tr key={l.codice}><td>{l.nome}</td><td style={{ color: "var(--ink-3)", fontSize: 12 }}>{l.ultimo ? l.ultimo.split("-").reverse().join("/") : "—"}</td><td className={"num " + (l.saldo < 0 ? "neg" : "")}>{fmt(l.saldo)}</td></tr>)}
-              <tr style={{ fontWeight: 700 }}><td>Totale</td><td></td><td className="num">{fmt(totLiq)}</td></tr>
-            </tbody></table>
-          {riserve > 0.005 && <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 10 }}>Riserve di utili accumulati (Riserva utile + straordinaria): <b>{eur(riserve)}</b>. È il limite contabile per i dividendi; la cassa libera dice quanto è sostenibile.</div>}
+          {liquidita.map(l => <Riga key={l.codice} sx={l.nome} sotto={l.ultimo ? "ultimo movimento " + dataIT(l.ultimo) : ""} dx={fmt(l.saldo)} cl={l.saldo < 0 ? "neg" : ""} />)}
+          <Riga sx="Totale" dx={eur(totLiq)} forte />
+          {riserve > 0.005 && <div className="tes-nota">Riserve di utili accumulati: <b>{eur(riserve)}</b>. È il massimo distribuibile come dividendi; la cassa libera dice quanto è sostenibile.</div>}
         </div>
 
         {/* EVENTI */}
         <div className="card">
           <h3 className="card-title">Cassa ferma sugli eventi</h3>
-          {!eventi.length ? <div style={{ fontSize: 13, color: "var(--ink-3)" }}>Nessun evento con partite aperte.</div> : (
-            <table className="tbl"><thead><tr><th>Evento / BU</th><th className="num">Incassi da chiudere</th><th className="num">Anticipi pagati</th><th className="num">Debiti partner</th><th className="num">Netto in cassa</th></tr></thead>
-              <tbody>{eventi.map(e => <tr key={e.bu}><td>{e.bu}</td><td className="num">{fmt(e.incassi)}</td><td className="num">{fmt(e.anticipi)}</td><td className="num">{fmt(e.debiti)}</td><td className="num" style={{ fontWeight: 700 }}>{fmt(e.netto)}</td></tr>)}</tbody></table>
-          )}
-          <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8, lineHeight: 1.5 }}>
-            Soldi incassati o anticipati per un evento non ancora chiuso (conti 74 anticipi, 75 entrate anticipate, 83 debiti v/partner). Finché l'evento non è chiuso
-            non sai quanto resta all'associazione e quanto va ai partner.
-          </div>
-          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, marginTop: 8, cursor: "pointer" }}>
-            <input type="checkbox" checked={contaTransitori} onChange={e => salva({ contaTransitori: e.target.checked })} />
-            Considera le partite degli eventi nella cassa libera (prudente)
-          </label>
+          {!eventi.length ? <div className="tes-nota">Nessun evento con partite aperte.</div> : eventi.map(e => (
+            <div key={e.bu} className="tes-blocco">
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>{e.bu}</div>
+              <Riga sx="Incassi da chiudere" dx={fmt(e.incassi)} />
+              <Riga sx="Anticipi pagati" dx={"−" + fmt(e.anticipi)} />
+              {e.debiti > 0.005 && <Riga sx="Debiti verso partner" dx={"−" + fmt(e.debiti)} />}
+              <Riga sx="Netto in cassa da regolare" dx={fmt(e.netto)} forte />
+            </div>
+          ))}
+          <div className="tes-nota">Soldi incassati o anticipati per un evento non ancora chiuso (conti 74, 75, 83): finché l'evento non è chiuso non sai quanto resta all'associazione e quanto va ai partner.</div>
+          <label className="tes-check"><input type="checkbox" checked={contaTransitori} onChange={e => salva({ contaTransitori: e.target.checked })} /> Considera gli eventi nella cassa libera (prudente)</label>
         </div>
       </div>
 
       {/* PARTITE APERTE */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 className="card-title">Partite aperte: crediti e debiti</h3>
-        {!partite.length ? <div style={{ fontSize: 13, color: "var(--ink-3)" }}>Nessuna partita aperta.</div> : (
-          <table className="tbl"><thead><tr><th>Conto</th><th>Categoria</th><th className="num">Da incassare / recuperare</th><th className="num">Da pagare / girare</th></tr></thead>
-            <tbody>
-              {partite.map(p => (
-                <React.Fragment key={p.codice}>
-                  <tr style={{ cursor: "pointer", opacity: (!contaTransitori && p.transitorio) ? .5 : 1 }} onClick={() => setAperta(aperta === p.codice ? null : p.codice)}>
-                    <td><span style={{ color: "var(--ink-3)", marginRight: 6 }}>{aperta === p.codice ? "▾" : "▸"}</span><span className="mono">{String(p.codice).padStart(2, "0")}</span> {p.nome}</td>
-                    <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.categoria}</td>
-                    <td className="num pos">{p.saldo > 0 ? fmt(p.saldo) : ""}</td><td className="num neg">{p.saldo < 0 ? fmt(-p.saldo) : ""}</td>
-                  </tr>
-                  {aperta === p.codice && p.bu.map(b => (
-                    <tr key={p.codice + b.bu} style={{ fontSize: 12, color: "var(--ink-2)" }}><td style={{ paddingLeft: 40 }}>BU {b.bu}</td><td></td>
-                      <td className="num">{b.saldo > 0 ? fmt(b.saldo) : ""}</td><td className="num">{b.saldo < 0 ? fmt(-b.saldo) : ""}</td></tr>
-                  ))}
-                  {aperta === p.codice && (movimenti || []).filter(x => Number(x.contoPdC) === p.codice).sort((a, b) => String(a.data).localeCompare(String(b.data))).map(x => (
-                    <tr key={x._id} style={{ fontSize: 11.5, color: "var(--ink-3)" }}><td style={{ paddingLeft: 40 }} colSpan={2}>{(x.data || "").split("-").reverse().join("/")} · {x.descrizione || x.categoria}</td>
-                      <td className="num">{x.tipo === "uscita" || (x.dare > 0) ? fmt(x.dare || x.importo) : ""}</td><td className="num">{x.tipo === "entrata" || (x.avere > 0) ? fmt(x.avere || x.importo) : ""}</td></tr>
-                  ))}
-                </React.Fragment>
-              ))}
-              <tr style={{ fontWeight: 700 }}><td colSpan={2}>Totale{!contaTransitori ? " (senza partite eventi)" : ""}</td><td className="num">{fmt(totCred)}</td><td className="num">{fmt(totDeb)}</td></tr>
-            </tbody></table>
-        )}
+        <h3 className="card-title">Partite aperte</h3>
+        {!partite.length ? <div className="tes-nota">Nessuna partita aperta.</div> : partite.map(p => (
+          <React.Fragment key={p.codice}>
+            <Riga onClick={() => setAperta(aperta === p.codice ? null : p.codice)}
+              sx={<span><span style={{ color: "var(--ink-3)", marginRight: 6 }}>{aperta === p.codice ? "▾" : "▸"}</span>{p.nome}</span>}
+              sotto={p.categoria + ((!contaTransitori && p.transitorio) ? " · esclusa dalla cassa libera" : "")}
+              dx={fmt(Math.abs(p.saldo))} cl={p.saldo > 0 ? "pos" : "neg"} dxSotto={p.saldo > 0 ? "da incassare" : "da pagare / girare"} />
+            {aperta === p.codice && p.bu.map(b => <Riga key={b.bu} rientro={22} sx={"BU " + b.bu} dx={fmt(Math.abs(b.saldo))} sfondo="var(--panel-2)" />)}
+            {aperta === p.codice && (movimenti || []).filter(x => Number(x.contoPdC) === p.codice).sort((a, b) => String(a.data).localeCompare(String(b.data))).map(x => (
+              <Riga key={x._id} rientro={22} sfondo="var(--panel-2)" sx={<span style={{ fontSize: 12.5 }}>{x.descrizione || x.categoria}</span>} sotto={dataIT(x.data)}
+                dx={<span style={{ fontSize: 12.5 }}>{fmt(Number(x.dare) || Number(x.avere) || Number(x.importo) || 0)}</span>} />
+            ))}
+          </React.Fragment>
+        ))}
+        {partite.length > 0 && <>
+          <Riga sx="Totale da incassare" dx={fmt(totCred)} cl="pos" forte />
+          <Riga sx="Totale da pagare / girare" dx={fmt(totDeb)} cl="neg" forte />
+        </>}
       </div>
 
       {/* IMPEGNI */}
       <div className="card" style={{ marginTop: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <h3 className="card-title" style={{ margin: 0 }}>Impegni previsti</h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 12.5 }}>
-            <span style={{ color: "var(--ink-3)" }}>Soglia minima di cassa</span>
-            <input type="number" defaultValue={soglia || ""} placeholder="es. 3000" style={{ width: 100 }} onBlur={e => salva({ soglia: Number(e.target.value) || 0 })} />
-          </div>
-        </div>
+        <h3 className="card-title">Impegni previsti</h3>
         {nuovo && (
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end", margin: "12px 0", padding: 10, background: "var(--panel-2)", borderRadius: 8 }}>
-            <div><label style={lbl}>{nuovo.tipo === "entrata" ? "Entrata" : "Uscita"} · descrizione</label><input value={nuovo.descrizione} onChange={e => setNuovo({ ...nuovo, descrizione: e.target.value })} style={{ width: "100%" }} /></div>
-            <div><label style={lbl}>Importo €</label><input value={nuovo.importo} onChange={e => setNuovo({ ...nuovo, importo: e.target.value })} style={{ width: "100%" }} /></div>
-            <div><label style={lbl}>Data prevista</label><input type="date" value={nuovo.data} onChange={e => setNuovo({ ...nuovo, data: e.target.value })} style={{ width: "100%" }} /></div>
-            <div><label style={lbl}>Conto</label><select value={nuovo.conto} onChange={e => setNuovo({ ...nuovo, conto: e.target.value })} style={{ width: "100%" }}><option value="">—</option>{CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome}</option>)}</select></div>
-            <div><label style={lbl}>Categoria</label><input value={nuovo.categoria} onChange={e => setNuovo({ ...nuovo, categoria: e.target.value })} style={{ width: "100%" }} /></div>
-            <div style={{ display: "flex", gap: 6 }}><button className="btn accent" onClick={salvaNuovo}>Salva</button><button className="btn ghost" onClick={() => setNuovo(null)}>✕</button></div>
+          <div className="tes-form">
+            <div style={{ flex: "1 1 100%" }}><label style={lbl}>{nuovo.tipo === "entrata" ? "Entrata" : "Uscita"} · descrizione</label><input value={nuovo.descrizione} onChange={e => setNuovo({ ...nuovo, descrizione: e.target.value })} /></div>
+            <div><label style={lbl}>Importo €</label><input inputMode="decimal" value={nuovo.importo} onChange={e => setNuovo({ ...nuovo, importo: e.target.value })} /></div>
+            <div><label style={lbl}>Data prevista</label><input type="date" value={nuovo.data} onChange={e => setNuovo({ ...nuovo, data: e.target.value })} /></div>
+            <div><label style={lbl}>Conto</label><select value={nuovo.conto} onChange={e => setNuovo({ ...nuovo, conto: e.target.value })}><option value="">—</option>{CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome}</option>)}</select></div>
+            <div><label style={lbl}>Categoria</label><input value={nuovo.categoria} onChange={e => setNuovo({ ...nuovo, categoria: e.target.value })} /></div>
+            <div style={{ display: "flex", gap: 6, alignItems: "flex-end" }}><button className="btn accent" onClick={salvaNuovo}>Salva</button><button className="btn ghost" onClick={() => setNuovo(null)}>Annulla</button></div>
           </div>
         )}
-        {!impegni.length && !nuovo ? <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 8 }}>Nessun impegno. Aggiungi dividendi, spese o entrate previste con i pulsanti in alto.</div> : (
-          <table className="tbl" style={{ marginTop: 8 }}><thead><tr><th>Data</th><th>Descrizione</th><th>Categoria</th><th>Conto</th><th className="num">Entrata</th><th className="num">Uscita</th><th></th></tr></thead>
-            <tbody>
-              {impegni.map(x => (
-                <tr key={x.id}>
-                  <td className="mono" style={{ fontSize: 12 }}>{x.data ? x.data.split("-").reverse().join("/") : "da definire"}</td>
-                  <td>{x.descrizione}</td><td style={{ fontSize: 12, color: "var(--ink-3)" }}>{x.categoria}</td>
-                  <td style={{ fontSize: 12 }}>{x.conto ? (contiMap[x.conto]?.nome || "").trim() : "—"}</td>
-                  <td className="num pos">{x.tipo === "entrata" ? fmt(x.importo) : ""}</td><td className="num neg">{x.tipo !== "entrata" ? fmt(x.importo) : ""}</td>
-                  <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
-                    <button className="btn ghost sm" title="Fatto: registra poi il movimento in contabilità" onClick={() => segnaFatto(x)}>✓ fatto</button>{" "}
-                    <button className="btn danger sm" onClick={() => togli(x)}>✕</button>
-                  </td>
-                </tr>
-              ))}
-              <tr style={{ fontWeight: 700 }}><td colSpan={4}>Totale impegni</td><td className="num">{fmt(impEnt)}</td><td className="num">{fmt(impUsc)}</td><td></td></tr>
-            </tbody></table>
-        )}
+        {!impegni.length && !nuovo ? <div className="tes-nota">Nessun impegno. Aggiungi dividendi, spese o entrate previste con i pulsanti in alto.</div> : impegni.map(x => (
+          <Riga key={x.id} sx={x.descrizione} sotto={`${x.data ? dataIT(x.data) : "data da definire"} · ${x.categoria || ""}${x.conto ? " · " + (contiMap[x.conto]?.nome || "").trim() : ""}`}
+            dx={(x.tipo === "entrata" ? "+" : "−") + fmt(x.importo)} cl={x.tipo === "entrata" ? "pos" : "neg"}>
+            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <button className="btn ghost sm" onClick={() => segnaFatto(x)}>✓ fatto</button>
+              <button className="btn danger sm" onClick={() => togli(x)}>✕ elimina</button>
+            </div>
+          </Riga>
+        ))}
+        {impegni.length > 0 && <Riga sx="Totale impegni" dx={(impEnt - impUsc >= 0 ? "+" : "−") + fmt(Math.abs(impEnt - impUsc))} forte />}
         {impFatti.length > 0 && (
-          <details style={{ marginTop: 8 }}><summary style={{ fontSize: 12, color: "var(--ink-3)", cursor: "pointer" }}>{impFatti.length} impegni completati</summary>
-            {impFatti.map(x => <div key={x.id} style={{ fontSize: 12, color: "var(--ink-3)", margin: "4px 0" }}>✓ {x.descrizione} · {fmtEuro(x.importo)} <button className="btn ghost sm" onClick={() => ripristina(x)}>ripristina</button></div>)}
+          <details style={{ marginTop: 8 }}><summary style={{ fontSize: 12.5, color: "var(--ink-3)", cursor: "pointer" }}>{impFatti.length} impegni completati</summary>
+            {impFatti.map(x => <div key={x.id} style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "6px 0" }}>✓ {x.descrizione} · {fmtEuro(x.importo)} <button className="btn ghost sm" onClick={() => ripristina(x)}>ripristina</button></div>)}
           </details>
         )}
-        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8 }}>Quando un impegno si realizza, registra il movimento in contabilità e segnalo "✓ fatto": così non viene contato due volte.</div>
+        <div className="tes-nota">Quando un impegno si realizza, registra il movimento in contabilità e segnalo "✓ fatto", così non viene contato due volte.</div>
 
         {listaBudget.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <div style={lbl}>Includi i flussi ancora da muovere dei budget</div>
+            <div style={lbl}>Includi quello che i budget devono ancora muovere</div>
             {listaBudget.map(b => (
-              <label key={b.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, margin: "4px 0", cursor: "pointer" }}>
+              <label key={b.id} className="tes-check">
                 <input type="checkbox" checked={!!budIncl[b.id]} onChange={e => salva({ ["budgetInclusi/" + b.id]: e.target.checked ? true : null })} />
-                {b.nome} <span style={{ color: "var(--ink-3)", fontSize: 12 }}>({b.bu}) · entrate {fmt(b.ent)} · uscite {fmt(b.usc)}</span>
+                <span>{b.nome} <span style={{ color: "var(--ink-3)", fontSize: 12 }}>({b.bu}) · entrate {fmt(b.ent)} · uscite {fmt(b.usc)}</span></span>
               </label>
             ))}
           </div>
         )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 14, flexWrap: "wrap", fontSize: 13 }}>
+          <span style={{ color: "var(--ink-3)" }}>Soglia minima di cassa</span>
+          <input type="number" inputMode="decimal" defaultValue={soglia || ""} placeholder="es. 3000" style={{ width: 110 }} onBlur={e => salva({ soglia: Number(e.target.value) || 0 })} />
+        </div>
       </div>
 
       {/* PROIEZIONE */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 className="card-title">Proiezione della liquidità (impegni con data)</h3>
-        <div style={{ overflowX: "auto" }}>
-          <table className="tbl"><thead><tr><th>Mese</th><th className="num">Entrate</th><th className="num">Uscite</th><th className="num">Liquidità a fine mese</th><th>Voci</th></tr></thead>
-            <tbody>
-              {proiezione.map(p => (
-                <tr key={p.k} style={soglia && p.saldo < soglia ? { background: "var(--danger-soft)" } : {}}>
-                  <td>{nomeMese(p.k)}</td><td className="num pos">{p.e ? fmt(p.e) : ""}</td><td className="num neg">{p.u ? fmt(p.u) : ""}</td>
-                  <td className="num" style={{ fontWeight: 700 }}>{fmt(p.saldo)}</td>
-                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.voci.map(v => v.descrizione).join(" · ")}</td>
-                </tr>
-              ))}
-              {(() => {
-                const fineMesi = proiezione.length ? proiezione[proiezione.length - 1].saldo : totLiq;
-                const nd = senzaData.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0);
-                const extra = r2(totCred - totDeb + budEnt - budUsc + nd);
-                if (Math.abs(extra) < 0.005) return null;
-                return (
-                  <tr style={{ background: "var(--panel-2)", fontWeight: 700 }}>
-                    <td colSpan={3}>Più partite aperte, budget e impegni senza data</td>
-                    <td className="num">{fmt(r2(fineMesi + extra))}</td>
-                    <td style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 400 }}>{extra >= 0 ? "+" : "−"}{fmt(Math.abs(extra))} rispetto alla riga sopra</td>
-                  </tr>
-                );
-              })()}
-            </tbody></table>
-        </div>
-        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8, lineHeight: 1.5 }}>
-          Parte dalla liquidità di oggi e applica gli impegni nel mese della loro data.
-          {senzaData.length ? ` ${senzaData.length} impegni senza data (${fmtEuro(senzaData.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0))}) non sono nella proiezione ma sono nella cassa libera.` : ""}
-          {" "}Crediti, debiti e budget non hanno una data: entrano nella cassa libera ma non nella proiezione mensile.
-        </div>
+        <h3 className="card-title">Liquidità prevista mese per mese</h3>
+        {proiezione.map(p => (
+          <Riga key={p.k} sx={nomeMese(p.k)} sotto={p.voci.map(v => v.descrizione).join(" · ")}
+            dx={fmt(p.saldo)} forte={false} cl={soglia && p.saldo < soglia ? "neg" : ""}
+            dxSotto={(p.e || p.u) ? `${p.e ? "+" + fmt(p.e) : ""}${p.e && p.u ? " " : ""}${p.u ? "−" + fmt(p.u) : ""}` : ""}
+            sfondo={soglia && p.saldo < soglia ? "var(--danger-soft)" : undefined} />
+        ))}
+        {(() => {
+          const fineMesi = proiezione.length ? proiezione[proiezione.length - 1].saldo : totLiq;
+          const nd = senzaData.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0);
+          const extra = r2(totCred - totDeb + budEnt - budUsc + nd);
+          if (Math.abs(extra) < 0.005) return null;
+          return <Riga sx="Con partite aperte, budget e impegni senza data" sotto={(extra >= 0 ? "+" : "−") + fmt(Math.abs(extra)) + " rispetto ad agosto"} dx={fmt(r2(fineMesi + extra))} forte />;
+        })()}
+        <div className="tes-nota">Parte dalla liquidità di oggi e applica gli impegni nel mese della loro data. Crediti, debiti e budget non hanno una data: sono solo nell'ultima riga.</div>
       </div>
     </div>
   );
