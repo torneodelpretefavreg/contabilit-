@@ -999,7 +999,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.52.0";
+const APP_VERSION = "3.53.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1849,6 +1849,348 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
 // ============================================================
 // PAGINA: DASHBOARD
 // ============================================================
+// ============================================================
+// TESORERIA — monitoraggio della cassa: liquidità, partite aperte, impegni, cassa libera
+// ============================================================
+const TES_PATH = (stag) => `stagioni/${stag}/tesoreria`;
+const TES_CAT_ESCLUSE = new Set(["PN", "IMM. MATERIALI", "IMM. IMMATERIALI", "RETTIFICA ATTIVO", "DISP. LIQUIDE"]);
+
+function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
+  const contiMap = useMemo(() => {
+    const m = {};
+    conti.forEach(c => { m[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!m[c.codice]) m[c.codice] = { codice: c.codice, nome: c.nome, categoria: "DISP. LIQUIDE", prospetto: "SP" }; });
+    return m;
+  }, [conti]);
+  const [imp, setImp] = useState(null);       // impostazioni + impegni salvati
+  const [budgets, setBudgets] = useState({});
+  useEffect(() => {
+    if (!firebaseReady || !stagione) { setImp({}); return; }
+    const r1 = db.ref(TES_PATH(stagione)), r2 = db.ref(`stagioni/${stagione}/budgets`);
+    const c1 = r1.on("value", s => setImp(s.val() || {}));
+    const c2 = r2.on("value", s => setBudgets(s.val() || {}));
+    return () => { r1.off("value", c1); r2.off("value", c2); };
+  }, [stagione]);
+  const salva = (patch) => db.ref(TES_PATH(stagione)).update(patch).catch(e => alert(e.message));
+  const [nuovo, setNuovo] = useState(null);
+  const [aperta, setAperta] = useState(null);   // partita aperta espansa (codice)
+
+  // ---------- libro giornale e saldi ----------
+  const { scritture, mast } = useMemo(() => {
+    const scr = generaLibroGiornale(movimenti || [], saldiIniziali || {}, contiMap);
+    const mm = {};
+    calcolaMastrini(scr).forEach(x => { mm[Number(x.codice)] = x; });
+    return { scritture: scr, mast: mm };
+  }, [movimenti, saldiIniziali, contiMap]);
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+  // liquidità per conto
+  const liquidita = CONTI_LIQUIDITA.map(c => {
+    const m = mast[c.codice] || { saldo: 0 };
+    const ultimi = (movimenti || []).filter(x => !isAperturaMov(x) && (Number(x.contoLiquidita) === c.codice || Number(x.contoLiquiditaDest) === c.codice)).map(x => x.data).sort();
+    return { codice: c.codice, nome: c.nome, saldo: r2(m.saldo), ultimo: ultimi[ultimi.length - 1] || "" };
+  }).filter(x => Math.abs(x.saldo) > 0.005 || x.ultimo);
+  const totLiq = r2(liquidita.reduce((a, x) => a + x.saldo, 0));
+
+  // partite aperte: conti patrimoniali di crediti, debiti e transitori, con dettaglio per BU
+  const partite = useMemo(() => {
+    const perBU = {};
+    scritture.forEach(s => (s.righe || []).forEach(r => {
+      const c = Number(r.codice); const k = c + "|" + (s.bu || "—");
+      if (!perBU[k]) perBU[k] = { bu: s.bu || "—", dare: 0, avere: 0 };
+      perBU[k].dare += r.dare || 0; perBU[k].avere += r.avere || 0;
+    }));
+    return Object.values(mast).map(m => {
+      const c = contiMap[m.codice] || {};
+      const cod = Number(m.codice);
+      if (!String(c.prospetto || "").startsWith("SP") || TES_CAT_ESCLUSE.has(c.categoria) || cod === 60 || cod === 61) return null;
+      if (Math.abs(m.saldo) < 0.005) return null;
+      const bu = Object.entries(perBU).filter(([k]) => k.startsWith(cod + "|")).map(([, v]) => ({ bu: v.bu, saldo: r2(v.dare - v.avere) })).filter(x => Math.abs(x.saldo) > 0.005);
+      const transitorio = c.categoria === "CONTO TRANSITORIO" || /ANTICIP/i.test(c.nome || "");
+      return { codice: cod, nome: (c.nome || m.nome || "").trim(), categoria: c.categoria || "", saldo: r2(m.saldo), bu, transitorio };
+    }).filter(Boolean).sort((a, b) => Math.abs(b.saldo) - Math.abs(a.saldo));
+  }, [mast, scritture, contiMap]);
+  const contaTransitori = !imp || imp.contaTransitori !== false;
+  const crediti = partite.filter(p => p.saldo > 0 && (contaTransitori || !p.transitorio));
+  const debiti = partite.filter(p => p.saldo < 0 && (contaTransitori || !p.transitorio));
+  const totCred = r2(crediti.reduce((a, p) => a + p.saldo, 0));
+  const totDeb = r2(-debiti.reduce((a, p) => a + p.saldo, 0));
+
+  // eventi: partite aperte per BU sui conti transitori/anticipi (cassa ferma sugli eventi)
+  const eventi = useMemo(() => {
+    const m = {};
+    partite.filter(p => p.transitorio || [74, 75, 83].includes(p.codice)).forEach(p => p.bu.forEach(b => {
+      if (!m[b.bu]) m[b.bu] = { bu: b.bu, incassi: 0, anticipi: 0, debiti: 0 };
+      if (b.saldo < 0 && p.codice !== 83) m[b.bu].incassi += -b.saldo;
+      else if (p.codice === 83) m[b.bu].debiti += -b.saldo;
+      else m[b.bu].anticipi += b.saldo;
+    }));
+    return Object.values(m).map(e => ({ ...e, netto: r2(e.incassi - e.anticipi - e.debiti) })).filter(e => Math.abs(e.incassi) + Math.abs(e.anticipi) + Math.abs(e.debiti) > 0.005);
+  }, [partite]);
+
+  // riserve di utile (per decidere i dividendi)
+  const riserve = r2([14, 68].reduce((a, c) => a - ((mast[c] && mast[c].saldo) || 0), 0));
+
+  // ---------- budget: flussi ancora da muovere (stessa logica del piano di cassa del Budget) ----------
+  const perContoBU = useMemo(() => {
+    const m = {};
+    scritture.forEach(s => (s.righe || []).forEach(r => {
+      const k = Number(r.codice) + "|" + (s.bu || "GENERAL");
+      if (!m[k]) m[k] = { dare: 0, avere: 0 };
+      m[k].dare += r.dare || 0; m[k].avere += r.avere || 0;
+    }));
+    return m;
+  }, [scritture]);
+  const flussiBudget = (b) => {
+    const bu = b.bu || "ALL";
+    const contoAct = (cod, natura) => {
+      let d = 0, a = 0;
+      if (bu === "ALL") { const x = mast[cod]; if (x) { d = x.dare; a = x.avere; } }
+      else { const x = perContoBU[cod + "|" + bu]; if (x) { d = x.dare; a = x.avere; } }
+      return natura === "ricavo" ? a - d : d - a;
+    };
+    const claimed = new Set();
+    let ent = 0, usc = 0;
+    (b.voci || []).filter(Boolean).forEach(v => {
+      let act = 0;
+      (v.conti || []).forEach(c => { if (claimed.has(c)) return; claimed.add(c); act += contoAct(c, v.natura); });
+      if (v.natura === "patrimoniale") {
+        const imm = (v.conti || []).some(c => /^IMM/.test((contiMap[c] || {}).categoria || ""));
+        if (imm && !v.realizzato) usc += Number(v.importo) || 0;
+        return;
+      }
+      const eff = (v.importoEffettivo === undefined || v.importoEffettivo === null || v.importoEffettivo === "") ? Number(v.importo) || 0 : Number(v.importoEffettivo);
+      const tot = v.realizzato ? eff - act : Number(v.importo) || 0;
+      if (v.natura === "ricavo") ent += tot; else usc += tot;
+    });
+    return { ent: r2(ent), usc: r2(usc) };
+  };
+  const budIncl = (imp && imp.budgetInclusi) || {};
+  const listaBudget = Object.entries(budgets || {}).map(([id, b]) => ({ id, nome: b.nome || "Budget", bu: b.bu || "ALL", ...flussiBudget(b) }));
+  const budSel = listaBudget.filter(b => budIncl[b.id]);
+  const budEnt = r2(budSel.reduce((a, b) => a + b.ent, 0)), budUsc = r2(budSel.reduce((a, b) => a + b.usc, 0));
+
+  // ---------- impegni manuali ----------
+  const impegni = Object.entries((imp && imp.impegni) || {}).map(([id, x]) => ({ id, ...x })).filter(x => x && !x.fatto)
+    .sort((a, b) => String(a.data || "9999").localeCompare(String(b.data || "9999")));
+  const impFatti = Object.entries((imp && imp.impegni) || {}).map(([id, x]) => ({ id, ...x })).filter(x => x && x.fatto);
+  const impUsc = r2(impegni.filter(x => x.tipo !== "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0));
+  const impEnt = r2(impegni.filter(x => x.tipo === "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0));
+
+  const cassaLibera = r2(totLiq + totCred - totDeb + impEnt - impUsc + budEnt - budUsc);
+  const soglia = Number(imp && imp.soglia) || 0;
+
+  // ---------- proiezione mensile (impegni datati) ----------
+  const r = intervalloStagione(stagione);
+  const oggi = new Date().toISOString().slice(0, 7);
+  const mesi = [];
+  if (r) { let d = new Date(r.da + "T00:00:00"); const fine = r.a.slice(0, 7); while (true) { const k = d.toISOString().slice(0, 7); if (k >= oggi) mesi.push(k); if (k >= fine) break; d.setMonth(d.getMonth() + 1); } }
+  let corr = r2(totLiq);
+  const proiezione = mesi.map(k => {
+    const xs = impegni.filter(x => (x.data || "").slice(0, 7) === k);
+    const e = xs.filter(x => x.tipo === "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0);
+    const u = xs.filter(x => x.tipo !== "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0);
+    corr = r2(corr + e - u);
+    return { k, e, u, saldo: corr, voci: xs };
+  });
+  const senzaData = impegni.filter(x => !x.data || !mesi.includes(x.data.slice(0, 7)));
+
+  const nomeMese = (k) => { const [y, m] = k.split("-"); return MESI[(Number(m) + 3) % 12].slice(0, 3) + " " + y.slice(2); };
+  const eur = (v) => fmtEuro(v);
+  const cls = (v) => v > 0.005 ? "pos" : v < -0.005 ? "neg" : "";
+  const aggiungi = (tipo, preset) => setNuovo({ tipo, descrizione: "", importo: "", data: "", conto: "", categoria: tipo === "entrata" ? "Entrata" : "Spesa", ...(preset || {}) });
+  const salvaNuovo = () => {
+    const imp0 = Number(String(nuovo.importo).replace(",", "."));
+    if (!nuovo.descrizione || !(imp0 > 0)) { alert("Descrizione e importo sono obbligatori."); return; }
+    const id = "i" + Date.now().toString(36);
+    db.ref(`${TES_PATH(stagione)}/impegni/${id}`).set({ ...nuovo, importo: imp0, conto: nuovo.conto ? Number(nuovo.conto) : null, creatoIl: new Date().toISOString() })
+      .then(() => { setNuovo(null); onToast && onToast("Impegno aggiunto"); }).catch(e => alert(e.message));
+  };
+  const segnaFatto = (x) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: true, fattoIl: new Date().toISOString() });
+  const togli = (x) => { if (confirm(`Eliminare "${x.descrizione}"?`)) db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).remove(); };
+  const ripristina = (x) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: false });
+
+  if (!imp) return <div className="empty-state">Caricamento…</div>;
+  const lbl = { display: "block", fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", marginBottom: 4 };
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h2>Tesoreria</h2>
+          <div className="sub">Cassa di oggi, soldi fermi in crediti e debiti, impegni in arrivo e cassa davvero disponibile · {stagione}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn ghost" onClick={() => aggiungi("uscita", { categoria: "Dividendi", descrizione: "Distribuzione dividendi ai soci" })}>+ Dividendi</button>
+          <button className="btn ghost" onClick={() => aggiungi("uscita")}>+ Uscita prevista</button>
+          <button className="btn ghost" onClick={() => aggiungi("entrata")}>+ Entrata prevista</button>
+        </div>
+      </div>
+
+      {/* KPI */}
+      <div className="kpi-grid" style={{ marginBottom: 16 }}>
+        <div className="kpi accent"><div className="label">Liquidità oggi</div><div className="value">{eur(totLiq)}</div><div className="hint">{liquidita.length} conti</div></div>
+        <div className="kpi"><div className="label">Crediti e anticipi da recuperare</div><div className="value pos">+{eur(totCred)}</div><div className="hint">{crediti.length} partite aperte</div></div>
+        <div className="kpi"><div className="label">Debiti e somme da girare</div><div className="value neg">−{eur(totDeb)}</div><div className="hint">{debiti.length} partite aperte</div></div>
+        <div className="kpi"><div className="label">Impegni e budget</div><div className={"value " + cls(impEnt - impUsc + budEnt - budUsc)}>{(impEnt - impUsc + budEnt - budUsc) >= 0 ? "+" : "−"}{eur(Math.abs(impEnt - impUsc + budEnt - budUsc))}</div><div className="hint">{impegni.length} impegni{budSel.length ? ` · ${budSel.length} budget` : ""}</div></div>
+        <div className="kpi" style={{ border: "2px solid " + (cassaLibera < soglia ? "var(--danger)" : "var(--accent)") }}>
+          <div className="label">Cassa libera</div><div className={"value " + (cassaLibera < 0 ? "neg" : "")}>{eur(cassaLibera)}</div>
+          <div className="hint">{soglia ? (cassaLibera < soglia ? `⚠ sotto la soglia di ${eur(soglia)}` : `sopra la soglia di ${eur(soglia)}`) : "liquidità + crediti − debiti ± impegni"}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 16 }}>
+        {/* LIQUIDITÀ */}
+        <div className="card">
+          <h3 className="card-title">Dove sono i soldi oggi</h3>
+          <table className="tbl"><thead><tr><th>Conto</th><th>Ultimo movimento</th><th className="num">Saldo</th></tr></thead>
+            <tbody>
+              {liquidita.map(l => <tr key={l.codice}><td>{l.nome}</td><td style={{ color: "var(--ink-3)", fontSize: 12 }}>{l.ultimo ? l.ultimo.split("-").reverse().join("/") : "—"}</td><td className={"num " + (l.saldo < 0 ? "neg" : "")}>{fmt(l.saldo)}</td></tr>)}
+              <tr style={{ fontWeight: 700 }}><td>Totale</td><td></td><td className="num">{fmt(totLiq)}</td></tr>
+            </tbody></table>
+          {riserve > 0.005 && <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 10 }}>Riserve di utili accumulati (Riserva utile + straordinaria): <b>{eur(riserve)}</b>. È il limite contabile per i dividendi; la cassa libera dice quanto è sostenibile.</div>}
+        </div>
+
+        {/* EVENTI */}
+        <div className="card">
+          <h3 className="card-title">Cassa ferma sugli eventi</h3>
+          {!eventi.length ? <div style={{ fontSize: 13, color: "var(--ink-3)" }}>Nessun evento con partite aperte.</div> : (
+            <table className="tbl"><thead><tr><th>Evento / BU</th><th className="num">Incassi da chiudere</th><th className="num">Anticipi pagati</th><th className="num">Debiti partner</th><th className="num">Netto in cassa</th></tr></thead>
+              <tbody>{eventi.map(e => <tr key={e.bu}><td>{e.bu}</td><td className="num">{fmt(e.incassi)}</td><td className="num">{fmt(e.anticipi)}</td><td className="num">{fmt(e.debiti)}</td><td className="num" style={{ fontWeight: 700 }}>{fmt(e.netto)}</td></tr>)}</tbody></table>
+          )}
+          <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8, lineHeight: 1.5 }}>
+            Soldi incassati o anticipati per un evento non ancora chiuso (conti 74 anticipi, 75 entrate anticipate, 83 debiti v/partner). Finché l'evento non è chiuso
+            non sai quanto resta all'associazione e quanto va ai partner.
+          </div>
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, marginTop: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={contaTransitori} onChange={e => salva({ contaTransitori: e.target.checked })} />
+            Considera le partite degli eventi nella cassa libera (prudente)
+          </label>
+        </div>
+      </div>
+
+      {/* PARTITE APERTE */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3 className="card-title">Partite aperte: crediti e debiti</h3>
+        {!partite.length ? <div style={{ fontSize: 13, color: "var(--ink-3)" }}>Nessuna partita aperta.</div> : (
+          <table className="tbl"><thead><tr><th>Conto</th><th>Categoria</th><th className="num">Da incassare / recuperare</th><th className="num">Da pagare / girare</th></tr></thead>
+            <tbody>
+              {partite.map(p => (
+                <React.Fragment key={p.codice}>
+                  <tr style={{ cursor: "pointer", opacity: (!contaTransitori && p.transitorio) ? .5 : 1 }} onClick={() => setAperta(aperta === p.codice ? null : p.codice)}>
+                    <td><span style={{ color: "var(--ink-3)", marginRight: 6 }}>{aperta === p.codice ? "▾" : "▸"}</span><span className="mono">{String(p.codice).padStart(2, "0")}</span> {p.nome}</td>
+                    <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.categoria}</td>
+                    <td className="num pos">{p.saldo > 0 ? fmt(p.saldo) : ""}</td><td className="num neg">{p.saldo < 0 ? fmt(-p.saldo) : ""}</td>
+                  </tr>
+                  {aperta === p.codice && p.bu.map(b => (
+                    <tr key={p.codice + b.bu} style={{ fontSize: 12, color: "var(--ink-2)" }}><td style={{ paddingLeft: 40 }}>BU {b.bu}</td><td></td>
+                      <td className="num">{b.saldo > 0 ? fmt(b.saldo) : ""}</td><td className="num">{b.saldo < 0 ? fmt(-b.saldo) : ""}</td></tr>
+                  ))}
+                  {aperta === p.codice && (movimenti || []).filter(x => Number(x.contoPdC) === p.codice).sort((a, b) => String(a.data).localeCompare(String(b.data))).map(x => (
+                    <tr key={x._id} style={{ fontSize: 11.5, color: "var(--ink-3)" }}><td style={{ paddingLeft: 40 }} colSpan={2}>{(x.data || "").split("-").reverse().join("/")} · {x.descrizione || x.categoria}</td>
+                      <td className="num">{x.tipo === "uscita" || (x.dare > 0) ? fmt(x.dare || x.importo) : ""}</td><td className="num">{x.tipo === "entrata" || (x.avere > 0) ? fmt(x.avere || x.importo) : ""}</td></tr>
+                  ))}
+                </React.Fragment>
+              ))}
+              <tr style={{ fontWeight: 700 }}><td colSpan={2}>Totale{!contaTransitori ? " (senza partite eventi)" : ""}</td><td className="num">{fmt(totCred)}</td><td className="num">{fmt(totDeb)}</td></tr>
+            </tbody></table>
+        )}
+      </div>
+
+      {/* IMPEGNI */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <h3 className="card-title" style={{ margin: 0 }}>Impegni previsti</h3>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 12.5 }}>
+            <span style={{ color: "var(--ink-3)" }}>Soglia minima di cassa</span>
+            <input type="number" defaultValue={soglia || ""} placeholder="es. 3000" style={{ width: 100 }} onBlur={e => salva({ soglia: Number(e.target.value) || 0 })} />
+          </div>
+        </div>
+        {nuovo && (
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end", margin: "12px 0", padding: 10, background: "var(--panel-2)", borderRadius: 8 }}>
+            <div><label style={lbl}>{nuovo.tipo === "entrata" ? "Entrata" : "Uscita"} · descrizione</label><input value={nuovo.descrizione} onChange={e => setNuovo({ ...nuovo, descrizione: e.target.value })} style={{ width: "100%" }} /></div>
+            <div><label style={lbl}>Importo €</label><input value={nuovo.importo} onChange={e => setNuovo({ ...nuovo, importo: e.target.value })} style={{ width: "100%" }} /></div>
+            <div><label style={lbl}>Data prevista</label><input type="date" value={nuovo.data} onChange={e => setNuovo({ ...nuovo, data: e.target.value })} style={{ width: "100%" }} /></div>
+            <div><label style={lbl}>Conto</label><select value={nuovo.conto} onChange={e => setNuovo({ ...nuovo, conto: e.target.value })} style={{ width: "100%" }}><option value="">—</option>{CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome}</option>)}</select></div>
+            <div><label style={lbl}>Categoria</label><input value={nuovo.categoria} onChange={e => setNuovo({ ...nuovo, categoria: e.target.value })} style={{ width: "100%" }} /></div>
+            <div style={{ display: "flex", gap: 6 }}><button className="btn accent" onClick={salvaNuovo}>Salva</button><button className="btn ghost" onClick={() => setNuovo(null)}>✕</button></div>
+          </div>
+        )}
+        {!impegni.length && !nuovo ? <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 8 }}>Nessun impegno. Aggiungi dividendi, spese o entrate previste con i pulsanti in alto.</div> : (
+          <table className="tbl" style={{ marginTop: 8 }}><thead><tr><th>Data</th><th>Descrizione</th><th>Categoria</th><th>Conto</th><th className="num">Entrata</th><th className="num">Uscita</th><th></th></tr></thead>
+            <tbody>
+              {impegni.map(x => (
+                <tr key={x.id}>
+                  <td className="mono" style={{ fontSize: 12 }}>{x.data ? x.data.split("-").reverse().join("/") : "da definire"}</td>
+                  <td>{x.descrizione}</td><td style={{ fontSize: 12, color: "var(--ink-3)" }}>{x.categoria}</td>
+                  <td style={{ fontSize: 12 }}>{x.conto ? (contiMap[x.conto]?.nome || "").trim() : "—"}</td>
+                  <td className="num pos">{x.tipo === "entrata" ? fmt(x.importo) : ""}</td><td className="num neg">{x.tipo !== "entrata" ? fmt(x.importo) : ""}</td>
+                  <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
+                    <button className="btn ghost sm" title="Fatto: registra poi il movimento in contabilità" onClick={() => segnaFatto(x)}>✓ fatto</button>{" "}
+                    <button className="btn danger sm" onClick={() => togli(x)}>✕</button>
+                  </td>
+                </tr>
+              ))}
+              <tr style={{ fontWeight: 700 }}><td colSpan={4}>Totale impegni</td><td className="num">{fmt(impEnt)}</td><td className="num">{fmt(impUsc)}</td><td></td></tr>
+            </tbody></table>
+        )}
+        {impFatti.length > 0 && (
+          <details style={{ marginTop: 8 }}><summary style={{ fontSize: 12, color: "var(--ink-3)", cursor: "pointer" }}>{impFatti.length} impegni completati</summary>
+            {impFatti.map(x => <div key={x.id} style={{ fontSize: 12, color: "var(--ink-3)", margin: "4px 0" }}>✓ {x.descrizione} · {fmtEuro(x.importo)} <button className="btn ghost sm" onClick={() => ripristina(x)}>ripristina</button></div>)}
+          </details>
+        )}
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8 }}>Quando un impegno si realizza, registra il movimento in contabilità e segnalo "✓ fatto": così non viene contato due volte.</div>
+
+        {listaBudget.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div style={lbl}>Includi i flussi ancora da muovere dei budget</div>
+            {listaBudget.map(b => (
+              <label key={b.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, margin: "4px 0", cursor: "pointer" }}>
+                <input type="checkbox" checked={!!budIncl[b.id]} onChange={e => salva({ ["budgetInclusi/" + b.id]: e.target.checked ? true : null })} />
+                {b.nome} <span style={{ color: "var(--ink-3)", fontSize: 12 }}>({b.bu}) · entrate {fmt(b.ent)} · uscite {fmt(b.usc)}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* PROIEZIONE */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3 className="card-title">Proiezione della liquidità (impegni con data)</h3>
+        <div style={{ overflowX: "auto" }}>
+          <table className="tbl"><thead><tr><th>Mese</th><th className="num">Entrate</th><th className="num">Uscite</th><th className="num">Liquidità a fine mese</th><th>Voci</th></tr></thead>
+            <tbody>
+              {proiezione.map(p => (
+                <tr key={p.k} style={soglia && p.saldo < soglia ? { background: "var(--danger-soft)" } : {}}>
+                  <td>{nomeMese(p.k)}</td><td className="num pos">{p.e ? fmt(p.e) : ""}</td><td className="num neg">{p.u ? fmt(p.u) : ""}</td>
+                  <td className="num" style={{ fontWeight: 700 }}>{fmt(p.saldo)}</td>
+                  <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{p.voci.map(v => v.descrizione).join(" · ")}</td>
+                </tr>
+              ))}
+              {(() => {
+                const fineMesi = proiezione.length ? proiezione[proiezione.length - 1].saldo : totLiq;
+                const nd = senzaData.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0);
+                const extra = r2(totCred - totDeb + budEnt - budUsc + nd);
+                if (Math.abs(extra) < 0.005) return null;
+                return (
+                  <tr style={{ background: "var(--panel-2)", fontWeight: 700 }}>
+                    <td colSpan={3}>Più partite aperte, budget e impegni senza data</td>
+                    <td className="num">{fmt(r2(fineMesi + extra))}</td>
+                    <td style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 400 }}>{extra >= 0 ? "+" : "−"}{fmt(Math.abs(extra))} rispetto alla riga sopra</td>
+                  </tr>
+                );
+              })()}
+            </tbody></table>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8, lineHeight: 1.5 }}>
+          Parte dalla liquidità di oggi e applica gli impegni nel mese della loro data.
+          {senzaData.length ? ` ${senzaData.length} impegni senza data (${fmtEuro(senzaData.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0))}) non sono nella proiezione ma sono nella cassa libera.` : ""}
+          {" "}Crediti, debiti e budget non hanno una data: entrano nella cassa libera ma non nella proiezione mensile.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PageDashboard({ conti, movimenti, saldiIniziali, stagione, onGestisciConti }) {
   const [drillLiq, setDrillLiq] = useState(null); // conto liquidità selezionato per il dettaglio
 
@@ -20267,6 +20609,7 @@ function App() {
         }}>
           <div className="section-label">Operatività</div>
           <button className={"navlink " + (page==="dashboard"?"active":"")} onClick={() => setPage("dashboard")}><span className="ico">◆</span> Dashboard</button>
+          <button className={"navlink " + (page==="tesoreria"?"active":"")} onClick={() => setPage("tesoreria")}><span className="ico">€</span> Tesoreria</button>
           <button className={"navlink " + (page==="nuovo"?"active":"")} onClick={() => setPage("nuovo")}><span className="ico">+</span> Nuovo movimento</button>
           <button className={"navlink " + (page==="import"?"active":"")} onClick={() => setPage("import")}><span className="ico">↑</span> Import movimenti</button>
           <button className={"navlink " + (page==="movimenti"?"active":"")} onClick={() => setPage("movimenti")}><span className="ico">≡</span> Movimenti</button>
@@ -20335,6 +20678,7 @@ function App() {
               )}
               <React.Fragment key={"liq:" + firmaLiquidita}>
               {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onGestisciConti={() => setPage("liquidita")} />}
+              {page === "tesoreria" && <PageTesoreria conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "liquidita" && <PageLiquidita conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} saldiInizialiEff={saldiInizialiEff} ereditati={!!saldiEreditati} stagione={stagione} onToast={showToast} />}
               {page === "nuovo" && <PageNuovo conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
