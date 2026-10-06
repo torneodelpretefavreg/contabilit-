@@ -923,7 +923,17 @@
   .an-cl { cursor: pointer; }
   .esp-riga:hover td { background: var(--panel-2); }
   /* Tesoreria: righe etichetta/importo, leggibili anche su telefono */
-  .tes-riga { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 9px 4px; border-bottom: 1px solid var(--rule); }
+  .tes-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 10px; }
+.tes-chip { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+.tes-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tes-grafico { width: 100%; max-width: 760px; height: auto; display: block; margin: 4px 0; }
+.tes-legenda { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); margin-bottom: 8px; }
+.tes-legenda i { display: inline-block; width: 22px; height: 0; border-top: 2.5px solid var(--accent); vertical-align: middle; margin-right: 5px; }
+.tes-legenda i.l-prev { border-top-style: dashed; opacity: .75; }
+.tes-tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: 1px; background: var(--panel-2); color: var(--ink-3); }
+.tes-tag.oggi { background: var(--accent); color: #fff; }
+.tes-tag.previsto { border: 1px dashed var(--ink-3); background: transparent; }
+.tes-riga { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 9px 4px; border-bottom: 1px solid var(--rule); }
   .tes-riga.forte { font-weight: 700; border-bottom: none; border-top: 1px solid var(--rule-2); }
   .tes-sx { min-width: 0; flex: 1; overflow-wrap: anywhere; }
   .tes-dx { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -1025,7 +1035,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.54.0";
+const APP_VERSION = "3.56.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1881,6 +1891,44 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
 const TES_PATH = (stag) => `stagioni/${stag}/tesoreria`;
 const TES_CAT_ESCLUSE = new Set(["PN", "IMM. MATERIALI", "IMM. IMMATERIALI", "RETTIFICA ATTIVO", "DISP. LIQUIDE"]);
 
+// grafico a linea del saldo: reale (pieno) fino a oggi, previsto (tratteggiato) dopo
+function GraficoAndamento({ punti, oggi, soglia, nomeMese }) {
+  if (!punti || !punti.length) return null;
+  const W = 420, H = 210, L = 42, R = 10, T = 16, B = 26;
+  const n = punti.length;
+  const X = (i) => L + (W - L - R) * (n === 1 ? 0.5 : i / (n - 1));
+  const iOggi = punti.findIndex(p => p.stato === "oggi");
+  const reale = [], prev = [];
+  punti.forEach((p, i) => { if (p.stato === "reale") reale.push([X(i), p.saldo]); });
+  if (iOggi >= 0) {
+    const g = Number(oggi.slice(8, 10)) || 1;
+    const xo = iOggi === 0 ? X(0) : X(iOggi - 1) + (X(iOggi) - X(iOggi - 1)) * Math.min(1, g / 30);
+    reale.push([xo, punti[iOggi].reale]);
+    prev.push([xo, punti[iOggi].reale]);
+    punti.forEach((p, i) => { if (i >= iOggi) prev.push([X(i), p.saldo]); });
+  }
+  const vals = [...reale, ...prev].map(z => z[1]).concat(soglia ? [soglia] : []).concat([0]);
+  let mn = Math.min(...vals), mx = Math.max(...vals); if (mx - mn < 1) { mx += 1; mn -= 1; }
+  const pad = (mx - mn) * 0.08; mn -= pad; mx += pad;
+  const Y = (v) => T + (H - T - B) * (1 - (v - mn) / (mx - mn));
+  const path = (pts) => pts.map((z, i) => (i ? "L" : "M") + z[0].toFixed(1) + " " + Y(z[1]).toFixed(1)).join(" ");
+  const tick = (v) => Math.abs(v) >= 1000 ? (v / 1000).toFixed(Math.abs(v) >= 10000 ? 0 : 1).replace(".", ",") + "k" : Math.round(v);
+  const yt = [mn + pad, (mn + mx) / 2, mx - pad];
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="tes-grafico" role="img" aria-label="Andamento del saldo">
+      {yt.map((v, i) => <g key={i}><line x1={L} x2={W - R} y1={Y(v)} y2={Y(v)} stroke="var(--rule)" strokeWidth="1" /><text x={L - 6} y={Y(v) + 4} textAnchor="end" fontSize="12" fill="var(--ink-3)">{tick(v)}</text></g>)}
+      {mn < 0 && mx > 0 && <line x1={L} x2={W - R} y1={Y(0)} y2={Y(0)} stroke="var(--ink-3)" strokeWidth="1" />}
+      {soglia > 0 && <g><line x1={L} x2={W - R} y1={Y(soglia)} y2={Y(soglia)} stroke="var(--danger)" strokeWidth="1.2" strokeDasharray="2 4" /><text x={W - R} y={Y(soglia) - 4} textAnchor="end" fontSize="11" fill="var(--danger)">soglia</text></g>}
+      {punti.map((p, i) => (n <= 8 || i % 2 === 0 || i === n - 1) && <text key={p.k} x={X(i)} y={H - 8} textAnchor="middle" fontSize="11" fill={p.stato === "oggi" ? "var(--ink)" : "var(--ink-3)"}>{nomeMese(p.k).split(" ")[0]}</text>)}
+      {reale.length > 1 && <path d={path(reale)} fill="none" stroke="var(--accent)" strokeWidth="2.5" />}
+      {prev.length > 1 && <path d={path(prev)} fill="none" stroke="var(--accent)" strokeWidth="2.2" strokeDasharray="6 5" opacity=".75" />}
+      {reale.map((z, i) => <circle key={"r" + i} cx={z[0]} cy={Y(z[1])} r="3" fill="var(--accent)" />)}
+      {prev.slice(1).map((z, i) => <circle key={"p" + i} cx={z[0]} cy={Y(z[1])} r="3" fill="var(--panel)" stroke="var(--accent)" strokeWidth="1.5" />)}
+      {iOggi >= 0 && <text x={reale[reale.length - 1][0]} y={Y(reale[reale.length - 1][1]) - 9} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--ink)">oggi</text>}
+    </svg>
+  );
+}
+
 function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
   const contiMap = useMemo(() => {
     const m = {};
@@ -1900,6 +1948,8 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
   const salva = (patch) => db.ref(TES_PATH(stagione)).update(patch).catch(e => alert(e.message));
   const [nuovo, setNuovo] = useState(null);
   const [aperta, setAperta] = useState(null);   // partita aperta espansa (codice)
+  const [contoVista, setContoVista] = useState("TOT");   // conto mostrato nell'andamento
+  const [collega, setCollega] = useState(null);           // impegno di cui scegliere il movimento
 
   // ---------- libro giornale e saldi ----------
   const { scritture, mast } = useMemo(() => {
@@ -1915,7 +1965,7 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
     const m = mast[c.codice] || { saldo: 0 };
     const ultimi = (movimenti || []).filter(x => !isAperturaMov(x) && (Number(x.contoLiquidita) === c.codice || Number(x.contoLiquiditaDest) === c.codice)).map(x => x.data).sort();
     return { codice: c.codice, nome: c.nome, saldo: r2(m.saldo), ultimo: ultimi[ultimi.length - 1] || "" };
-  }).filter(x => Math.abs(x.saldo) > 0.005 || x.ultimo);
+  }).filter(x => Math.abs(x.saldo) > 0.005 || x.ultimo || Object.values((imp && imp.impegni) || {}).some(i => i && !i.fatto && Number(i.conto) === x.codice));
   const totLiq = r2(liquidita.reduce((a, x) => a + x.saldo, 0));
 
   // partite aperte: conti patrimoniali di crediti, debiti e transitori, con dettaglio per BU
@@ -2003,23 +2053,70 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
   const impUsc = r2(impegni.filter(x => x.tipo !== "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0));
   const impEnt = r2(impegni.filter(x => x.tipo === "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0));
 
+  // effetto degli impegni aperti su ogni conto
+  const impDelConto = (cod) => impegni.filter(x => Number(x.conto) === cod);
+  const nettoImpegni = (xs) => r2(xs.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0));
+  const impSenzaConto = impegni.filter(x => !x.conto || !liquidita.some(l => l.codice === Number(x.conto)));
+  // per gli impegni "fatti": cerco il movimento vero in contabilità (stesso conto, stesso importo, data vicina)
+  const movimentoDi = (x) => {
+    const imp0 = Number(x.importo) || 0; const rif = new Date((x.data || (x.fattoIl || "").slice(0, 10) || new Date().toISOString().slice(0, 10)) + "T00:00:00").getTime();
+    return (movimenti || []).find(m => !isAperturaMov(m) && Math.abs((Number(m.importo) || 0) - imp0) < 0.01
+      && (x.tipo === "entrata" ? m.tipo === "entrata" : m.tipo === "uscita")
+      && (!x.conto || Number(m.contoLiquidita) === Number(x.conto))
+      && Math.abs(new Date(m.data + "T00:00:00").getTime() - rif) <= 45 * 864e5) || null;
+  };
+  const fattiSenzaMov = impFatti.filter(x => !(x.movId ? (movimenti || []).some(m => m._id === x.movId) : movimentoDi(x)));
+
   const cassaLibera = r2(totLiq + totCred - totDeb + impEnt - impUsc + budEnt - budUsc);
   const soglia = Number(imp && imp.soglia) || 0;
 
-  // ---------- proiezione mensile (impegni datati) ----------
+  // ---------- andamento per conto: reale fino a oggi, previsto da oggi in poi ----------
   const r = intervalloStagione(stagione);
-  const oggi = new Date().toISOString().slice(0, 7);
-  const mesi = [];
-  if (r) { let d = new Date(r.da + "T00:00:00"); const fine = r.a.slice(0, 7); while (true) { const k = d.toISOString().slice(0, 7); if (k >= oggi) mesi.push(k); if (k >= fine) break; d.setMonth(d.getMonth() + 1); } }
-  let corr = r2(totLiq);
-  const proiezione = mesi.map(k => {
-    const xs = impegni.filter(x => (x.data || "").slice(0, 7) === k);
-    const e = xs.filter(x => x.tipo === "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0);
-    const u = xs.filter(x => x.tipo !== "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0);
-    corr = r2(corr + e - u);
-    return { k, e, u, saldo: corr, voci: xs };
+  const oggiG = new Date().toISOString().slice(0, 10);
+  const oggi = oggiG.slice(0, 7);
+  const mesiTutti = [];
+  if (r) { let d = new Date(r.da.slice(0, 7) + "-01T00:00:00"); const fine = r.a.slice(0, 7); for (let i = 0; i < 24; i++) { const k = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); mesiTutti.push(k); if (k >= fine) break; d.setMonth(d.getMonth() + 1); } }
+  const mesi = mesiTutti.filter(k => k >= oggi);
+  const contiVista = contoVista === "TOT" ? liquidita.map(l => l.codice) : [Number(contoVista)];
+  const impVista = impegni.filter(x => contoVista === "TOT" || Number(x.conto) === Number(contoVista));
+  const saldoVistaOggi = r2(liquidita.filter(l => contiVista.includes(l.codice)).reduce((a, l) => a + l.saldo, 0));
+  const andamento = useMemo(() => {
+    const set = new Set(contiVista);
+    const mov = []; // {data, delta} sui conti della vista
+    scritture.forEach(s0 => (s0.righe || []).forEach(rg => { if (set.has(Number(rg.codice))) mov.push({ data: s0.data || "", ap: s0.origine === "apertura" || !!s0.apertura || /apertura/i.test((s0.descrizione || "") + " " + (s0.categoria || "")), d: (rg.dare || 0) - (rg.avere || 0) }); }));
+    let corr = null;
+    return mesiTutti.map(k => {
+      const fineK = k + "-31";
+      const delMese = mov.filter(m => (m.data || "").slice(0, 7) === k && !m.ap);
+      const ent = r2(delMese.filter(m => m.d > 0).reduce((a, m) => a + m.d, 0)), usc = r2(-delMese.filter(m => m.d < 0).reduce((a, m) => a + m.d, 0));
+      const xs = impVista.filter(x => (x.data || "").slice(0, 7) === k || (k === oggi && x.data && x.data.slice(0, 7) < oggi));
+      const ie = r2(xs.filter(x => x.tipo === "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0));
+      const iu = r2(xs.filter(x => x.tipo !== "entrata").reduce((a, x) => a + (Number(x.importo) || 0), 0));
+      if (k < oggi) { const reale = r2(mov.filter(m => m.data <= fineK).reduce((a, m) => a + m.d, 0)); return { k, stato: "reale", saldo: reale, reale, ent, usc, ie: 0, iu: 0, voci: [] }; }
+      if (k === oggi) { corr = r2(saldoVistaOggi + ie - iu); return { k, stato: "oggi", saldo: corr, reale: saldoVistaOggi, ent, usc, ie, iu, voci: xs }; }
+      corr = r2(corr + ie - iu);
+      return { k, stato: "previsto", saldo: corr, reale: null, ent: 0, usc: 0, ie, iu, voci: xs };
+    });
+  }, [scritture, contoVista, impegni, saldoVistaOggi, mesiTutti.join()]);
+  const proiezione = andamento.filter(p => p.k >= oggi);
+  const senzaData = impVista.filter(x => !x.data || x.data.slice(0, 7) > (mesiTutti[mesiTutti.length - 1] || "9999"));
+
+  // ---------- previsto vs registrato ----------
+  const collegati = new Set(Object.values((imp && imp.impegni) || {}).map(x => x && x.movId).filter(Boolean));
+  const candidati = (x) => {
+    const imp0 = Number(x.importo) || 0; const rif = new Date((x.data || (x.fattoIl || "").slice(0, 10) || oggiG) + "T00:00:00").getTime();
+    return (movimenti || []).filter(m => !isAperturaMov(m) && (x.tipo === "entrata" ? m.tipo === "entrata" : m.tipo === "uscita")
+      && Math.abs(new Date(m.data + "T00:00:00").getTime() - rif) <= 75 * 864e5 && (!collegati.has(m._id) || m._id === x.movId))
+      .map(m => ({ m, punti: Math.abs((Number(m.importo) || 0) - imp0) / Math.max(imp0, 1) + (x.conto && Number(m.contoLiquidita) !== Number(x.conto) ? 0.5 : 0) + Math.abs(new Date(m.data + "T00:00:00").getTime() - rif) / (864e5 * 300) }))
+      .sort((a, b) => a.punti - b.punti).slice(0, 8).map(z => z.m);
+  };
+  const movCollegato = (x) => x.movId ? (movimenti || []).find(m => m._id === x.movId) || null : movimentoDi(x);
+  const confronto = impFatti.map(x => {
+    const mv = movCollegato(x);
+    if (!mv) return { x, mv: null };
+    return { x, mv, dImp: r2((Number(mv.importo) || 0) - (Number(x.importo) || 0)), dGg: x.data ? Math.round((new Date(mv.data + "T00:00:00") - new Date(x.data + "T00:00:00")) / 864e5) : null, contoDiverso: x.conto && Number(mv.contoLiquidita) !== Number(x.conto) };
   });
-  const senzaData = impegni.filter(x => !x.data || !mesi.includes(x.data.slice(0, 7)));
+  const giaRegistrato = (x) => { const mv = movimentoDi(x); return mv && !collegati.has(mv._id) ? mv : null; };
 
   const nomeMese = (k) => { const [y, m] = k.split("-"); return MESI[(Number(m) + 3) % 12].slice(0, 3) + " " + y.slice(2); };
   const eur = (v) => fmtEuro(v);
@@ -2032,9 +2129,11 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
     db.ref(`${TES_PATH(stagione)}/impegni/${id}`).set({ ...nuovo, importo: imp0, conto: nuovo.conto ? Number(nuovo.conto) : null, creatoIl: new Date().toISOString() })
       .then(() => { setNuovo(null); onToast && onToast("Impegno aggiunto"); }).catch(e => alert(e.message));
   };
-  const segnaFatto = (x) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: true, fattoIl: new Date().toISOString() });
+  const segnaFatto = (x, mv) => { const m0 = mv || giaRegistrato(x); return db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: true, fattoIl: new Date().toISOString(), movId: m0 ? m0._id : null }); };
+  const collegaMov = (x, m) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: true, fattoIl: x.fattoIl || new Date().toISOString(), movId: m ? m._id : null }).then(() => setCollega(null));
   const togli = (x) => { if (confirm(`Eliminare "${x.descrizione}"?`)) db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).remove(); };
-  const ripristina = (x) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: false });
+  const cambiaConto = (x, v) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ conto: v ? Number(v) : null });
+  const ripristina = (x) => db.ref(`${TES_PATH(stagione)}/impegni/${x.id}`).update({ fatto: false, movId: null });
 
   if (!imp) return <div className="empty-state">Caricamento…</div>;
   const lbl = { display: "block", fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", marginBottom: 4 };
@@ -2079,8 +2178,20 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
         {/* LIQUIDITÀ */}
         <div className="card">
           <h3 className="card-title">Dove sono i soldi oggi</h3>
-          {liquidita.map(l => <Riga key={l.codice} sx={l.nome} sotto={l.ultimo ? "ultimo movimento " + dataIT(l.ultimo) : ""} dx={fmt(l.saldo)} cl={l.saldo < 0 ? "neg" : ""} />)}
-          <Riga sx="Totale" dx={eur(totLiq)} forte />
+          {liquidita.map(l => {
+            const xs = impDelConto(l.codice); const n = nettoImpegni(xs); const dopo = r2(l.saldo + n);
+            return (
+              <React.Fragment key={l.codice}>
+                <Riga sx={l.nome} sotto={l.ultimo ? "ultimo movimento " + dataIT(l.ultimo) : ""} dx={fmt(l.saldo)} cl={l.saldo < 0 ? "neg" : ""}
+                  dxSotto={xs.length ? <span>dopo impegni <b className={dopo < 0 ? "neg" : ""}>{fmt(dopo)}</b></span> : null} />
+                {xs.map(x => <Riga key={x.id} rientro={22} sfondo="var(--panel-2)" sx={<span style={{ fontSize: 12.5 }}>{x.descrizione}</span>} sotto={x.data ? "previsto " + dataIT(x.data) : "data da definire"}
+                  dx={<span style={{ fontSize: 12.5 }}>{(x.tipo === "entrata" ? "+" : "−") + fmt(x.importo)}</span>} cl={x.tipo === "entrata" ? "pos" : "neg"} />)}
+              </React.Fragment>
+            );
+          })}
+          <Riga sx="Totale" dx={eur(totLiq)} forte dxSotto={impegni.length ? <span>dopo impegni <b>{fmt(r2(totLiq + impEnt - impUsc))}</b></span> : null} />
+          {impSenzaConto.length > 0 && <div className="tes-nota">⚠ {impSenzaConto.length === 1 ? "1 impegno non ha" : impSenzaConto.length + " impegni non hanno"} un conto ({fmt(Math.abs(nettoImpegni(impSenzaConto)))} €): conta nella cassa libera ma non qui sopra. Scegli il conto nella lista degli impegni.</div>}
+          {fattiSenzaMov.length > 0 && <div className="tes-nota" style={{ color: "var(--danger)" }}>⚠ {fattiSenzaMov.map(x => x.descrizione).join(", ")}: segnato "fatto" ma non trovo il movimento in contabilità, quindi i saldi qui sopra non lo vedono. Registralo in Prima nota (oppure ripristina l'impegno).</div>}
           {riserve > 0.005 && <div className="tes-nota">Riserve di utili accumulati: <b>{eur(riserve)}</b>. È il massimo distribuibile come dividendi; la cassa libera dice quanto è sostenibile.</div>}
         </div>
 
@@ -2139,7 +2250,9 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
         {!impegni.length && !nuovo ? <div className="tes-nota">Nessun impegno. Aggiungi dividendi, spese o entrate previste con i pulsanti in alto.</div> : impegni.map(x => (
           <Riga key={x.id} sx={x.descrizione} sotto={`${x.data ? dataIT(x.data) : "data da definire"} · ${x.categoria || ""}${x.conto ? " · " + (contiMap[x.conto]?.nome || "").trim() : ""}`}
             dx={(x.tipo === "entrata" ? "+" : "−") + fmt(x.importo)} cl={x.tipo === "entrata" ? "pos" : "neg"}>
-            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            {giaRegistrato(x) && <div className="tes-sotto" style={{ color: "var(--accent)" }}>Sembra già registrato il {dataIT(giaRegistrato(x).data)}: premi "✓ fatto" per collegarlo.</div>}
+            <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <select value={x.conto || ""} onChange={e => cambiaConto(x, e.target.value)} style={{ fontSize: 12, padding: "3px 6px", width: "auto", maxWidth: 170 }}><option value="">conto: —</option>{CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.nome}</option>)}</select>
               <button className="btn ghost sm" onClick={() => segnaFatto(x)}>✓ fatto</button>
               <button className="btn danger sm" onClick={() => togli(x)}>✕ elimina</button>
             </div>
@@ -2147,8 +2260,8 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
         ))}
         {impegni.length > 0 && <Riga sx="Totale impegni" dx={(impEnt - impUsc >= 0 ? "+" : "−") + fmt(Math.abs(impEnt - impUsc))} forte />}
         {impFatti.length > 0 && (
-          <details style={{ marginTop: 8 }}><summary style={{ fontSize: 12.5, color: "var(--ink-3)", cursor: "pointer" }}>{impFatti.length} impegni completati</summary>
-            {impFatti.map(x => <div key={x.id} style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "6px 0" }}>✓ {x.descrizione} · {fmtEuro(x.importo)} <button className="btn ghost sm" onClick={() => ripristina(x)}>ripristina</button></div>)}
+          <details open={fattiSenzaMov.length > 0} style={{ marginTop: 8 }}><summary style={{ fontSize: 12.5, color: "var(--ink-3)", cursor: "pointer" }}>{impFatti.length} impegni completati{fattiSenzaMov.length ? ` · ${fattiSenzaMov.length} senza movimento ⚠` : ""}</summary>
+            {impFatti.map(x => { const mv = movimentoDi(x); return <div key={x.id} style={{ fontSize: 12.5, color: "var(--ink-3)", margin: "6px 0" }}>✓ {x.descrizione} · {fmtEuro(x.importo)}{x.conto ? " · " + (contiMap[x.conto]?.nome || "").trim() : ""} · {mv ? <span className="pos">in contabilità il {dataIT(mv.data)}</span> : <span className="neg">movimento non trovato</span>} <button className="btn ghost sm" onClick={() => ripristina(x)}>ripristina</button></div>; })}
           </details>
         )}
         <div className="tes-nota">Quando un impegno si realizza, registra il movimento in contabilità e segnalo "✓ fatto", così non viene contato due volte.</div>
@@ -2170,24 +2283,83 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
         </div>
       </div>
 
-      {/* PROIEZIONE */}
+      {/* ANDAMENTO DEI CONTI */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 className="card-title">Liquidità prevista mese per mese</h3>
-        {proiezione.map(p => (
-          <Riga key={p.k} sx={nomeMese(p.k)} sotto={p.voci.map(v => v.descrizione).join(" · ")}
-            dx={fmt(p.saldo)} forte={false} cl={soglia && p.saldo < soglia ? "neg" : ""}
-            dxSotto={(p.e || p.u) ? `${p.e ? "+" + fmt(p.e) : ""}${p.e && p.u ? " " : ""}${p.u ? "−" + fmt(p.u) : ""}` : ""}
-            sfondo={soglia && p.saldo < soglia ? "var(--danger-soft)" : undefined} />
+        <h3 className="card-title">Andamento dei conti</h3>
+        <div className="tes-chips">
+          <button className={"tes-chip" + (contoVista === "TOT" ? " on" : "")} onClick={() => setContoVista("TOT")}>Tutti</button>
+          {liquidita.map(l => <button key={l.codice} className={"tes-chip" + (String(contoVista) === String(l.codice) ? " on" : "")} onClick={() => setContoVista(String(l.codice))}>{l.nome}</button>)}
+        </div>
+        <GraficoAndamento punti={andamento} oggi={oggiG} soglia={contoVista === "TOT" ? soglia : 0} nomeMese={nomeMese} />
+        <div className="tes-legenda"><span><i className="l-reale" /> saldo reale (contabilità)</span><span><i className="l-prev" /> previsto con gli impegni</span></div>
+        {andamento.filter((p, i, arr) => p.stato === "oggi" || p.ent || p.usc || p.voci.length || i === arr.length - 1).map(p => (
+          <Riga key={p.k} sx={<span>{nomeMese(p.k)} <span className={"tes-tag " + p.stato}>{p.stato === "reale" ? "reale" : p.stato === "oggi" ? "in corso" : "previsto"}</span></span>}
+            sotto={[
+              (p.ent || p.usc) ? `registrato +${fmt(p.ent)} −${fmt(p.usc)}` : "",
+              p.stato === "oggi" ? `oggi ${fmt(p.reale)}` : "",
+              p.voci.length ? "impegni: " + p.voci.map(v => `${v.descrizione} ${(v.tipo === "entrata" ? "+" : "−") + fmt(v.importo)}`).join(" · ") : "",
+            ].filter(Boolean).join(" · ")}
+            dx={fmt(p.saldo)} cl={(soglia && contoVista === "TOT" && p.saldo < soglia) || p.saldo < 0 ? "neg" : ""}
+            dxSotto={p.stato === "reale" ? "fine mese" : "a fine mese"} />
         ))}
         {(() => {
-          const fineMesi = proiezione.length ? proiezione[proiezione.length - 1].saldo : totLiq;
-          const nd = senzaData.reduce((a, x) => a + (x.tipo === "entrata" ? 1 : -1) * (Number(x.importo) || 0), 0);
-          const extra = r2(totCred - totDeb + budEnt - budUsc + nd);
+          const fineMesi = proiezione.length ? proiezione[proiezione.length - 1].saldo : saldoVistaOggi;
+          const nd = nettoImpegni(senzaData);
+          const extra = contoVista === "TOT" ? r2(totCred - totDeb + budEnt - budUsc + nd) : r2(nd);
           if (Math.abs(extra) < 0.005) return null;
-          return <Riga sx="Con partite aperte, budget e impegni senza data" sotto={(extra >= 0 ? "+" : "−") + fmt(Math.abs(extra)) + " rispetto ad agosto"} dx={fmt(r2(fineMesi + extra))} forte />;
+          return <Riga sx={contoVista === "TOT" ? "Con partite aperte, budget e impegni senza data" : "Con gli impegni senza data"} sotto={(extra >= 0 ? "+" : "−") + fmt(Math.abs(extra))} dx={fmt(r2(fineMesi + extra))} forte />;
         })()}
-        <div className="tes-nota">Parte dalla liquidità di oggi e applica gli impegni nel mese della loro data. Crediti, debiti e budget non hanno una data: sono solo nell'ultima riga.</div>
+        <div className="tes-nota">I mesi passati mostrano il saldo vero a fine mese, preso dalla contabilità. Da oggi in poi si parte dal saldo reale e si applicano gli impegni nel mese della loro data{contoVista === "TOT" ? "" : " (solo quelli assegnati a questo conto)"}. Un impegno con una data già passata e non ancora segnato fatto finisce nel mese in corso.</div>
       </div>
+
+      {/* PREVISTO VS REGISTRATO */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3 className="card-title">Previsto vs registrato</h3>
+        {!confronto.length ? <div className="tes-nota">Quando segni un impegno come fatto, qui lo confronti con il movimento registrato in contabilità: importo, data e conto.</div> : <>
+          {confronto.map(({ x, mv, dImp, dGg, contoDiverso }) => (
+            <div key={x.id} className="tes-blocco">
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>{x.descrizione}</div>
+              <Riga sx="Previsto" sotto={`${x.data ? dataIT(x.data) : "senza data"}${x.conto ? " · " + (contiMap[x.conto]?.nome || "").trim() : ""}`} dx={fmt(x.importo)} />
+              {mv ? <>
+                <Riga sx="Registrato" sotto={`${dataIT(mv.data)} · ${(contiMap[mv.contoLiquidita]?.nome || "senza conto").trim()} · ${mv.descrizione || mv.categoria || ""}`} dx={fmt(mv.importo)} />
+                <Riga sx="Effetto sulla cassa" sotto={[Math.abs(dImp) < 0.005 ? "importo uguale" : `${fmt(Math.abs(dImp))} € ${x.tipo === "entrata" ? (dImp > 0 ? "incassati in più" : "incassati in meno") : (dImp > 0 ? "spesi in più" : "spesi in meno")}`, dGg ? (dGg > 0 ? `${dGg} giorni dopo` : `${-dGg} giorni prima`) : (dGg === 0 ? "nella data prevista" : ""), contoDiverso ? "⚠ conto diverso" : ""].filter(Boolean).join(" · ")}
+                  dx={(() => { const e = x.tipo === "entrata" ? dImp : -dImp; return Math.abs(e) < 0.005 ? "=" : (e > 0 ? "+" : "−") + fmt(Math.abs(e)); })()} cl={cls(x.tipo === "entrata" ? dImp : -dImp)} forte />
+              </> : <Riga sx={<span className="neg">Movimento non trovato</span>} sotto="Registralo in contabilità oppure collegalo a mano" dx="" />}
+              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                <button className="btn ghost sm" onClick={() => setCollega(x)}>{mv ? "cambia movimento" : "collega movimento"}</button>
+                <button className="btn ghost sm" onClick={() => ripristina(x)}>ripristina impegno</button>
+              </div>
+            </div>
+          ))}
+          {(() => {
+            const ok = confronto.filter(c => c.mv);
+            if (!ok.length) return null;
+            const prev = r2(ok.reduce((a, c) => a + (Number(c.x.importo) || 0) * (c.x.tipo === "entrata" ? 1 : -1), 0));
+            const reg = r2(ok.reduce((a, c) => a + (Number(c.mv.importo) || 0) * (c.x.tipo === "entrata" ? 1 : -1), 0));
+            return <>
+              <Riga sx="Totale previsto" dx={(prev >= 0 ? "+" : "−") + fmt(Math.abs(prev))} />
+              <Riga sx="Totale registrato" dx={(reg >= 0 ? "+" : "−") + fmt(Math.abs(reg))} />
+              <Riga sx="Effetto sulla cassa rispetto al previsto" dx={(reg - prev >= 0 ? "+" : "−") + fmt(Math.abs(r2(reg - prev)))} cl={cls(reg - prev)} forte />
+            </>;
+          })()}
+        </>}
+      </div>
+
+      {collega && (
+        <div className="modal-bg" onClick={() => setCollega(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div className="modal-head"><h3>Collega movimento</h3><button className="btn ghost sm" onClick={() => setCollega(null)}>✕</button></div>
+            <div className="modal-body">
+              <div className="tes-nota" style={{ marginTop: 0 }}>{collega.descrizione} · previsto {fmt(collega.importo)}{collega.data ? " il " + dataIT(collega.data) : ""}. Scegli il movimento registrato che corrisponde:</div>
+              {!candidati(collega).length ? <div className="tes-nota">Nessun movimento compatibile nei 75 giorni intorno alla data.</div> : candidati(collega).map(m => (
+                <Riga key={m._id} onClick={() => collegaMov(collega, m)} sfondo={m._id === collega.movId ? "var(--accent-soft)" : undefined}
+                  sx={m.descrizione || m.categoria} sotto={`${dataIT(m.data)} · ${(contiMap[m.contoLiquidita]?.nome || "senza conto").trim()} · ${m.categoria || ""}`} dx={fmt(m.importo)} />
+              ))}
+              {collega.movId && <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => collegaMov(collega, null)}>scollega</button>}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
