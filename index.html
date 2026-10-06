@@ -922,6 +922,9 @@
   .an-kpic-tick { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
   .an-cl { cursor: pointer; }
   .esp-riga:hover td { background: var(--panel-2); }
+  .saldo-hint { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .saldo-hint b { color: var(--ink); font-weight: 600; } .saldo-hint b.pos { color: var(--pos, #2d7a4a); } .saldo-hint b.neg { color: var(--neg, #b54343); }
+  .saldo-hint button { border: 1px solid var(--rule); background: var(--panel); color: var(--accent-ink, var(--accent)); border-radius: 4px; padding: 1px 7px; font-size: 11px; cursor: pointer; font-family: inherit; }
   /* Tesoreria: righe etichetta/importo, leggibili anche su telefono */
   .tes-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 10px; }
 .tes-chip { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
@@ -1035,7 +1038,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.56.0";
+const APP_VERSION = "3.57.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1451,7 +1454,21 @@ function Login({ onLogin }) {
 // ============================================================
 // MOVIMENTO FORM
 // ============================================================
-function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entrate: [], uscite: [] } }) {
+function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entrate: [], uscite: [] }, movimenti = null, saldiIniziali = null }) {
+  // Saldi correnti dei conti (come nei gestionali: selezioni il conto e vedi subito il saldo).
+  // In modifica escludo il movimento stesso, così "dopo" è il saldo con la versione corretta.
+  const saldiConti = useMemo(() => {
+    if (!movimenti) return null;
+    const cm = {}; (conti || []).forEach(c => { cm[c.codice] = c; });
+    CONTI_LIQUIDITA.forEach(c => { if (!cm[c.codice]) cm[c.codice] = { codice: c.codice, nome: c.nome }; });
+    const lista = mov && mov._id ? movimenti.filter(m => m._id !== mov._id) : movimenti;
+    const out = {};
+    try { calcolaMastrini(generaLibroGiornale(lista, saldiIniziali || {}, cm)).forEach(x => { out[Number(x.codice)] = { dare: x.dare || 0, avere: x.avere || 0, saldo: (x.dare || 0) - (x.avere || 0) }; }); } catch (e) { return null; }
+    return out;
+  }, [movimenti, saldiIniziali, conti, mov]);
+  const saldoDi = (cod) => (saldiConti && saldiConti[Number(cod)]) ? saldiConti[Number(cod)].saldo : 0;
+  const fmtSaldo = (v) => Math.abs(v) < 0.005 ? "0,00" : fmt(Math.abs(v)) + (v > 0 ? " D" : " A");
+
   const [tipo, setTipo] = useState(mov?.tipo || "uscita");
   const [data, setData] = useState(mov?.data || todayISO());
   const [contoLiquidita, setContoLiquidita] = useState(mov?.contoLiquidita ?? "");
@@ -1707,6 +1724,19 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
                             ));
                           })()}
                         </select>
+                        {saldiConti && r.conto !== "" && (() => {
+                          const sa = saldoDi(r.conto); const dopo = sa + (Number(r.dare) || 0) - (Number(r.avere) || 0);
+                          const resto = righe.reduce((a, x, j) => j === i ? a : a + (Number(x.dare) || 0) - (Number(x.avere) || 0), 0);
+                          const fix = (v) => String(Math.round(v * 100) / 100);
+                          return (
+                            <div className="saldo-hint">
+                              <span>saldo <b>{fmtSaldo(sa)}</b></span>
+                              {(Number(r.dare) > 0 || Number(r.avere) > 0) && <span>→ dopo <b className={Math.abs(dopo) < 0.005 ? "pos" : ""}>{fmtSaldo(dopo)}</b></span>}
+                              {Math.abs(sa) > 0.005 && <button type="button" title="Metti l'importo che porta il conto a zero" onClick={() => setRighe(righe.map((x, j) => j !== i ? x : (sa > 0 ? { ...x, dare: "", avere: fix(sa) } : { ...x, dare: fix(-sa), avere: "" })))}>salda</button>}
+                              {Math.abs(resto) > 0.005 && <button type="button" title="Metti la differenza che fa quadrare Dare e Avere" onClick={() => setRighe(righe.map((x, j) => j !== i ? x : (resto > 0 ? { ...x, dare: "", avere: fix(resto) } : { ...x, dare: fix(-resto), avere: "" })))}>bilancia</button>}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="num">
                         <input type="number" inputMode="decimal" step="0.01" min="0" value={r.dare}
@@ -1780,6 +1810,8 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
           <option value="">{tipo === "giroconto" ? "— seleziona —" : "— nessuno (non monetario) —"}</option>
           {CONTI_LIQUIDITA.map(c => <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome}</option>)}
         </select>
+        {saldiConti && contoLiquidita !== "" && (() => { const sa = saldoDi(contoLiquidita); const imp0 = Number(importo) || 0; const dopo = sa + (tipo === "entrata" ? 1 : -1) * imp0;
+          return <div className="saldo-hint"><span>saldo <b className={sa < 0 ? "neg" : ""}>{fmt(sa)}</b></span>{imp0 > 0 && <span>→ dopo <b className={dopo < 0 ? "neg" : ""}>{fmt(dopo)}</b></span>}</div>; })()}
       </div>
       {tipo === "giroconto" && (
         <div className="form-row">
@@ -1788,6 +1820,8 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
             <option value="">— seleziona —</option>
             {CONTI_LIQUIDITA.filter(c => c.codice !== Number(contoLiquidita)).map(c => <option key={c.codice} value={c.codice}>{c.codice.toString().padStart(2,"0")} · {c.nome}</option>)}
           </select>
+        {saldiConti && contoLiquiditaDest !== "" && (() => { const sa = saldoDi(contoLiquiditaDest); const imp0 = Number(importo) || 0; const dopo = sa + imp0;
+          return <div className="saldo-hint"><span>saldo <b className={sa < 0 ? "neg" : ""}>{fmt(sa)}</b></span>{imp0 > 0 && <span>→ dopo <b className={dopo < 0 ? "neg" : ""}>{fmt(dopo)}</b></span>}</div>; })()}
         </div>
       )}
       {tipo !== "giroconto" && (
@@ -1822,6 +1856,17 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
               ));
             })()}
           </select>
+          {saldiConti && contoPdC !== "" && (() => {
+            const sa = saldoDi(contoPdC); const imp0 = Number(importo) || 0;
+            const dopo = sa + (tipo === "uscita" ? imp0 : -imp0);
+            return (
+              <div className="saldo-hint">
+                <span>saldo <b>{fmtSaldo(sa)}</b></span>
+                {imp0 > 0 && <span>→ dopo <b className={Math.abs(dopo) < 0.005 ? "pos" : ""}>{fmtSaldo(dopo)}</b></span>}
+                {Math.abs(sa) > 0.005 && <button type="button" title="Usa come importo il saldo del conto" onClick={() => setImporto(String(Math.round(Math.abs(sa) * 100) / 100))}>importo = saldo</button>}
+              </div>
+            );
+          })()}
         </div>
       )}
       {tipo !== "giroconto" && !contoLiquidita && ![44,45,46,47,48,49,50,51].includes(Number(contoPdC)) && (
@@ -2755,7 +2800,7 @@ function ManutenzioneBox({ stagione }) {
 // ============================================================
 // PAGINA: NUOVO MOVIMENTO
 // ============================================================
-function PageNuovo({ conti, movimenti, stagione, categorie, onSaved, onCancel }) {
+function PageNuovo({ conti, movimenti, saldiIniziali, stagione, categorie, onSaved, onCancel }) {
   const [cespitoFromMov, setCespitoFromMov] = useState(null);
 
   const contiMap = useMemo(() => {
@@ -2869,7 +2914,7 @@ function PageNuovo({ conti, movimenti, stagione, categorie, onSaved, onCancel })
         </div>
       </div>
       <div className="card" style={{maxWidth:760}}>
-        <MovimentoForm conti={conti} categorie={categorie} onSave={handleSave} onCancel={onCancel} />
+        <MovimentoForm conti={conti} categorie={categorie} onSave={handleSave} onCancel={onCancel} movimenti={movimenti} saldiIniziali={saldiIniziali} />
       </div>
 
       {cespitoFromMov && (
@@ -2986,7 +3031,7 @@ function CespiteFormQuick({ cespite, onSave, onSkip }) {
 // ============================================================
 // PAGINA: LISTA MOVIMENTI
 // ============================================================
-function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
+function PageMovimenti({ conti, movimenti, saldiIniziali, stagione, categorie, onToast }) {
   const [filterTipo, setFilterTipo] = useState("");
   const [filterMese, setFilterMese] = useState("");
   const [filterBu, setFilterBu] = useState("");
@@ -3477,7 +3522,7 @@ function PageMovimenti({ conti, movimenti, stagione, categorie, onToast }) {
               <button className="btn ghost sm" onClick={() => setEditing(null)}>✕</button>
             </div>
             <div className="modal-body">
-              <MovimentoForm conti={conti} mov={editing} categorie={categorie} onSave={handleEdit} onCancel={() => setEditing(null)} />
+              <MovimentoForm conti={conti} mov={editing} categorie={categorie} onSave={handleEdit} onCancel={() => setEditing(null)} movimenti={movimenti} saldiIniziali={saldiIniziali} />
             </div>
           </div>
         </div>
@@ -20853,9 +20898,9 @@ function App() {
               {page === "dashboard" && <PageDashboard conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onGestisciConti={() => setPage("liquidita")} />}
               {page === "tesoreria" && <PageTesoreria conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} onToast={showToast} />}
               {page === "liquidita" && <PageLiquidita conti={conti} movimenti={movimenti} saldiIniziali={saldiIniziali} saldiInizialiEff={saldiInizialiEff} ereditati={!!saldiEreditati} stagione={stagione} onToast={showToast} />}
-              {page === "nuovo" && <PageNuovo conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
+              {page === "nuovo" && <PageNuovo conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorie={categorieOpzioni} onSaved={(msg) => { showToast(msg); setPage("movimenti"); }} onCancel={() => setPage("dashboard")} />}
               {page === "import" && <PageImportMovimenti conti={conti} bu={bu} movimenti={movimenti} stagione={stagione} onToast={showToast} onDone={() => setPage("movimenti")} />}
-              {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
+              {page === "movimenti" && <PageMovimenti conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} categorie={categorieOpzioni} onToast={showToast} />}
               {page === "conti" && <PagePianoConti conti={conti} stagione={stagione} onToast={showToast} />}
               {page === "bu" && <PageBU bu={bu} conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} categorieRF={categorieRF} stagione={stagione} onToast={showToast} />}
               {page === "crediti" && <PageCrediti conti={conti} movimenti={movimenti} saldiIniziali={saldiInizialiEff} stagione={stagione} bu={bu} onToast={showToast} />}
