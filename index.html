@@ -925,6 +925,18 @@
   .saldo-hint { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; font-variant-numeric: tabular-nums; }
   .saldo-hint b { color: var(--ink); font-weight: 600; } .saldo-hint b.pos { color: var(--pos, #2d7a4a); } .saldo-hint b.neg { color: var(--neg, #b54343); }
   .saldo-hint button { border: 1px solid var(--rule); background: var(--panel); color: var(--accent-ink, var(--accent)); border-radius: 4px; padding: 1px 7px; font-size: 11px; cursor: pointer; font-family: inherit; }
+  .scr-lbl { display: none; }
+  @media (max-width: 640px) {
+    /* scrittura libera su telefono: conto su tutta la riga, Dare e Avere affiancati sotto */
+    .tbl-scr thead { display: none; }
+    .tbl-scr, .tbl-scr tbody { display: block; width: 100%; min-width: 0 !important; }
+    .tbl-scr tr { display: grid; grid-template-columns: 1fr 1fr 36px; gap: 6px; padding: 10px 8px; border-bottom: 1px solid var(--rule); }
+    .tbl-scr td { display: block; padding: 0 !important; border: none !important; width: auto !important; }
+    .tbl-scr td:first-child { grid-column: 1 / -1; }
+    .tbl-scr input, .tbl-scr select { font-size: 16px !important; padding: 8px 10px !important; }
+    .tbl-scr .scr-lbl { display: inline; font-weight: 400; color: var(--ink-3); font-size: 12px; }
+    .tbl-scr td:last-child { display: flex; align-items: center; justify-content: center; }
+  }
   /* Tesoreria: righe etichetta/importo, leggibili anche su telefono */
   .tes-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 10px; }
 .tes-chip { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
@@ -1038,7 +1050,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.57.0";
+const APP_VERSION = "3.59.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -1680,7 +1692,7 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
           <div className="form-row">
             <label>Righe della scrittura <span className="req">*</span></label>
             <div style={{border:"1px solid var(--rule)", borderRadius:8, overflow:"hidden"}}>
-              <table className="tbl" style={{margin:0, fontSize:13}}>
+              <table className="tbl tbl-scr" style={{margin:0, fontSize:13}}>
                 <thead>
                   <tr style={{background:"#f5f0ff"}}>
                     <th style={{width:"50%"}}>Conto</th>
@@ -1741,14 +1753,14 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
                       <td className="num">
                         <input type="number" inputMode="decimal" step="0.01" min="0" value={r.dare}
                                onChange={e => updateRiga(i, "dare", e.target.value)}
-                               placeholder="—"
+                               placeholder="Dare €"
                                style={{width:"100%", padding:"5px 8px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right", fontSize:13,
                                        background: Number(r.dare) > 0 ? "#fef3c7" : "white"}}/>
                       </td>
                       <td className="num">
                         <input type="number" inputMode="decimal" step="0.01" min="0" value={r.avere}
                                onChange={e => updateRiga(i, "avere", e.target.value)}
-                               placeholder="—"
+                               placeholder="Avere €"
                                style={{width:"100%", padding:"5px 8px", border:"1px solid var(--rule)", borderRadius:4, textAlign:"right", fontSize:13,
                                        background: Number(r.avere) > 0 ? "#dbeafe" : "white"}}/>
                       </td>
@@ -1767,8 +1779,8 @@ function MovimentoForm({ conti, onSave, onCancel, mov = null, categorie = { entr
                         + Aggiungi riga
                       </button>
                     </td>
-                    <td className="num">{fmt(totDare)}</td>
-                    <td className="num">{fmt(totAvere)}</td>
+                    <td className="num"><span className="scr-lbl">Dare </span>{fmt(totDare)}</td>
+                    <td className="num"><span className="scr-lbl">Avere </span>{fmt(totAvere)}</td>
                     <td></td>
                   </tr>
                 </tbody>
@@ -2050,7 +2062,8 @@ function PageTesoreria({ conti, movimenti, saldiIniziali, stagione, onToast }) {
   }, [partite]);
 
   // riserve di utile (per decidere i dividendi)
-  const riserve = r2([14, 68].reduce((a, c) => a - ((mast[c] && mast[c].saldo) || 0), 0));
+  const codRiserve = [14, 68, ...Object.values(contiMap).filter(c => /DA DESTINARE/i.test(c.nome || "")).map(c => Number(c.codice))];
+  const riserve = r2([...new Set(codRiserve)].reduce((a, c) => a - ((mast[c] && mast[c].saldo) || 0), 0));
 
   // ---------- budget: flussi ancora da muovere (stessa logica del piano di cassa del Budget) ----------
   const perContoBU = useMemo(() => {
@@ -3796,10 +3809,14 @@ function generaRiapertura(movimenti, saldiIniziali, conti, annoY1) {
     }
   });
 
-  // risultato d'esercizio precedente a Riserva Utile (14)
+  // risultato d'esercizio precedente: va sul conto "da destinare" (poi la delibera
+  // lo gira a riserva e/o dividendi); se il conto non esiste, a Riserva Utile (14)
+  const cDest = (conti || []).find(c => c && /DA DESTINARE/i.test(c.nome || "") && String(c.prospetto || "") === "SP");
+  const codRis = cDest ? Number(cDest.codice) : 14;
+  const dove = cDest ? "da destinare" : "a Riserva Utile";
   if (Math.abs(utile) >= 0.005) {
-    if (utile > 0) push({ tipo: "uscita", contoPdC: 14, importo: utile, bu: "GENERAL", descrizione: "Riapertura: utile es. precedente a Riserva Utile" });
-    else           push({ tipo: "entrata", contoPdC: 14, importo: -utile, bu: "GENERAL", descrizione: "Riapertura: perdita es. precedente a Riserva Utile" });
+    if (utile > 0) push({ tipo: "uscita", contoPdC: codRis, importo: utile, bu: "GENERAL", descrizione: `Riapertura: utile es. precedente ${dove}` });
+    else           push({ tipo: "entrata", contoPdC: codRis, importo: -utile, bu: "GENERAL", descrizione: `Riapertura: perdita es. precedente ${dove}` });
   }
 
   const totPassivo = r2(totLiab + utile);
@@ -4384,7 +4401,7 @@ function PageRiapertura({ conti, movimenti, stagione, stagioniDisponibili, onToa
               <div className="value">{fmt(proposta.totPassivo)}</div>
             </div>
             <div className="kpi accent">
-              <div className="label">Risultato {origine} a Riserva Utile</div>
+              <div className="label">Risultato {origine} {(conti || []).some(c => /DA DESTINARE/i.test(c.nome || "")) ? "da destinare" : "a Riserva Utile"}</div>
               <div className={"value " + (proposta.utile < 0 ? "neg" : "")}>{fmt(proposta.utile)}</div>
             </div>
           </div>
