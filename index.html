@@ -949,6 +949,8 @@
   .ctl-barra { height: 5px; background: var(--rule); border-radius: 3px; margin-top: 6px; overflow: hidden; max-width: 320px; }
   .ctl-barra > div { height: 100%; background: var(--accent); border-radius: 3px; }
   .ctl-tabs { margin-bottom: 12px; }
+  .bu-cifra { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .bu-cifra:hover { text-decoration-style: solid; }
   /* Tesoreria: righe etichetta/importo, leggibili anche su telefono */
   .tes-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 10px; }
 .tes-chip { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
@@ -1062,7 +1064,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.60.0";
+const APP_VERSION = "3.61.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -10649,6 +10651,8 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
   const [drillDown, setDrillDown] = useState(null); // nome BU espansa
+  const [elenco, setElenco] = useState(null);       // { titolo, sotto, righe, totale } — movimenti che compongono una cifra
+  const [cercaEl, setCercaEl] = useState("");
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -10784,6 +10788,50 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
 
   const usoBU = buAgg.usoBU;
   const contiPerBU = buAgg.contiPerBU;
+
+  // ---------- "da cosa è composta questa cifra": righe del libro giornale per BU ----------
+  const righeLedgerBU = useMemo(() => {
+    const idsAp = new Set((movimenti || []).filter(isAperturaMov).map(m => m._id));
+    const out = {};
+    ledgerBU.forEach(scr => {
+      const b = scr.bu || "(senza BU)";
+      const ap = scr.apertura === true || scr.origine === "apertura" || idsAp.has(scr.movId);
+      (scr.righe || []).forEach(r => (out[b] = out[b] || []).push({ data: scr.data || "", desc: scr.descrizione || "", cod: Number(r.codice), dare: r.dare || 0, avere: r.avere || 0, ap }));
+    });
+    return out;
+  }, [ledgerBU, movimenti]);
+  const catDi = (cod) => (contiMap[cod]?.categoria || "").toUpperCase();
+  const nomeDi = (cod) => (contiMap[cod]?.nome || `Conto ${cod}`).trim();
+  // tipo: ricavi | costi | margine | investimenti | conto | cassa | movimenti
+  const apriElenco = (bu, tipo, cod) => {
+    let righe = [], titolo = "", sotto = "";
+    const lr = righeLedgerBU[bu] || [];
+    const daLedger = (filtro, segno) => lr.filter(filtro).map(r => ({ data: r.data, desc: r.desc, sotto: String(r.cod).padStart(2, "0") + " · " + nomeDi(r.cod) + (r.ap ? " · apertura" : ""), val: segno(r) }));
+    if (tipo === "ricavi") { titolo = "Ricavi"; righe = daLedger(r => catDi(r.cod) === "RICAVI", r => r.avere - r.dare); }
+    else if (tipo === "costi") { titolo = "Costi"; righe = daLedger(r => ["COSTI", "COSTI/RICAVI"].includes(catDi(r.cod)), r => r.dare - r.avere); }
+    else if (tipo === "margine") { titolo = "Margine (ricavi − costi)"; righe = daLedger(r => ["RICAVI", "COSTI", "COSTI/RICAVI"].includes(catDi(r.cod)), r => r.avere - r.dare); sotto = "ricavi in positivo, costi in negativo"; }
+    else if (tipo === "investimenti") { titolo = "Investimenti"; righe = daLedger(r => !r.ap && catDi(r.cod).startsWith("IMM."), r => r.dare - r.avere); sotto = "aperture escluse"; }
+    else if (tipo === "conto") {
+      titolo = String(cod).padStart(2, "0") + " · " + nomeDi(cod);
+      righe = daLedger(r => r.cod === cod, r => r.avere - r.dare)
+        .map(x => ({ ...x, sotto: x.sotto.includes("apertura") ? "apertura" : "" }));
+      sotto = "con il segno della colonna Netto: avere in positivo, dare in negativo";
+    } else if (tipo === "cassa") {
+      titolo = "Flusso di cassa"; sotto = "entrate in positivo, uscite in negativo · senza aperture, scritture non monetarie e giroconti";
+      righe = (usoBU[bu]?.movs || []).filter(m => !isAperturaMov(m) && !m.nonMonetario && m.tipo !== "giroconto" && !m.scritturaComposta && m.contoLiquidita)
+        .map(m => ({ data: m.data || "", desc: m.descrizione || m.categoria || "", sotto: [(contiMap[m.contoLiquidita]?.nome || "").trim(), m.categoria].filter(Boolean).join(" · "), val: (m.tipo === "entrata" ? 1 : -1) * (Number(m.importo) || 0) }));
+    } else if (tipo === "movimenti") {
+      titolo = "Tutti i movimenti";
+      righe = (usoBU[bu]?.movs || []).map(m => ({ data: m.data || "", desc: m.descrizione || m.categoria || "", sotto: [m.tipo, (contiMap[m.contoPdC]?.nome || contiMap[m.contoLiquidita]?.nome || "").trim(), m.categoria].filter(Boolean).join(" · "), val: (m.tipo === "uscita" ? -1 : 1) * (Number(m.importo) || 0), neutro: true }));
+    }
+    righe = righe.filter(r => Math.abs(r.val) > 0.004).sort((a, b) => String(a.data).localeCompare(String(b.data)));
+    setCercaEl("");
+    setElenco({ titolo, bu, sotto, righe, totale: righe.reduce((a, r) => a + r.val, 0), neutro: tipo === "movimenti" });
+  };
+  const cifra = (bu, tipo, testo, cls, cod) => (
+    <span className={"bu-cifra " + (cls || "")} title="Vedi i movimenti che compongono questa cifra"
+      onClick={e => { e.stopPropagation(); apriElenco(bu, tipo, cod); }}>{testo}</span>
+  );
 
   const save = async (data, oldKey) => {
     try {
@@ -11038,7 +11086,7 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
       <div className="page-head">
         <div>
           <h2>Business Units</h2>
-          <div className="sub">Centri di costo · {buData.length} BU configurate · clicca una riga per vedere i conti che la compongono</div>
+          <div className="sub">Centri di costo · {buData.length} BU configurate · clicca una riga per vedere i conti, clicca una cifra per vedere i movimenti che la compongono</div>
         </div>
         <button className="btn accent" onClick={() => setCreating(true)}>+ Nuova BU</button>
       </div>
@@ -11087,17 +11135,17 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
                       <span style={{display:"inline-block", width:14, color:"var(--ink-3)", transform: aperta ? "rotate(90deg)" : "none", transition:"transform .15s"}}>▸</span>
                       {b.nome}
                     </td>
-                    <td className="num">{uso.count}</td>
-                    <td className="num pos">{uso.ricavi > 0 ? fmt(uso.ricavi) : "—"}</td>
-                    <td className="num neg">{uso.costi > 0 ? fmt(uso.costi) : "—"}</td>
+                    <td className="num">{uso.count ? cifra(b.nome, "movimenti", uso.count) : 0}</td>
+                    <td className="num pos">{uso.ricavi > 0 ? cifra(b.nome, "ricavi", fmt(uso.ricavi)) : "—"}</td>
+                    <td className="num neg">{uso.costi > 0 ? cifra(b.nome, "costi", fmt(uso.costi)) : "—"}</td>
                     <td className={"num " + (margine < 0 ? "neg" : margine > 0 ? "pos" : "")} style={{fontWeight:600}}>
-                      {(uso.ricavi || uso.costi) ? fmt(margine) : "—"}
+                      {(uso.ricavi || uso.costi) ? cifra(b.nome, "margine", fmt(margine)) : "—"}
                     </td>
                     <td className="num" style={{color: Math.abs(uso.investimenti) > 0.005 ? "var(--ink)" : "var(--ink-3)"}}>
-                      {Math.abs(uso.investimenti) > 0.005 ? fmt(uso.investimenti) : "—"}
+                      {Math.abs(uso.investimenti) > 0.005 ? cifra(b.nome, "investimenti", fmt(uso.investimenti)) : "—"}
                     </td>
                     <td className={"num " + (uso.cassa < 0 ? "neg" : uso.cassa > 0 ? "pos" : "")} style={{fontWeight:600}}>
-                      {Math.abs(uso.cassa) > 0.005 ? fmt(uso.cassa) : "—"}
+                      {Math.abs(uso.cassa) > 0.005 ? cifra(b.nome, "cassa", fmt(uso.cassa)) : "—"}
                     </td>
                     <td onClick={e => e.stopPropagation()}>
                       <div style={{display:"flex", gap:4}}>
@@ -11129,14 +11177,14 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
                               </thead>
                               <tbody>
                                 {dettaglio.map(c => (
-                                  <tr key={c.codice}>
+                                  <tr key={c.codice} style={{cursor:"pointer"}} onClick={() => apriElenco(b.nome, "conto", c.codice)} title="Vedi i movimenti del conto">
                                     <td className="mono" style={{fontWeight:600}}>{String(c.codice).padStart(2,"0")}</td>
                                     <td>{c.nome}</td>
                                     <td style={{fontSize:11.5, color:"var(--ink-3)"}}>{c.categoria || "—"}</td>
                                     <td className="num">{c.count}</td>
-                                    <td className="num pos">{c.ricavi > 0 ? fmt(c.ricavi) : "—"}</td>
-                                    <td className="num neg">{c.costi > 0 ? fmt(c.costi) : "—"}</td>
-                                    <td className={"num " + (c.netto < 0 ? "neg" : c.netto > 0 ? "pos" : "")} style={{fontWeight:600}}>{fmt(c.netto)}</td>
+                                    <td className="num pos">{c.ricavi > 0 ? <span className="bu-cifra">{fmt(c.ricavi)}</span> : "—"}</td>
+                                    <td className="num neg">{c.costi > 0 ? <span className="bu-cifra">{fmt(c.costi)}</span> : "—"}</td>
+                                    <td className={"num " + (c.netto < 0 ? "neg" : c.netto > 0 ? "pos" : "")} style={{fontWeight:600}}><span className="bu-cifra">{fmt(c.netto)}</span></td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -11159,6 +11207,32 @@ function PageBU({ bu, conti, movimenti, saldiIniziali, categorieRF, stagione, on
           <strong>Margine vs Cassa.</strong> Il <em>margine</em> è economico: contiene solo conti di ricavo e di costo, quindi gli acquisti di immobilizzazioni non ci entrano (li trovi nella colonna <em>Investimenti</em>, che li conta per competenza, aperture escluse). La <em>cassa</em> è il flusso monetario della BU — entrate meno uscite operative meno investimenti — con la stessa logica del Rendiconto Finanziario: niente aperture, niente scritture non monetarie, niente giroconti. Con 📄 e 📊 esporti il fascicolo completo della BU (riepilogo, CE, prospetto patrimoniale, rendiconto e movimenti).
         </div>
       </div>
+
+      {elenco && (() => {
+        const q = cercaEl.trim().toLowerCase();
+        const vis = q ? elenco.righe.filter(r => (r.desc + " " + r.sotto + " " + r.data).toLowerCase().includes(q)) : elenco.righe;
+        const totVis = vis.reduce((a, r) => a + r.val, 0);
+        return (
+          <div className="modal-bg" onClick={() => setElenco(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 720 }}>
+              <div className="modal-head">
+                <h3>{elenco.bu} · {elenco.titolo}</h3>
+                <button className="btn ghost sm" onClick={() => setElenco(null)}>✕</button>
+              </div>
+              <div className="modal-body">
+                <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginBottom: 8 }}>{elenco.righe.length} righe{elenco.sotto ? " · " + elenco.sotto : ""}</div>
+                {elenco.righe.length > 8 && <input value={cercaEl} onChange={e => setCercaEl(e.target.value)} placeholder="Cerca descrizione, conto, data…" style={{ width: "100%", marginBottom: 8 }} />}
+                {vis.map((r, i) => (
+                  <CtlRiga key={i} sx={r.desc || "—"} sotto={[r.data ? r.data.split("-").reverse().join("/") : "", r.sotto].filter(Boolean).join(" · ")}
+                    dx={(r.val < 0 ? "−" : "") + fmt(Math.abs(r.val))} cl={elenco.neutro ? "" : (r.val < 0 ? "neg" : "pos")} />
+                ))}
+                {!vis.length && <div className="tes-nota">Nessuna riga.</div>}
+                {!elenco.neutro && <CtlRiga sx={q ? "Totale righe filtrate" : "Totale"} dx={(totVis < 0 ? "−" : "") + fmt(Math.abs(totVis))} forte />}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {(editing || creating) && (
         <div className="modal-bg" onClick={() => { setEditing(null); setCreating(false); }}>
