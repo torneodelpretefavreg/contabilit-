@@ -1064,7 +1064,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.61.0";
+const APP_VERSION = "3.62.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -9506,18 +9506,38 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
   const [dataConta, setDataConta] = useState(new Date().toISOString().slice(0, 10));
   const [storico, setStorico] = useState([]); // conte salvate nel tempo
 
-  // Carico composizione salvata da Firebase (working set: tiene le q precedenti)
+  // Carico composizione salvata da Firebase (working set: tiene le q precedenti).
+  // Se nella stagione non c'è ancora nessuna conta, parto dall'ultima dell'esercizio precedente
+  // (le monete e le banconote non cambiano al 1° settembre).
+  const [daPrec, setDaPrec] = useState(null);       // stagione da cui arriva la conta caricata
+  const [storicoPrec, setStoricoPrec] = useState([]);
+  const precStag = stagionePrecedenteDi(stagione);
   useEffect(() => {
     if (!firebaseReady || !stagione) return;
+    setDaPrec(null); setQuantita({}); setSavedComposizione(null);
     db.ref(`stagioni/${stagione}/composizioneCassa`).once("value").then(snap => {
       if (snap.exists()) {
         const v = snap.val();
         setQuantita(v.quantita || {});
         setDataConta(v.data || new Date().toISOString().slice(0, 10));
         setSavedComposizione(v);
+      } else if (precStag) {
+        db.ref(`stagioni/${precStag}/composizioneCassa`).once("value").then(sp => {
+          if (!sp.exists()) return;
+          const v = sp.val();
+          setQuantita(v.quantita || {});
+          setDaPrec({ stagione: precStag, data: v.data, totale: v.totale });
+        }).catch(() => {});
       }
     });
   }, [stagione]);
+  useEffect(() => {
+    if (!firebaseReady || !precStag) { setStoricoPrec([]); return; }
+    db.ref(`stagioni/${precStag}/composizioneCassaStorico`).once("value").then(snap => {
+      const v = snap.val();
+      setStoricoPrec(v ? Object.entries(v).map(([k, x]) => ({ ...x, _key: k, _prec: precStag })).sort((a, b) => (b.salvatoIl || "").localeCompare(a.salvatoIl || "")) : []);
+    }).catch(() => setStoricoPrec([]));
+  }, [precStag]);
 
   // Sottoscrivo lo storico delle conte salvate
   useEffect(() => {
@@ -9598,7 +9618,7 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
   // Ricarica le quantità di una conta storica nell'editor (senza ricontare)
   const caricaConta = (s) => {
     setQuantita(s.quantita || {});
-    setDataConta(s.data || dataConta);
+    setDataConta(s._prec ? new Date().toISOString().slice(0, 10) : (s.data || dataConta));
     onToast("Conta caricata — modifica l'importo o salvane una nuova");
   };
 
@@ -9618,6 +9638,11 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
           <div className="sub">Conta fisica del contante per quadrare con il saldo contabile CASSA</div>
         </div>
       </div>
+      {daPrec && (
+        <div className="card" style={{marginBottom:16, background:"var(--accent-soft)", borderColor:"var(--accent)", fontSize:13}}>
+          Nessuna conta ancora in {stagione}: ho caricato l'<b>ultima conta del {daPrec.stagione}</b>{daPrec.data ? <> (del {String(daPrec.data).split("-").reverse().join("/")}, totale {fmtEuro(daPrec.totale || 0)})</> : null}. Aggiorna i pezzi che sono cambiati e salva: diventa la prima conta di questa stagione.
+        </div>
+      )}
 
       {/* KPI top */}
       <div className="kpi-grid" style={{marginBottom:20}}>
@@ -9736,7 +9761,7 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
       )}
 
       {/* STORICO CONTE */}
-      {storico.length > 0 && (
+      {(storico.length > 0 || storicoPrec.length > 0) && (
         <div className="card" style={{marginTop:20}}>
           <h3 style={{margin:"0 0 4px"}}>🗂 Storico conte salvate</h3>
           <div style={{fontSize:12, color:"var(--ink-3)", marginBottom:12}}>
@@ -9755,11 +9780,11 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
                 </tr>
               </thead>
               <tbody>
-                {storico.map(s => {
+                {[...storico, ...storicoPrec].map(s => {
                   const sc = Number(s.scostamento) || 0;
                   return (
-                    <tr key={s._key}>
-                      <td>{s.data || "—"}</td>
+                    <tr key={(s._prec || "") + s._key} style={s._prec ? { color: "var(--ink-3)" } : undefined}>
+                      <td>{s.data || "—"}{s._prec && <div style={{fontSize:10.5}}>esercizio {s._prec}</div>}</td>
                       <td className="num" style={{fontWeight:600}}>{fmt(s.totale || 0)}</td>
                       <td className="num" style={{color:"var(--ink-3)"}}>{fmt(s.saldoContabile || 0)}</td>
                       <td className="num" style={{color: Math.abs(sc) < 0.01 ? "var(--accent-ink)" : "var(--danger)", fontWeight:600}}>
@@ -9769,7 +9794,7 @@ function PageCassa({ stagione, movimenti, saldiIniziali, onToast }) {
                       <td>
                         <div style={{display:"flex", gap:4}}>
                           <button className="btn ghost sm" onClick={() => caricaConta(s)}>↺ Carica</button>
-                          <button className="btn danger sm" onClick={() => eliminaConta(s)}>🗑</button>
+                          {!s._prec && <button className="btn danger sm" onClick={() => eliminaConta(s)}>🗑</button>}
                         </div>
                       </td>
                     </tr>
