@@ -951,6 +951,9 @@
   .ctl-tabs { margin-bottom: 12px; }
   .bu-cifra { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
   .bu-cifra:hover { text-decoration-style: solid; }
+  .kpi-clic { cursor: pointer; transition: box-shadow .15s; }
+  .kpi-clic:hover { box-shadow: 0 0 0 2px var(--accent-soft); }
+  .kpi-clic .label::after { content: " ›"; color: var(--ink-3); }
   /* Tesoreria: righe etichetta/importo, leggibili anche su telefono */
   .tes-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 10px; }
 .tes-chip { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
@@ -1064,7 +1067,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.62.0";
+const APP_VERSION = "3.63.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2529,6 +2532,26 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione, onGestisciCo
   const totUscite = movStagione.filter(m => m.tipo === "uscita").reduce((s,m) => s + m.importo, 0);
   const liquiditaTotale = Object.values(saldi).reduce((s,v) => s + v.iniziale + v.entrate - v.uscite, 0);
 
+  // Pop-up "da cosa è composto": incassi / pagamenti / saldo, per BU e per categoria
+  const [popKpi, setPopKpi] = useState(null);      // "entrata" | "uscita" | "saldo"
+  const [popAperto, setPopAperto] = useState(null);
+  const popDati = useMemo(() => {
+    if (!popKpi) return null;
+    const segno = (m) => popKpi === "saldo" ? (m.tipo === "entrata" ? 1 : -1) : 1;
+    const lista = movStagione.filter(m => popKpi === "saldo" ? (m.tipo === "entrata" || m.tipo === "uscita") : m.tipo === popKpi);
+    const perBU = {};
+    lista.forEach(m => {
+      const b = m.bu || "(senza BU)", c = m.categoria || "(senza categoria)", v = segno(m) * (Number(m.importo) || 0);
+      const x = perBU[b] || (perBU[b] = { bu: b, tot: 0, cat: {} });
+      x.tot += v;
+      const y = x.cat[c] || (x.cat[c] = { cat: c, tot: 0, movs: [] });
+      y.tot += v; y.movs.push({ ...m, _v: v });
+    });
+    const ord = (a, b) => Math.abs(b.tot) - Math.abs(a.tot);
+    return { totale: lista.reduce((a, m) => a + segno(m) * (Number(m.importo) || 0), 0), bu: Object.values(perBU).sort(ord).map(x => ({ ...x, cat: Object.values(x.cat).sort(ord) })) };
+  }, [popKpi, movimenti]);
+  const apriPop = (k) => { setPopKpi(k); setPopAperto(null); };
+
   return (
     <div>
       <div className="page-head">
@@ -2544,24 +2567,61 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione, onGestisciCo
           <div className="value">{fmtEuro(liquiditaTotale)}</div>
           <div className="hint">Tutti i conti aggregati</div>
         </div>
-        <div className="kpi">
+        <div className="kpi kpi-clic" onClick={() => apriPop("entrata")} title="Vedi da cosa sono composti">
           {/* "Incassi" e non "Entrate": sono soldi entrati in cassa, non ricavi.
               I ricavi di competenza stanno nel Conto Economico e sono un altro numero. */}
           <div className="label">Incassi stagione</div>
           <div className="value" style={{color:"var(--accent)"}}>{fmtEuro(totEntrate)}</div>
           <div className="hint">{totEntrateNuove > 0 ? `di cui ${fmtEuro(totEntrateNuove)} nuovi` : `${movStagione.filter(m=>m.tipo==="entrata").length} movimenti`}</div>
         </div>
-        <div className="kpi">
+        <div className="kpi kpi-clic" onClick={() => apriPop("uscita")} title="Vedi da cosa sono composti">
           <div className="label">Pagamenti stagione</div>
           <div className="value" style={{color:"var(--danger)"}}>{fmtEuro(totUscite)}</div>
           <div className="hint">{totUsciteNuove > 0 ? `di cui ${fmtEuro(totUsciteNuove)} nuovi` : `${movStagione.filter(m=>m.tipo==="uscita").length} movimenti`}</div>
         </div>
-        <div className="kpi">
+        <div className="kpi kpi-clic" onClick={() => apriPop("saldo")} title="Vedi da cosa è composto">
           <div className="label">Saldo di cassa</div>
           <div className={"value " + (totEntrate-totUscite < 0 ? "neg" : "")}>{fmtEuro(totEntrate - totUscite)}</div>
           <div className="hint">Incassi − Pagamenti · solo movimenti di cassa</div>
         </div>
       </div>
+      <div style={{fontSize:12, color:"var(--ink-3)", marginTop:6}}>Tocca Incassi, Pagamenti o Saldo per vedere la composizione per BU e categoria. Sono soldi entrati e usciti davvero dai conti (senza aperture, scritture non monetarie e giroconti): non sono ricavi e costi.</div>
+
+      {popDati && (
+        <div className="modal-bg" onClick={() => setPopKpi(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 680 }}>
+            <div className="modal-head">
+              <h3>{popKpi === "entrata" ? "Incassi" : popKpi === "uscita" ? "Pagamenti" : "Saldo di cassa"} · {stagione}</h3>
+              <button className="btn ghost sm" onClick={() => setPopKpi(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginBottom: 6 }}>Per Business Unit, poi per categoria. Tocca una categoria per vedere i movimenti.{popKpi === "saldo" ? " Incassi in positivo, pagamenti in negativo." : ""}</div>
+              {popDati.bu.map(b => (
+                <div key={b.bu} className="ctl-sez">
+                  <CtlRiga sx={<b>{b.bu}</b>} dx={<b>{fmt(b.tot)}</b>} cl={popKpi === "saldo" ? (b.tot < 0 ? "neg" : "pos") : ""}
+                    sotto={Math.abs(popDati.totale) > 0.005 && popKpi !== "saldo" ? (b.tot / popDati.totale * 100).toFixed(1).replace(".", ",") + "% del totale" : null} sfondo="var(--panel-2)" />
+                  {b.cat.map(c => {
+                    const k = b.bu + "|" + c.cat, ap = popAperto === k;
+                    return (
+                      <React.Fragment key={k}>
+                        <CtlRiga rientro={18} onClick={() => setPopAperto(ap ? null : k)}
+                          sx={<span><span style={{ color: "var(--ink-3)", marginRight: 6 }}>{ap ? "▾" : "▸"}</span>{c.cat}</span>}
+                          sotto={c.movs.length + (c.movs.length === 1 ? " movimento" : " movimenti")} dx={fmt(c.tot)} />
+                        {ap && c.movs.slice().sort((x, y) => String(x.data).localeCompare(String(y.data))).map(m => (
+                          <CtlRiga key={m._id} rientro={40} sx={<span style={{ fontSize: 12.5 }}>{m.descrizione || "—"}</span>}
+                            sotto={(m.data || "").split("-").reverse().join("/") + " · " + ((contiMap[m.contoLiquidita]?.nome || "").trim())}
+                            dx={<span style={{ fontSize: 12.5 }}>{fmt(m._v)}</span>} />
+                        ))}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              ))}
+              <CtlRiga sx="Totale" dx={fmtEuro(popDati.totale)} forte />
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{display:"flex", alignItems:"center", gap:12, margin:"24px 0 12px"}}>
         <h3 className="serif" style={{fontWeight:500, fontSize:18, margin:0}}>Disponibilità per conto</h3>
