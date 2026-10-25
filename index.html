@@ -1067,7 +1067,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.63.0";
+const APP_VERSION = "3.64.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -13012,6 +13012,14 @@ function PageCrediti({ conti, movimenti, saldiIniziali, stagione, bu, onToast })
   const [editing, setEditing] = useState(null);
   const [incassando, setIncassando] = useState(null);
   const [filtro, setFiltro] = useState("aperti"); // aperti | tutti | riscossi | scaduti
+  const [ignorati, setIgnorati] = useState({});   // righe "da classificare" nascoste a mano
+  useEffect(() => {
+    if (!firebaseReady || !stagione) return;
+    const ref = db.ref(`stagioni/${stagione}/creditiIgnorati`);
+    const cb = ref.on("value", snap => setIgnorati(snap.val() || {}));
+    return () => ref.off("value", cb);
+  }, [stagione]);
+  const ignora = (r) => db.ref(`stagioni/${stagione}/creditiIgnorati/${String(r._rk).replace(/[.#$/\[\]]/g, "_")}`).set(true);
 
   const contiMap = useMemo(() => {
     const m = {};
@@ -13068,11 +13076,28 @@ function PageCrediti({ conti, movimenti, saldiIniziali, stagione, bu, onToast })
   const daClassificare = useMemo(() => {
     const linkedMov = new Set(crediti.map(c => c.movRilevazioneId).filter(Boolean));
     const linkedScr = new Set(crediti.map(c => c.scritturaId).filter(Boolean));
-    return contab.righe
-      .filter(r => (r.dare || 0) > 0.005)
+    // Solo la parte ANCORA APERTA di ogni conto: se il conto è a zero (es. anticipi di un evento
+    // già chiuso) non c'è niente da classificare; se ha un saldo, sono aperte le righe in dare più
+    // recenti fino a coprire quel saldo (la più vecchia eventualmente solo in parte).
+    const aperte = [];
+    contab.perConto.forEach(pc => {
+      let resta = Math.round(pc.saldo * 100) / 100;
+      if (resta <= 0.005) return;
+      const dareConto = contab.righe.filter(r => r.codice === pc.codice && (r.dare || 0) > 0.005)
+        .sort((a, b) => (b.data || "").localeCompare(a.data || ""));
+      for (const r of dareConto) {
+        if (resta <= 0.005) break;
+        const quota = Math.min(r.dare, resta);
+        aperte.push({ ...r, residuo: Math.round(quota * 100) / 100 });
+        resta -= quota;
+      }
+    });
+    return aperte
       .filter(r => !(r.movId && linkedMov.has(r.movId)) && !(r.scritturaId && linkedScr.has(r.scritturaId)))
-      .map(r => ({ ...r, _rk: r.movId || `${r.scritturaId}_${r.codice}` }));
-  }, [contab.righe, crediti]);
+      .map(r => ({ ...r, _rk: r.movId || `${r.scritturaId}_${r.codice}` }))
+      .filter(r => !ignorati[r._rk])
+      .sort((a, b) => (a.data || "").localeCompare(b.data || ""));
+  }, [contab, crediti, ignorati]);
 
   // --- Derivati registro ---
   const arricchiti = useMemo(() => crediti.map(c => {
@@ -13319,7 +13344,7 @@ function PageCrediti({ conti, movimenti, saldiIniziali, stagione, bu, onToast })
             Crediti in contabilità da classificare ({daClassificare.length})
           </h3>
           <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: "0 0 12px" }}>
-            Queste righe risultano già a bilancio sui conti crediti. Classificarle aggiunge controparte, scadenza e note nel registro
+            Qui compare solo quello che sui conti crediti è ancora aperto: i conti già chiusi (saldo a zero, come gli anticipi del Festival) spariscono da soli. Classificarle aggiunge controparte, scadenza e note nel registro
             <b> senza modificare la scrittura contabile</b>. La scrittura di incasso la genererai dopo, quando vuoi.
           </p>
           <div className="tbl-wrap" style={{ background: "transparent" }}>
@@ -13341,13 +13366,14 @@ function PageCrediti({ conti, movimenti, saldiIniziali, stagione, bu, onToast })
                     <td className="mono" style={{ fontSize: 11.5 }}>{String(r.codice).padStart(2, "0")} {contiMap[r.codice]?.nome?.trim()}</td>
                     <td style={{ fontSize: 12.5 }}>{r.descrizione}{r.apertura && <span className="pill" style={{ marginLeft: 6, fontSize: 9.5 }}>apertura</span>}</td>
                     <td style={{ fontSize: 11.5 }}>{r.bu}</td>
-                    <td className="num" style={{ fontWeight: 600 }}>{fmt(r.dare)}</td>
-                    <td>
+                    <td className="num" style={{ fontWeight: 600 }}>{fmt(r.residuo)}{r.residuo < r.dare - 0.005 && <div style={{ fontSize: 10.5, color: "var(--ink-3)", fontWeight: 400 }}>aperti su {fmt(r.dare)}</div>}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <button className="btn ghost sm" title="Non è un credito da seguire: nascondi" onClick={() => ignora(r)} style={{ marginRight: 4 }}>Nascondi</button>
                       <button className="btn accent sm" onClick={() => setEditing({
                         nuovo: true, origine: "contabilita", rilevato: true,
                         movRilevazioneId: r.movId || null, scritturaId: r.scritturaId || null,
                         cliente: "", descrizione: r.descrizione || "",
-                        importo: r.dare, dataEmissione: r.data, scadenza: "",
+                        importo: r.residuo, dataEmissione: r.data, scadenza: "",
                         bu: r.bu || "GENERAL", contoCredito: r.codice, contoRicavo: "",
                       })}>Classifica</button>
                     </td>
