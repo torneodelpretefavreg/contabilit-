@@ -961,6 +961,9 @@
   .ctl-tabs { margin-bottom: 12px; }
   .bu-cifra { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
   .bu-cifra:hover { text-decoration-style: solid; }
+  .dash-occhio { display: inline-flex !important; align-items: center; gap: 6px; width: auto !important; flex: 0 0 auto !important; align-self: flex-start; }
+  .dash-oscura .kpi .value, .dash-oscura .kpi .hint, .dash-oscura .liq-card .saldo, .dash-oscura .liq-card .delta,
+  .dash-oscura .num, .dash-oscura .tes-dx, .dash-oscura .tes-sotto { filter: blur(9px); user-select: none; }
   .kpi-clic { cursor: pointer; transition: box-shadow .15s; }
   .kpi-clic:hover { box-shadow: 0 0 0 2px var(--accent-soft); }
   .kpi-clic .label::after { content: " ›"; color: var(--ink-3); }
@@ -1077,7 +1080,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.65.0";
+const APP_VERSION = "3.66.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -2562,13 +2565,33 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione, onGestisciCo
   }, [popKpi, movimenti]);
   const apriPop = (k) => { setPopKpi(k); setPopAperto(null); };
 
+  // Importi oscurati (tastino occhio): la scelta resta su questo dispositivo
+  const [oscura, setOscura] = useState(() => { try { return localStorage.getItem("ffabb_dash_oscura") === "1"; } catch (e) { return false; } });
+  const toggleOscura = () => setOscura(v => { const n = !v; try { localStorage.setItem("ffabb_dash_oscura", n ? "1" : "0"); } catch (e) {} return n; });
+
+  // Utile / perdita della stagione (per competenza: conti economici, aperture escluse)
+  const economico = useMemo(() => {
+    const righe = ctlRigheCE(movimenti, saldiIniziali, contiMap);
+    const perBU = ctlAggrega(righe, contiMap);
+    const t = ctlUnisci(perBU, "TUTTE");
+    return { ric: t.ric, cos: t.cos, ris: t.marg, perBU };
+  }, [movimenti, saldiIniziali, contiMap]);
+  const [popUtile, setPopUtile] = useState(false);
+  const [popUtileAperto, setPopUtileAperto] = useState(null);
+
   return (
-    <div>
+    <div className={oscura ? "dash-oscura" : ""}>
       <div className="page-head">
         <div>
           <h2>Dashboard</h2>
           <div className="sub">Disponibilità reali, entrate e uscite della stagione</div>
         </div>
+        <button className="btn ghost dash-occhio" onClick={toggleOscura} title={oscura ? "Mostra gli importi" : "Nascondi gli importi"} aria-label={oscura ? "Mostra gli importi" : "Nascondi gli importi"}>
+          {oscura
+            ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}
+          <span>{oscura ? "Mostra" : "Nascondi"}</span>
+        </button>
       </div>
 
       <div className="kpi-grid">
@@ -2594,8 +2617,43 @@ function PageDashboard({ conti, movimenti, saldiIniziali, stagione, onGestisciCo
           <div className={"value " + (totEntrate-totUscite < 0 ? "neg" : "")}>{fmtEuro(totEntrate - totUscite)}</div>
           <div className="hint">Incassi − Pagamenti · solo movimenti di cassa</div>
         </div>
+        <div className="kpi kpi-clic" onClick={() => { setPopUtile(true); setPopUtileAperto(null); }} title="Vedi il risultato per BU">
+          <div className="label">{economico.ris >= 0 ? "Utile" : "Perdita"} stagione</div>
+          <div className={"value " + (economico.ris < 0 ? "neg" : "pos")}>{fmtEuro(economico.ris)}</div>
+          <div className="hint">Ricavi {fmt(economico.ric)} − Costi {fmt(economico.cos)} · per competenza</div>
+        </div>
       </div>
-      <div style={{fontSize:12, color:"var(--ink-3)", marginTop:6}}>Tocca Incassi, Pagamenti o Saldo per vedere la composizione per BU e categoria. Sono soldi entrati e usciti davvero dai conti (senza aperture, scritture non monetarie e giroconti): non sono ricavi e costi.</div>
+      {popUtile && (
+        <div className="modal-bg" onClick={() => setPopUtile(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 680 }}>
+            <div className="modal-head">
+              <h3>{economico.ris >= 0 ? "Utile" : "Perdita"} · {stagione}</h3>
+              <button className="btn ghost sm" onClick={() => setPopUtile(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginBottom: 6 }}>Ricavi meno costi registrati (conti economici, come nel bilancio), per Business Unit. Tocca una BU per vedere i conti.</div>
+              {Object.values(economico.perBU).sort((a, b) => Math.abs(b.marg) - Math.abs(a.marg)).map(b => {
+                const ap = popUtileAperto === b.bu;
+                return (
+                  <div key={b.bu} className="ctl-sez">
+                    <CtlRiga onClick={() => setPopUtileAperto(ap ? null : b.bu)} sfondo="var(--panel-2)"
+                      sx={<span><span style={{ color: "var(--ink-3)", marginRight: 6 }}>{ap ? "▾" : "▸"}</span><b>{b.bu}</b></span>}
+                      sotto={`ricavi ${fmt(b.ric)} · costi ${fmt(b.cos)}`} dx={<b>{fmt(b.marg)}</b>} cl={b.marg < 0 ? "neg" : "pos"} />
+                    {ap && Object.values(b.conti).sort((x, y) => (y.nat === "ric") - (x.nat === "ric") || y.val - x.val).map(k => (
+                      <CtlRiga key={k.cod} rientro={22} sx={<span style={{ fontSize: 12.5 }}>{(contiMap[k.cod]?.nome || "Conto " + k.cod).trim()}</span>}
+                        sotto={k.nat === "ric" ? "ricavo" : "costo"} dx={<span style={{ fontSize: 12.5 }}>{(k.nat === "ric" ? "" : "−") + fmt(k.val)}</span>} />
+                    ))}
+                  </div>
+                );
+              })}
+              <CtlRiga sx="Ricavi" dx={fmt(economico.ric)} />
+              <CtlRiga sx="Costi" dx={"−" + fmt(economico.cos)} />
+              <CtlRiga sx={economico.ris >= 0 ? "Utile" : "Perdita"} dx={fmtEuro(economico.ris)} cl={economico.ris < 0 ? "neg" : "pos"} forte />
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{fontSize:12, color:"var(--ink-3)", marginTop:6}}>Tocca un riquadro per vedere da cosa è composto. Incassi, Pagamenti e Saldo sono soldi entrati e usciti davvero dai conti (senza aperture, scritture non monetarie e giroconti); Utile/Perdita è il risultato economico per competenza (ricavi − costi, come nel bilancio).</div>
 
       {popDati && (
         <div className="modal-bg" onClick={() => setPopKpi(null)}>
