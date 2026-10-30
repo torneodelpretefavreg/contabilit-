@@ -961,6 +961,10 @@
   .ctl-tabs { margin-bottom: 12px; }
   .bu-cifra { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
   .bu-cifra:hover { text-decoration-style: solid; }
+  .agg-side { margin: 22px 12px 10px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 11.5px; color: var(--ink-3); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .agg-banner { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 900;
+    display: flex; align-items: center; gap: 12px; background: var(--ink, #1a1a1a); color: #fff; padding: 10px 12px 10px 16px; border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.25); font-size: 13.5px; max-width: calc(100vw - 32px); }
   .dash-occhio { display: inline-flex !important; align-items: center; gap: 6px; width: auto !important; flex: 0 0 auto !important; align-self: flex-start; }
   .dash-oscura .kpi .value, .dash-oscura .kpi .hint, .dash-oscura .liq-card .saldo, .dash-oscura .liq-card .delta,
   .dash-oscura .num, .dash-oscura .tes-dx, .dash-oscura .tes-sotto { filter: blur(9px); user-select: none; }
@@ -1080,7 +1084,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.66.0";
+const APP_VERSION = "3.67.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -20495,7 +20499,40 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
   );
 }
 
+// ============================================================
+// AGGIORNAMENTI: l'app controlla se su GitHub c'e' una versione piu' nuova
+// (all'apertura, quando torna in primo piano e ogni 5 minuti) e propone il
+// pulsante "Aggiorna", che ricarica la pagina saltando la cache.
+// ============================================================
+function useAggiornamento() {
+  const [nuova, setNuova] = useState(null);
+  const [stato, setStato] = useState("");   // "" | controllo | aggiornata | errore
+  const controlla = useCallback(async (manuale) => {
+    if (location.protocol === "file:") { if (manuale) { setStato("aggiornata"); setTimeout(() => setStato(""), 3000); } return; }
+    if (manuale) setStato("controllo");
+    try {
+      const r = await fetch(location.pathname + "?nc=" + Date.now(), { cache: "no-store" });
+      const t = await r.text();
+      const v = (t.match(new RegExp("APP_VER" + "SION = \"([0-9.]+)\"")) || [])[1];
+      if (v && v !== APP_VERSION) { setNuova(v); setStato(""); }
+      else if (manuale) { setStato("aggiornata"); setTimeout(() => setStato(""), 3000); }
+    } catch (e) { if (manuale) { setStato("errore"); setTimeout(() => setStato(""), 4000); } }
+  }, []);
+  useEffect(() => {
+    // dopo un aggiornamento tolgo il parametro ?v=… dall'indirizzo
+    if (/[?&]v=\d+/.test(location.search)) { try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {} }
+    controlla(false);
+    const id = setInterval(() => controlla(false), 5 * 60 * 1000);
+    const vis = () => { if (document.visibilityState === "visible") controlla(false); };
+    document.addEventListener("visibilitychange", vis);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", vis); };
+  }, []);
+  const aggiorna = () => location.replace(location.pathname + "?v=" + Date.now() + location.hash);
+  return { nuova, stato, controlla, aggiorna };
+}
+
 function App() {
+  const agg = useAggiornamento();
   const [logged, setLogged] = useState(() => {
     if (sessionStorage.getItem(SESSION_KEY) === "1") return true;
     try { return localStorage.getItem(SESSION_KEY) === "1"; } catch (e) { return false; }
@@ -20838,8 +20875,24 @@ function App() {
           <button className={"navlink " + (page==="ammortamenti"?"active":"")} onClick={() => setPage("ammortamenti")}><span className="ico">⊟</span> Ammortamenti</button>
           <button className={"navlink " + (page==="cassa"?"active":"")} onClick={() => setPage("cassa")}><span className="ico">💵</span> Composizione Cassa</button>
           <button className={"navlink " + (page==="torneo"?"active":"")} onClick={() => setPage("torneo")}><span className="ico">★</span> Torneo</button>
+
+          <div className="agg-side">
+            <div>Versione {APP_VERSION}</div>
+            {agg.nuova
+              ? <button className="btn accent sm" onClick={agg.aggiorna}>⟳ Aggiorna alla {agg.nuova}</button>
+              : <button className="btn ghost sm" onClick={() => agg.controlla(true)} disabled={agg.stato === "controllo"}>
+                  {agg.stato === "controllo" ? "Controllo…" : agg.stato === "aggiornata" ? "✓ Sei aggiornato" : agg.stato === "errore" ? "Nessuna connessione" : "⟳ Controlla aggiornamenti"}
+                </button>}
+          </div>
         </nav>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}></div>}
+
+        {agg.nuova && (
+          <div className="agg-banner" role="status">
+            <span>È disponibile la versione <b>{agg.nuova}</b></span>
+            <button className="btn accent sm" onClick={agg.aggiorna}>Aggiorna</button>
+          </div>
+        )}
 
         <main className="main">
           {loading ? (
