@@ -962,9 +962,11 @@
   .bu-cifra { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
   .bu-cifra:hover { text-decoration-style: solid; }
   .agg-side { margin: 22px 12px 10px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 11.5px; color: var(--ink-3); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-  .agg-banner { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 900;
-    display: flex; align-items: center; gap: 12px; background: var(--ink, #1a1a1a); color: #fff; padding: 10px 12px 10px 16px; border-radius: 12px;
-    box-shadow: 0 8px 28px rgba(0,0,0,.25); font-size: 13.5px; max-width: calc(100vw - 32px); }
+  .agg-banner { position: fixed; left: 50%; transform: translateX(-50%); top: calc(10px + env(safe-area-inset-top, 0px)); z-index: 950;
+    display: flex; align-items: center; gap: 8px; background: var(--ink, #1a1a1a); color: #fff; padding: 6px 6px 6px 14px; border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35); font-size: 13.5px; font-weight: 700; max-width: calc(100% - 24px); white-space: nowrap; }
+  .agg-banner .btn { min-height: 34px; padding: 4px 12px; }
+  .agg-x { background: transparent; border: none; color: #fff; font-size: 15px; padding: 4px 10px; cursor: pointer; min-height: 34px; }
   .dash-occhio { display: inline-flex !important; align-items: center; gap: 6px; width: auto !important; flex: 0 0 auto !important; align-self: flex-start; }
   .dash-oscura .kpi .value, .dash-oscura .kpi .hint, .dash-oscura .liq-card .saldo, .dash-oscura .liq-card .delta,
   .dash-oscura .num, .dash-oscura .tes-dx, .dash-oscura .tes-sotto { filter: blur(9px); user-select: none; }
@@ -1084,7 +1086,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.67.0";
+const APP_VERSION = "3.68.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -20505,30 +20507,41 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
 // pulsante "Aggiorna", che ricarica la pagina saltando la cache.
 // ============================================================
 function useAggiornamento() {
-  const [nuova, setNuova] = useState(null);
-  const [stato, setStato] = useState("");   // "" | controllo | aggiornata | errore
+  const [nuova, setNuova] = useState(null);       // versione trovata online
+  const [nascosta, setNascosta] = useState(null); // versione per cui l'avviso è stato chiuso con ✕
+  const [aggiornando, setAggiornando] = useState(false);
+  const [stato, setStato] = useState("");         // esito del controllo manuale: "" | controllo | aggiornata | errore
+  const ultimo = useRef(0);
   const controlla = useCallback(async (manuale) => {
     if (location.protocol === "file:") { if (manuale) { setStato("aggiornata"); setTimeout(() => setStato(""), 3000); } return; }
+    ultimo.current = Date.now();
     if (manuale) setStato("controllo");
     try {
-      const r = await fetch(location.pathname + "?nc=" + Date.now(), { cache: "no-store" });
-      const t = await r.text();
-      const v = (t.match(new RegExp("APP_VER" + "SION = \"([0-9.]+)\"")) || [])[1];
-      if (v && v !== APP_VERSION) { setNuova(v); setStato(""); }
+      const r = await fetch(location.pathname + "?v=" + Date.now(), { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      const v = ((await r.text()).match(new RegExp("APP_VER" + "SION = \"([0-9.]+)\"")) || [])[1];
+      if (v && v !== APP_VERSION) { setNuova(v); setStato(""); if (manuale) setNascosta(null); }
       else if (manuale) { setStato("aggiornata"); setTimeout(() => setStato(""), 3000); }
     } catch (e) { if (manuale) { setStato("errore"); setTimeout(() => setStato(""), 4000); } }
   }, []);
   useEffect(() => {
     // dopo un aggiornamento tolgo il parametro ?v=… dall'indirizzo
     if (/[?&]v=\d+/.test(location.search)) { try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {} }
-    controlla(false);
+    const t0 = setTimeout(() => controlla(false), 1500);
     const id = setInterval(() => controlla(false), 5 * 60 * 1000);
-    const vis = () => { if (document.visibilityState === "visible") controlla(false); };
+    const vis = () => { if (!document.hidden && Date.now() - ultimo.current > 60000) controlla(false); };
     document.addEventListener("visibilitychange", vis);
-    return () => { clearInterval(id); document.removeEventListener("visibilitychange", vis); };
+    return () => { clearTimeout(t0); clearInterval(id); document.removeEventListener("visibilitychange", vis); };
   }, []);
-  const aggiorna = () => location.replace(location.pathname + "?v=" + Date.now() + location.hash);
-  return { nuova, stato, controlla, aggiorna };
+  const aggiorna = async () => {
+    setAggiornando(true);
+    // scarica la versione nuova e sostituisce quella che il telefono teneva in memoria
+    try { await fetch(location.pathname, { cache: "reload" }); } catch (e) {}
+    location.replace(location.pathname + "?v=" + Date.now() + location.hash);
+  };
+  const chiudi = () => setNascosta(nuova);
+  const mostraAvviso = !!nuova && nascosta !== nuova;
+  return { nuova, stato, controlla, aggiorna, chiudi, mostraAvviso, aggiornando };
 }
 
 function App() {
@@ -20887,10 +20900,11 @@ function App() {
         </nav>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}></div>}
 
-        {agg.nuova && (
+        {agg.mostraAvviso && (
           <div className="agg-banner" role="status">
-            <span>È disponibile la versione <b>{agg.nuova}</b></span>
-            <button className="btn accent sm" onClick={agg.aggiorna}>Aggiorna</button>
+            <span>{agg.aggiornando ? "Aggiorno…" : "Nuova versione disponibile"}</span>
+            <button className="btn accent sm" onClick={agg.aggiorna} disabled={agg.aggiornando}>Aggiorna</button>
+            <button className="agg-x" onClick={agg.chiudi} aria-label="Più tardi" title="Più tardi">✕</button>
           </div>
         )}
 
