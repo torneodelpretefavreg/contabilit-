@@ -961,6 +961,25 @@
   .ctl-tabs { margin-bottom: 12px; }
   .bu-cifra { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
   .bu-cifra:hover { text-decoration-style: solid; }
+  .app-lock { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+    padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg,#2d5e3e,#152b1d); color: #f0eee7; }
+  .app-lock .box { width: 100%; max-width: 340px; text-align: center; display: grid; gap: 14px; justify-items: center; }
+  .app-lock .mark { width: 64px; height: 64px; border-radius: 15px; background: rgba(255,255,255,.07); display: flex; align-items: flex-end; justify-content: center; gap: 5px; padding-bottom: 16px; box-sizing: border-box; }
+  .app-lock .mark i { display: block; width: 9px; border-radius: 2px; background: #f3ead9; }
+  .app-lock .mark i:last-child { background: #e0b44c; }
+  .app-lock h2 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 22px; margin: 4px 0 0; color: #f3ead9; }
+  .app-lock .sub { font-size: 13px; color: rgba(240,238,231,.7); margin-top: -8px; line-height: 1.45; }
+  .app-lock input { font-size: 22px; letter-spacing: 8px; text-align: center; max-width: 220px; width: 100%; background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.2); color: #fff; border-radius: 10px; padding: 10px 12px; box-sizing: border-box; }
+  .app-lock input::placeholder { letter-spacing: 2px; color: rgba(255,255,255,.45); font-size: 16px; }
+  .app-lock .bio { width: 100%; max-width: 260px; border: 0; border-radius: 12px; padding: 13px 16px; font: inherit; font-weight: 600; font-size: 15px;
+    background: #e0b44c; color: #16301f; cursor: pointer; }
+  .app-lock .bio:disabled { opacity: .55; cursor: default; }
+  .app-lock .pinbtn { border: 1px solid rgba(255,255,255,.28); background: transparent; color: #f0eee7; border-radius: 10px; padding: 9px 18px; font: inherit; cursor: pointer; }
+  .app-lock .pinbtn:disabled { opacity: .5; }
+  .app-lock .err { color: #f2a5a2; font-size: 13px; min-height: 18px; }
+  .app-lock .esci { background: none; border: 0; color: rgba(240,238,231,.55); font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; margin-top: 10px; }
   .agg-side { margin: 22px 12px 10px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 11.5px; color: var(--ink-3); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
   .agg-banner { position: fixed; left: 50%; transform: translateX(-50%); top: calc(10px + env(safe-area-inset-top, 0px)); z-index: 950;
     display: flex; align-items: center; gap: 8px; background: var(--ink, #1a1a1a); color: #fff; padding: 6px 6px 6px 14px; border-radius: 12px;
@@ -1086,7 +1105,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.68.0";
+const APP_VERSION = "3.69.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -20506,6 +20525,214 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
 // (all'apertura, quando torna in primo piano e ogni 5 minuti) e propone il
 // pulsante "Aggiorna", che ricarica la pagina saltando la cache.
 // ============================================================
+// ============================================================
+// BLOCCO DELL'APP — PIN e Face ID / Touch ID (come nella Contabilità Personale)
+// La password serve una volta per dispositivo; poi a ogni apertura dell'app,
+// e quando resta in background più di APP_LOCK_BG_MIN minuti, si sblocca con
+// Face ID / Touch ID o con il PIN. PIN (solo l'hash) e dispositivi biometrici
+// stanno su Firebase in sicurezza/lock, quindi valgono su tutti i dispositivi.
+// È un blocco dell'interfaccia, non una cifratura dei dati.
+// ============================================================
+const APP_LOCK_BG_MIN = 2;
+const LOCK_PATH = "sicurezza/lock";
+const lkB64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const lkUnb64u = s => { s = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; };
+const lkRnd = n => crypto.getRandomValues(new Uint8Array(n));
+async function lkHash(pin, salt) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + "|" + pin));
+  return Array.from(new Uint8Array(d)).map(x => x.toString(16).padStart(2, "0")).join("");
+}
+const lkBioOk = () => !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+const lkDevice = () => { const u = navigator.userAgent || ""; return /iPhone/.test(u) ? "iPhone" : /iPad/.test(u) ? "iPad" : /Macintosh|Mac OS/.test(u) ? "Mac" : /Android/.test(u) ? "Android" : "Dispositivo"; };
+const lkKey = id => String(id).replace(/[.#$\[\]\/]/g, "_");
+const lkGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lkSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+const lkDel = k => { try { localStorage.removeItem(k); } catch (e) {} };
+
+// apre il blocco subito (pulsante "Blocca" nel menu)
+const lockBus = { blocca: null };
+
+function AppLock({ onEsci }) {
+  const [lock, setLock] = useState(undefined);
+  const [bloccata, setBloccata] = useState(true);
+  const [pin, setPin] = useState(""); const [pin2, setPin2] = useState("");
+  const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  const [proponiBio, setProponiBio] = useState(false);
+  const [saltaSetup, setSaltaSetup] = useState(() => lkGet("ffabb_lock_skip") === "1");
+  const [recupero, setRecupero] = useState(false); const [pw, setPw] = useState("");
+  useEffect(() => {
+    if (!firebaseReady) { setLock(null); return; }
+    const r = db.ref(LOCK_PATH);
+    const h = r.on("value", s => setLock(s.val() || null), () => setLock(null));
+    return () => r.off("value", h);
+  }, []);
+  useEffect(() => {
+    let nascostaDal = 0;
+    const f = () => {
+      if (document.visibilityState === "hidden") nascostaDal = Date.now();
+      else if (nascostaDal && Date.now() - nascostaDal > APP_LOCK_BG_MIN * 60000) { setBloccata(true); setPin(""); setErr(""); }
+    };
+    document.addEventListener("visibilitychange", f);
+    lockBus.blocca = () => { setBloccata(true); setSaltaSetup(false); setPin(""); setErr(""); setProponiBio(false); };
+    return () => { document.removeEventListener("visibilitychange", f); lockBus.blocca = null; };
+  }, []);
+  const configurato = !!(lock && lock.hash);
+  const creds = Object.values((lock && lock.creds) || {}).filter(c => c && c.id);
+  const bio = creds.length > 0 && lkBioOk();
+  const sblocca = () => { setBloccata(false); setProponiBio(false); setPin(""); setPin2(""); setErr(""); };
+  const dopoPin = () => {
+    // dopo il PIN propone Face ID / Touch ID se questo dispositivo non è ancora registrato
+    const mio = lkGet("ffabb_bio_id");
+    const registrato = !!mio && creds.some(c => c.id === mio);
+    if (lkBioOk() && !registrato && lkGet("ffabb_bio_skip") !== "1") { setPin(""); setPin2(""); setErr(""); setProponiBio(true); }
+    else sblocca();
+  };
+  async function provaPin() {
+    if (!pin) return;
+    const h = await lkHash(pin, lock.salt);
+    if (h !== lock.hash) { setErr("PIN errato"); setPin(""); return; }
+    dopoPin();
+  }
+  // PIN dimenticato: con la password dell'app si azzera il PIN e se ne imposta uno nuovo
+  async function recuperaPin() {
+    if (pw !== APP_PASSWORD) { setErr("Password errata"); setPw(""); return; }
+    try { await db.ref(LOCK_PATH).update({ hash: null, salt: null }); } catch (e) { setErr("Non riuscito: " + ((e && e.message) || e)); return; }
+    lkDel("ffabb_lock_skip"); setSaltaSetup(false); setRecupero(false); setPw(""); setPin(""); setPin2(""); setErr("");
+  }
+  async function impostaPin() {
+    if (!/^\d{4,8}$/.test(pin)) { setErr("Il PIN deve avere da 4 a 8 cifre"); return; }
+    if (pin !== pin2) { setErr("I due PIN non coincidono"); setPin2(""); return; }
+    try {
+      setBusy(true);
+      const salt = lkB64u(lkRnd(16)); const hash = await lkHash(pin, salt);
+      await db.ref(LOCK_PATH).update({ salt, hash, aggiornato: new Date().toISOString() });
+      dopoPin();
+    } catch (e) { setErr("Salvataggio non riuscito: " + ((e && e.message) || e)); }
+    finally { setBusy(false); }
+  }
+  async function attivaBio() {
+    try {
+      setBusy(true);
+      const cred = await navigator.credentials.create({ publicKey: {
+        challenge: lkRnd(32), rp: { name: "Contabilità Futsal", id: location.hostname },
+        user: { id: lkRnd(16), name: "futsal-fabbrico", displayName: "Contabilità Futsal" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+        timeout: 60000, attestation: "none" } });
+      const id = lkB64u(cred.rawId);
+      await db.ref(LOCK_PATH + "/creds/" + lkKey(id)).set({ id, device: lkDevice(), creato: new Date().toISOString() });
+      lkSet("ffabb_bio_id", id);
+      sblocca();
+    } catch (e) { if (!e || e.name !== "NotAllowedError") setErr("Attivazione non riuscita: " + ((e && e.message) || e)); }
+    finally { setBusy(false); }
+  }
+  async function sbloccaBio() {
+    if (!bio || busy) return;
+    try {
+      setBusy(true);
+      const res = await navigator.credentials.get({ publicKey: { challenge: lkRnd(32), rpId: location.hostname, timeout: 60000,
+        userVerification: "required", allowCredentials: creds.map(c => ({ type: "public-key", id: lkUnb64u(c.id), transports: ["internal"] })) } });
+      if (res) sblocca();
+    } catch (e) { if (e && e.name !== "NotAllowedError" && e.name !== "AbortError") setErr("Face ID non riuscito: usa il PIN"); }
+    finally { setBusy(false); }
+  }
+  const mostraSetup = lock !== undefined && !configurato && !saltaSetup && bloccata;
+  const mostra = lock === undefined || (configurato && bloccata) || mostraSetup || proponiBio;
+  // prova subito Face ID quando compare il blocco (se il browser lo consente senza tocco)
+  useEffect(() => { if (mostra && configurato && bio && !proponiBio) sbloccaBio(); }, [mostra, configurato, bio]);
+  if (!mostra) return null;
+  const pinInput = (v, set, ph, enter) => (
+    <input type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={v} placeholder={ph}
+      onChange={e => { set(e.target.value.replace(/\D/g, "")); setErr(""); }} onKeyDown={e => { if (e.key === "Enter") enter(); }} />
+  );
+  return (
+    <div className="app-lock">
+      <div className="box">
+        <div className="mark"><i style={{ height: 14 }}></i><i style={{ height: 22 }}></i><i style={{ height: 30 }}></i></div>
+        <h2>Contabilità Futsal</h2>
+        {lock === undefined ? <div className="sub">Caricamento…</div>
+        : proponiBio ? <>
+          <div className="sub">Vuoi sbloccare l'app con Face ID / Touch ID su questo dispositivo?</div>
+          <button className="bio" onClick={attivaBio} disabled={busy}>Attiva Face ID / Touch ID</button>
+          <button className="pinbtn" onClick={() => { lkSet("ffabb_bio_skip", "1"); sblocca(); }}>Non ora</button>
+          <div className="err">{err}</div>
+        </> : mostraSetup ? <>
+          <div className="sub">Proteggi l'app con un PIN da 4 a 8 cifre. Vale su tutti i dispositivi; dopo potrai attivare Face ID / Touch ID.</div>
+          {pinInput(pin, setPin, "PIN", () => {})}
+          {pinInput(pin2, setPin2, "Ripeti PIN", impostaPin)}
+          <button className="bio" onClick={impostaPin} disabled={busy || !pin || !pin2}>Imposta PIN</button>
+          <button className="pinbtn" onClick={() => { lkSet("ffabb_lock_skip", "1"); setSaltaSetup(true); }}>Più tardi</button>
+          <div className="err">{err}</div>
+        </> : <>
+          <div className="sub">App bloccata</div>
+          {bio && <button className="bio" onClick={sbloccaBio} disabled={busy}>Sblocca con Face ID / Touch ID</button>}
+          {pinInput(pin, setPin, "PIN", provaPin)}
+          <button className="pinbtn" onClick={provaPin} disabled={!pin}>Sblocca con PIN</button>
+          <div className="err">{err}</div>
+          {!recupero ? <button className="esci" onClick={() => { setRecupero(true); setErr(""); }}>PIN dimenticato?</button> : <>
+            <div className="sub" style={{ marginTop: 4 }}>Inserisci la password dell'app per impostare un nuovo PIN</div>
+            <input type="password" value={pw} placeholder="Password" style={{ letterSpacing: 2, fontSize: 16 }} onChange={e => { setPw(e.target.value); setErr(""); }} onKeyDown={e => { if (e.key === "Enter") recuperaPin(); }} />
+            <button className="pinbtn" onClick={recuperaPin} disabled={!pw}>Nuovo PIN</button>
+          </>}
+          {onEsci && <button className="esci" style={{ marginTop: 0 }} onClick={onEsci}>Esci (dovrai rimettere la password)</button>}
+        </>}
+      </div>
+    </div>
+  );
+}
+
+// Impostazioni del blocco: cambia PIN, dispositivi con Face ID / Touch ID
+function SicurezzaModal({ onClose, onToast }) {
+  const [lock, setLock] = useState(null);
+  const [vecchio, setVecchio] = useState(""); const [p1, setP1] = useState(""); const [p2, setP2] = useState("");
+  useEffect(() => { const r = db.ref(LOCK_PATH); const h = r.on("value", s => setLock(s.val() || {})); return () => r.off("value", h); }, []);
+  if (!lock) return null;
+  const configurato = !!lock.hash;
+  const creds = Object.entries(lock.creds || {});
+  const mio = lkGet("ffabb_bio_id");
+  const salva = async () => {
+    if (configurato && (await lkHash(vecchio, lock.salt)) !== lock.hash) { onToast("PIN attuale errato", "error"); return; }
+    if (!/^\d{4,8}$/.test(p1)) { onToast("Il PIN deve avere da 4 a 8 cifre", "error"); return; }
+    if (p1 !== p2) { onToast("I due PIN non coincidono", "error"); return; }
+    const salt = lkB64u(lkRnd(16));
+    await db.ref(LOCK_PATH).update({ salt, hash: await lkHash(p1, salt), aggiornato: new Date().toISOString() });
+    lkDel("ffabb_lock_skip"); setVecchio(""); setP1(""); setP2("");
+    onToast(configurato ? "PIN cambiato" : "PIN impostato");
+  };
+  const togli = async (k, c) => {
+    if (!confirm(`Togliere ${c.device || "questo dispositivo"} dallo sblocco con Face ID / Touch ID?`)) return;
+    await db.ref(LOCK_PATH + "/creds/" + k).remove();
+    if (c.id === mio) lkDel("ffabb_bio_id");
+    onToast("Dispositivo tolto");
+  };
+  const lbl = { display: "block", fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--ink-3)", margin: "10px 0 4px" };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
+        <div className="modal-head"><h3>PIN e Face ID</h3><button className="btn ghost sm" onClick={onClose}>✕</button></div>
+        <div className="modal-body">
+          <div style={{ fontSize: 13, color: "var(--ink-2)" }}>L'app si blocca a ogni apertura e dopo {APP_LOCK_BG_MIN} minuti in background. Si sblocca con Face ID / Touch ID o con il PIN.</div>
+          {configurato && <><label style={lbl}>PIN attuale</label><input type="password" inputMode="numeric" value={vecchio} onChange={e => setVecchio(e.target.value.replace(/\D/g, ""))} maxLength={8} /></>}
+          <label style={lbl}>{configurato ? "Nuovo PIN" : "PIN"} (4-8 cifre)</label>
+          <input type="password" inputMode="numeric" value={p1} onChange={e => setP1(e.target.value.replace(/\D/g, ""))} maxLength={8} />
+          <label style={lbl}>Ripeti</label>
+          <input type="password" inputMode="numeric" value={p2} onChange={e => setP2(e.target.value.replace(/\D/g, ""))} maxLength={8} />
+          <div style={{ marginTop: 12 }}><button className="btn accent" onClick={salva}>{configurato ? "Cambia PIN" : "Imposta PIN"}</button></div>
+          <div style={{ ...lbl, marginTop: 20 }}>Dispositivi con Face ID / Touch ID</div>
+          {!creds.length && <div style={{ fontSize: 13, color: "var(--ink-3)" }}>Nessuno. Si attiva dalla schermata di blocco, dopo aver inserito il PIN.</div>}
+          {creds.map(([k, c]) => (
+            <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--rule)", fontSize: 13 }}>
+              <span style={{ flex: 1 }}>{c.device || "Dispositivo"}{c.id === mio ? " · questo" : ""} <span style={{ color: "var(--ink-3)", fontSize: 11.5 }}>{c.creato ? "dal " + c.creato.slice(0, 10).split("-").reverse().join("/") : ""}</span></span>
+              <button className="btn danger sm" onClick={() => togli(k, c)}>Togli</button>
+            </div>
+          ))}
+          {lkGet("ffabb_bio_skip") === "1" && lkBioOk() && <div style={{ marginTop: 10 }}><button className="btn ghost sm" onClick={() => { lkDel("ffabb_bio_skip"); onToast("Alla prossima apertura ti verrà riproposto Face ID / Touch ID"); }}>Riproponi Face ID su questo dispositivo</button></div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function useAggiornamento() {
   const [nuova, setNuova] = useState(null);       // versione trovata online
   const [nascosta, setNascosta] = useState(null); // versione per cui l'avviso è stato chiuso con ✕
@@ -20546,6 +20773,7 @@ function useAggiornamento() {
 
 function App() {
   const agg = useAggiornamento();
+  const [pannelloSicurezza, setPannelloSicurezza] = useState(false);
   const [logged, setLogged] = useState(() => {
     if (sessionStorage.getItem(SESSION_KEY) === "1") return true;
     try { return localStorage.getItem(SESSION_KEY) === "1"; } catch (e) { return false; }
@@ -20890,6 +21118,10 @@ function App() {
           <button className={"navlink " + (page==="torneo"?"active":"")} onClick={() => setPage("torneo")}><span className="ico">★</span> Torneo</button>
 
           <div className="agg-side">
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button className="btn ghost sm" onClick={() => { setSidebarOpen(false); lockBus.blocca && lockBus.blocca(); }}>🔒 Blocca</button>
+              <button className="btn ghost sm" onClick={() => { setSidebarOpen(false); setPannelloSicurezza(true); }}>PIN e Face ID</button>
+            </div>
             <div>Versione {APP_VERSION}</div>
             {agg.nuova
               ? <button className="btn accent sm" onClick={agg.aggiorna}>⟳ Aggiorna alla {agg.nuova}</button>
@@ -21085,6 +21317,8 @@ function App() {
       )}
 
       {toast && <div className={"toast " + (toast.type || "")}>{toast.msg}</div>}
+      {pannelloSicurezza && <SicurezzaModal onClose={() => setPannelloSicurezza(false)} onToast={showToast} />}
+      <AppLock onEsci={() => { sessionStorage.removeItem(SESSION_KEY); try { localStorage.removeItem(SESSION_KEY); } catch (e) {} setLogged(false); }} />
     </div>
   );
 }
