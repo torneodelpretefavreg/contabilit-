@@ -1105,7 +1105,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.69.0";
+const APP_VERSION = "3.69.1";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -20530,11 +20530,11 @@ function PageAnalisi({ stagione, stagioniDisponibili, conti, movimenti, cespiti,
 // La password serve una volta per dispositivo; poi a ogni apertura dell'app,
 // e quando resta in background più di APP_LOCK_BG_MIN minuti, si sblocca con
 // Face ID / Touch ID o con il PIN. PIN (solo l'hash) e dispositivi biometrici
-// stanno su Firebase in sicurezza/lock, quindi valgono su tutti i dispositivi.
+// stanno su Firebase in analisi/sicurezza/lock, quindi valgono su tutti i dispositivi.
 // È un blocco dell'interfaccia, non una cifratura dei dati.
 // ============================================================
 const APP_LOCK_BG_MIN = 2;
-const LOCK_PATH = "sicurezza/lock";
+const LOCK_PATH = "analisi/sicurezza/lock";   // sotto "analisi": è uno dei nodi che le regole di Firebase lasciano scrivere
 const lkB64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const lkUnb64u = s => { s = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; };
 const lkRnd = n => crypto.getRandomValues(new Uint8Array(n));
