@@ -1164,7 +1164,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.71.0";
+const APP_VERSION = "3.72.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -15394,13 +15394,19 @@ function rendicontoRiclassificato(schema, prospetti, mastriniFin, mastriniIni, c
   (prospetti?.ce || []).forEach(cl => {
     const t = tipoClasse(cl);
     const segno = cl.segno >= 0 ? 1 : -1;
+    let macro = null;
     (cl.voci || []).forEach(v => {
-      if (v.tipo === "sottosezione") return;
+      if (v.tipo === "sottosezione") { macro = v.nome; return; }
       const val = r2(segno * (v.valore || 0));      // contributo al risultato
       if (Math.abs(val) < 0.005) return;
       let dest = t;
       if (t === "costi" && /ammortament|svalutaz/i.test(v.nome || "")) dest = "da";
-      ce[dest].push({ nome: `${v.codice ? v.codice + ") " : ""}${v.nome}`, val });
+      // conti che compongono la voce (anche quelli delle sotto-voci), per il dettaglio a due livelli
+      const conti = [...(v.dettaglio || []), ...(v.sottovoci || []).flatMap(sv => sv.dettaglio || [])]
+        .map(d => ({ codice: d.c, nome: d.nome, val: r2(segno * (d.valore || 0)) }))
+        .filter(d => Math.abs(d.val) >= 0.005)
+        .sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
+      ce[dest].push({ nome: `${v.codice ? v.codice + ") " : ""}${v.nome}`, val, conti, macro });
     });
   });
   const ricavi = somma(ce.ricavi), costi = somma(ce.costi);
@@ -15416,6 +15422,19 @@ function rendicontoRiclassificato(schema, prospetti, mastriniFin, mastriniIni, c
   const natMap = (schema && schema.rf && schema.rf.natura) || {};
   const nat = (cod) => natMap[String(cod)] || naturaAuto(contiMap[cod]);
   const g = { crediti: [], debiti: [], altroCirc: [], imm: [], fondo: [], patrimonio: [], finanziamento: [] };
+  // macro voce: la voce dello Stato Patrimoniale dello schema in cui il conto e' agganciato
+  const macroSp = {};
+  ((schema && schema.sp) || []).forEach(cl => (cl.voci || []).forEach(v => {
+    if (v.tipo === "sottosezione" || v.speciale) return;
+    const nomeV = `${v.codice ? v.codice + ". " : ""}${v.nome}`;
+    [...(v.conti || []), ...(v.sottovoci || []).flatMap(sv => sv.conti || [])]
+      .forEach(x => { if (macroSp[Number(x.c)] == null) macroSp[Number(x.c)] = nomeV; });
+  }));
+  const macroDi = (cod) => {
+    if (macroSp[cod]) return macroSp[cod];
+    const c = String(contiMap[cod]?.categoria || "").trim().toLowerCase();
+    return c ? c.charAt(0).toUpperCase() + c.slice(1) : "Altri conti";
+  };
   let deltaEconomico = 0, liqIni = 0, liqFin = 0;
   (mastriniFin || []).forEach(m => {
     const cod = Number(m.codice);
@@ -15424,7 +15443,7 @@ function rendicontoRiclassificato(schema, prospetti, mastriniFin, mastriniIni, c
     const delta = r2((m.saldo || 0) - (ini[cod] || 0));
     if (Math.abs(delta) < 0.005) return;
     if (n === "economico") { deltaEconomico += delta; return; }
-    const voce = { codice: cod, nome: (m.nome || contiMap[cod]?.nome || `Conto ${cod}`).trim(), val: r2(-delta) };
+    const voce = { codice: cod, nome: (m.nome || contiMap[cod]?.nome || `Conto ${cod}`).trim(), val: r2(-delta), macro: macroDi(cod) };
     if (n === "immobilizzazioni") { g.imm.push(voce); return; }
     if (n === "fondo" || n === "patrimonio" || n === "finanziamento") { g[n].push(voce); return; }
     const cat = (contiMap[cod]?.categoria || "").toUpperCase();
@@ -15473,7 +15492,24 @@ function righeRfRiclassificato(R, conDettaglio, forza) {
   // quali righe sono composti (campo `parti`). Serve solo per verificare se
   // gli arrotondamenti all'unità producono una colonna che non somma a vista.
   const add = (tipo, label, val, extra) => { out.push({ tipo, label, val, ...(extra || {}) }); return out.length - 1; };
-  const det = (lista) => { if (conDettaglio) (lista || []).forEach(d => add("det", `${d.codice != null ? d.codice + " " : ""}${d.nome}`, d.val)); };
+  // conDettaglio: false = sintesi · true = dettaglio classico (PDF) ·
+  // "macro" = macro voci (voci CE dello schema / voci SP dello schema), ognuna con i conti in `figli`
+  const etConto = (d) => `${d.codice != null ? d.codice + " " : ""}${d.nome}`;
+  const det = (lista) => {
+    if (!conDettaglio) return;
+    const l = lista || [];
+    if (conDettaglio !== "macro") { l.forEach(d => add("det", etConto(d), d.val)); return; }
+    if (l.some(x => Array.isArray(x.conti))) {
+      l.forEach(v => add("det", v.nome, v.val, { figli: (v.conti || []).map(c => ({ label: etConto(c), val: c.val })) }));
+      return;
+    }
+    const gr = new Map();
+    l.forEach(d => { const k = d.macro || "Altri conti"; if (!gr.has(k)) gr.set(k, []); gr.get(k).push(d); });
+    [...gr.entries()]
+      .map(([k, xs]) => ({ k, xs, val: Math.round(xs.reduce((a, x) => a + (x.val || 0), 0) * 100) / 100 }))
+      .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
+      .forEach(x => add("det", x.k, x.val, { figli: x.xs.map(d => ({ label: etConto(d), val: d.val })) }));
+  };
 
   add("sez", "CONTO ECONOMICO RICLASSIFICATO");
   let iEbitda;
@@ -15548,9 +15584,18 @@ function righeRfConfronto(R, Rp, conDettaglio) {
   const pb = base(b0);
   const b = chiavi(b0);
   const mb = new Map(b.map(r => [r.k, r])), ka = new Set(a.map(r => r.k));
+  // conti dentro una macro voce: stessi abbinamenti per etichetta, quelli solo dell'anno prima a zero
+  const unisciFigli = (fa, fb) => {
+    if (!fa && !fb) return undefined;
+    const vb = new Map((fb || []).map(f => [f.label, f.val])), la = new Set((fa || []).map(f => f.label));
+    return [...(fa || []).map(f => ({ ...f, pv: vb.get(f.label) || 0 })),
+            ...(fb || []).filter(f => !la.has(f.label)).map(f => ({ label: f.label, val: 0, pv: f.val }))];
+  };
   const out = []; let par = null;
-  const aggiungiSoloPrec = () => { if (par) b.filter(r => r.tipo === "det" && r.parent === par && !ka.has(r.k)).forEach(r => out.push({ ...r, val: 0, pv: r.val, cb, pb })); };
-  a.forEach(r => { if (r.tipo !== "det") { aggiungiSoloPrec(); par = r.k; } out.push({ ...r, pv: mb.has(r.k) ? mb.get(r.k).val : 0, pb }); });
+  const aggiungiSoloPrec = () => { if (par) b.filter(r => r.tipo === "det" && r.parent === par && !ka.has(r.k)).forEach(r => out.push({ ...r, val: 0, pv: r.val, cb, pb, figli: unisciFigli(null, r.figli) })); };
+  a.forEach(r => { if (r.tipo !== "det") { aggiungiSoloPrec(); par = r.k; }
+    const p = mb.get(r.k);
+    out.push({ ...r, pv: p ? p.val : 0, pb, figli: unisciFigli(r.figli, p && p.figli) }); });
   aggiungiSoloPrec();
   return out;
 }
@@ -15650,58 +15695,76 @@ function generaPdfRfRiclassificato(R, stagione, doc, titolo, conDettaglio, prec)
   }
 }
 
+// true sotto i 640px: il riclassificato passa da tabella a elenco a righe
+function useSchermoStretto(px) {
+  const q = `(max-width: ${px || 640}px)`;
+  const [m, setM] = useState(() => !!(window.matchMedia && window.matchMedia(q).matches));
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia(q), f = () => setM(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", f); else mq.addListener(f);
+    f();
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", f); else mq.removeListener(f); };
+  }, [q]);
+  return m;
+}
+
 // Vista a schermo (componente a livello di modulo, come gli altri editor dello schema)
+// Livelli: Sintesi (solo aggregati) · Macro voci (voci dello schema, apribili) · Conti (tutto aperto)
 function SBRfRiclassificato({ R, Rp, precStagione, variazioni, stagione }) {
-  const [dettaglio, setDettaglio] = useState(false);
+  const [livello, setLiv] = useState(() => { try { return localStorage.getItem("rfr_livello") || "sintesi"; } catch (e) { return "sintesi"; } });
+  const [aperti, setAperti] = useState({});
   const [perc, setPerc] = useState(true);
+  const stretto = useSchermoStretto(640);
   if (!R) return null;
+  const setLivello = (v) => { setLiv(v); setAperti({}); try { localStorage.setItem("rfr_livello", v); } catch (e) {} };
   const conf = !!Rp;
   // incidenza % sui ricavi operativi (solo righe del conto economico)
   const pc = (v, b) => Math.abs(b || 0) > 0.5 ? numIT(v / Math.abs(b) * 100, 1) + "%" : "–";
-  const cellaPerc = (r, prec, stile) => perc ? <td key={prec ? "pp" : "pc0"} className="num" style={{ fontSize: 11, color: "var(--ink-3)", ...(stile || {}) }}>{r.ce && r.tipo !== "sez" ? pc(prec ? r.pv || 0 : r.val || 0, prec ? r.pb : r.cb) : ""}</td> : null;
   // m0: colonne di importi → negativi fra parentesi. m0s: righe discorsive → segno meno.
   const m0 = (n) => { const r = Math.round(Number(n) || 0); if (r === 0) return "-";
                       const s = Math.abs(r).toLocaleString("it-IT"); return r < 0 ? "(" + s + ")" : s; };
   const m0s = (n) => { const r = Math.round(Number(n) || 0); return r === 0 ? "-" : r.toLocaleString("it-IT"); };
-  const righe = righeRfRiclassificato(R, dettaglio);
-  const righeV = righeRfConfronto(R, Rp, dettaglio);
+  const delta = (r) => Math.round(((r.val || 0) - (r.pv || 0)) * 100) / 100;
+  const dTxt = (r) => { const d = delta(r); return Math.abs(d) < 0.5 ? "–" : (d > 0 ? "+" : "−") + m0(Math.abs(d)); };
+  const dPc = (r) => { const pv = r.pv || 0, d = delta(r);
+    return Math.abs(pv) > 0.5 ? (d > 0.004 ? "+" : d < -0.004 ? "−" : "") + numIT(Math.abs(d) / Math.abs(pv) * 100, 1) + "%" : "–"; };
+  const righe = righeRfRiclassificato(R, false);
+  const righeV = righeRfConfronto(R, Rp, livello === "sintesi" ? false : "macro");
+  const tutto = livello === "conti";
+  const apribile = (r) => r.tipo === "det" && r.figli && r.figli.length > 0;
+  const aperta = (r) => apribile(r) && (tutto || !!aperti[r.k]);
+  const toggle = (r) => { if (!apribile(r) || tutto) return; setAperti(a => ({ ...a, [r.k]: !a[r.k] })); };
+  // righe visibili: le macro voci aperte portano sotto i propri conti
+  const vis = [];
+  righeV.forEach(r => {
+    vis.push(r);
+    if (aperta(r)) r.figli.forEach((f, j) => vis.push({ ...f, tipo: "det2", ce: r.ce, cb: r.cb, pb: r.pb, k: r.k + "|" + j }));
+  });
+  const nApribili = righeV.filter(apribile).length;
+  const tuttiAperti = nApribili > 0 && righeV.filter(apribile).every(r => aperti[r.k]);
+  const apriTutti = () => { const o = {}; if (!tuttiAperti) righeV.filter(apribile).forEach(r => { o[r.k] = true; }); setAperti(o); };
+
   const nCol = (conf ? (variazioni ? 5 : 4) : 2) + (perc ? (conf ? 2 : 1) : 0);
+  const cellaPerc = (r, prec, stile) => perc ? <td key={prec ? "pp" : "pc0"} className="num" style={{ fontSize: 11, color: "var(--ink-3)", ...(stile || {}) }}>{r.ce && r.tipo !== "sez" ? pc(prec ? r.pv || 0 : r.val || 0, prec ? r.pb : r.cb) : ""}</td> : null;
   // colonne aggiuntive: esercizio precedente, Δ ed eventualmente Δ %
   const extra = (r, stile, bianco) => {
     const grigio = bianco ? "rgba(255,255,255,.7)" : "var(--ink-3)";
     const pcCur = cellaPerc(r, false, bianco ? { color: grigio } : null);
     if (!conf) return pcCur;
-    const pv = r.pv || 0, d = Math.round(((r.val || 0) - pv) * 100) / 100;
     return [
       pcCur,
-      <td key="p" className="num" style={{ ...(stile || {}), color: grigio }}>{m0(pv)}</td>,
+      <td key="p" className="num" style={{ ...(stile || {}), color: grigio }}>{m0(r.pv || 0)}</td>,
       cellaPerc(r, true, bianco ? { color: grigio } : null),
-      <td key="d" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>{Math.abs(d) < 0.5 ? "–" : (d > 0 ? "+" : "−") + m0(Math.abs(d))}</td>,
-      ...(variazioni ? [<td key="pc" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>
-        {Math.abs(pv) > 0.5 ? (d > 0.004 ? "+" : d < -0.004 ? "−" : "") + numIT(Math.abs(d) / Math.abs(pv) * 100, 1) + "%" : "–"}</td>] : []),
+      <td key="d" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>{dTxt(r)}</td>,
+      ...(variazioni ? [<td key="pc" className="num" style={{ ...(stile || {}), fontSize: 11.5, color: grigio }}>{dPc(r)}</td>] : []),
     ];
   };
-  const ok = Math.abs(R.scarto) < 0.5;
-  const okCe = Math.abs(R.risultato - R.risultatoSchema) < 0.5;
-  return (
-    <div className="card" style={{ maxWidth: conf ? 860 : 640, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-        <div className="card-title" style={{ margin: 0 }}>RF Riclassificato{conf ? ` · confronto con ${precStagione}` : ""}</div>
-        <div style={{ display: "flex", gap: 14 }}>
-          <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
-            <input type="checkbox" checked={perc} onChange={e => setPerc(e.target.checked)} />
-            % sui ricavi
-          </label>
-          <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)" }}>
-            <input type="checkbox" checked={dettaglio} onChange={e => setDettaglio(e.target.checked)} />
-            Mostra i conti
-          </label>
-        </div>
-      </div>
-      <div style={{ fontSize: 12, color: "var(--ink-3)", margin: "6px 0 12px", lineHeight: 1.5 }}>
-        Dall'EBITDA al free cash flow. Legge le voci del conto economico dallo schema e le variazioni
-        patrimoniali tra apertura e chiusura, classificate secondo la natura dei conti impostata in Struttura RF.
-      </div>
+  const freccia = (r) => apribile(r) && !tutto
+    ? <span style={{ display: "inline-block", width: 14, color: "var(--ink-3)", fontSize: 10 }}>{aperta(r) ? "▼" : "▶"}</span> : null;
+
+  const tabella = (
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       <table style={{ width: "100%" }}>
         <tbody>
           {(conf || perc) && (
@@ -15712,33 +15775,113 @@ function SBRfRiclassificato({ R, Rp, precStagione, variazioni, stagione }) {
               ))}
             </tr>
           )}
-          {righeV.map((r, i) => {
+          {vis.map((r, i) => {
             if (r.tipo === "sez") return (
-              <tr key={i}><td colSpan={nCol} style={{ paddingTop: i ? 18 : 4, fontFamily: "'Fraunces',serif", fontSize: 14,
+              <tr key={r.k || i}><td colSpan={nCol} style={{ paddingTop: i ? 18 : 4, fontFamily: "'Fraunces',serif", fontSize: 14,
                                                   borderBottom: "1px solid var(--rule-2)" }}>{r.label}</td></tr>
             );
-            if (r.tipo === "det") return (
-              <tr key={i}>
-                <td style={{ paddingLeft: 22, fontSize: 11.5, color: "var(--ink-3)" }}>{r.label}</td>
-                <td className="num" style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{m0(r.val)}</td>
-                {extra(r, { fontSize: 11.5 })}
-              </tr>
-            );
+            if (r.tipo === "det" || r.tipo === "det2") {
+              const d2 = r.tipo === "det2", fs = d2 ? 11 : 11.5;
+              return (
+                <tr key={r.k || i} onClick={() => toggle(r)} style={{ cursor: apribile(r) && !tutto ? "pointer" : "default" }}>
+                  <td style={{ paddingLeft: d2 ? 40 : (apribile(r) && !tutto ? 10 : 22), fontSize: fs, color: d2 ? "var(--ink-3)" : "var(--ink-2)",
+                               fontWeight: !d2 && livello !== "sintesi" ? 500 : 400 }}>{freccia(r)}{r.label}</td>
+                  <td className="num" style={{ fontSize: fs, color: d2 ? "var(--ink-3)" : "var(--ink-2)" }}>{m0(r.val)}</td>
+                  {extra(r, { fontSize: fs })}
+                </tr>
+              );
+            }
             const tot = r.tipo === "tot", fin = r.tipo === "fin";
             return (
-              <tr key={i} style={tot ? { background: "var(--panel-2)" } : fin ? { background: "var(--ink)", color: "#fff" } : {}}>
-                <td style={{ paddingLeft: tot || fin ? 8 : 12, fontWeight: tot || fin ? 700 : 400 }}>
-                  {r.label}
-                </td>
-                <td className={"num " + (!fin && r.val < -0.5 ? "neg" : "")} style={{ fontWeight: tot || fin ? 700 : 400, paddingRight: 8 }}>
-                  {m0(r.val)}
-                </td>
+              <tr key={r.k || i} style={tot ? { background: "var(--panel-2)" } : fin ? { background: "var(--ink)", color: "#fff" } : {}}>
+                <td style={{ paddingLeft: tot || fin ? 8 : 12, fontWeight: tot || fin ? 700 : 400 }}>{r.label}</td>
+                <td className={"num " + (!fin && r.val < -0.5 ? "neg" : "")} style={{ fontWeight: tot || fin ? 700 : 400, paddingRight: 8 }}>{m0(r.val)}</td>
                 {extra(r, { fontWeight: tot || fin ? 700 : 400 }, fin)}
               </tr>
             );
           })}
         </tbody>
       </table>
+    </div>
+  );
+
+  // Telefono: una riga per voce. Etichetta a sinistra, importo a destra; sotto, in piccolo,
+  // incidenza sui ricavi e variazione; l'anno precedente sotto l'importo.
+  const elenco = (
+    <div>
+      {conf && (
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)", letterSpacing: 0.3, padding: "0 2px 4px" }}>
+          <span>{stagione}</span><span style={{ fontWeight: 400 }}>/ {precStagione}</span>
+        </div>
+      )}
+      {vis.map((r, i) => {
+        if (r.tipo === "sez") return (
+          <div key={r.k || i} style={{ padding: i ? "18px 0 6px" : "2px 0 6px", fontFamily: "'Fraunces',serif", fontSize: 14.5,
+                                       borderBottom: "1px solid var(--rule-2)" }}>{r.label}</div>
+        );
+        const tot = r.tipo === "tot", fin = r.tipo === "fin", det = r.tipo === "det", d2 = r.tipo === "det2";
+        const forte = tot || fin;
+        const grigio = fin ? "rgba(255,255,255,.72)" : "var(--ink-3)";
+        const info = [];
+        if (perc && r.ce) info.push(pc(r.val || 0, r.cb) + " ric.");
+        if (conf) { const d = dTxt(r); if (d !== "–") info.push("Δ " + d + (variazioni && dPc(r) !== "–" ? " (" + dPc(r) + ")" : "")); }
+        const fs = d2 ? 12 : det ? 12.5 : 13.5;
+        return (
+          <div key={r.k || i} onClick={() => toggle(r)}
+               style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10,
+                        padding: forte ? "9px 10px" : `7px 2px 7px ${d2 ? 30 : det ? 12 : 2}px`,
+                        margin: forte ? "4px 0" : 0, borderRadius: forte ? 6 : 0,
+                        background: tot ? "var(--panel-2)" : fin ? "var(--ink)" : "transparent",
+                        color: fin ? "#fff" : d2 ? "var(--ink-3)" : det ? "var(--ink-2)" : "var(--ink)",
+                        borderBottom: forte ? "none" : "1px solid var(--rule)",
+                        cursor: apribile(r) && !tutto ? "pointer" : "default" }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: fs, fontWeight: forte ? 700 : det && livello !== "sintesi" ? 500 : 400, lineHeight: 1.3, overflowWrap: "anywhere" }}>
+                {freccia(r)}{r.label}
+              </div>
+              {info.length > 0 && <div style={{ fontSize: 11, color: grigio, marginTop: 2 }}>{info.join(" · ")}</div>}
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <div className={"mono " + (!fin && (r.val || 0) < -0.5 ? "neg" : "")} style={{ fontSize: fs, fontWeight: forte ? 700 : 500, whiteSpace: "nowrap" }}>{m0(r.val)}</div>
+              {conf && <div className="mono" style={{ fontSize: 11, color: grigio, whiteSpace: "nowrap", marginTop: 2 }}>{m0(r.pv || 0)}</div>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const ok = Math.abs(R.scarto) < 0.5;
+  const okCe = Math.abs(R.risultato - R.risultatoSchema) < 0.5;
+  const btnLiv = (k, l) => <button type="button" className={livello === k ? "active entrata" : ""} onClick={() => setLivello(k)}
+                                   style={{ padding: "7px 10px", fontSize: 12.5 }}>{l}</button>;
+  return (
+    <div className="card" style={{ maxWidth: conf ? 860 : 640, margin: "0 auto", width: "100%", boxSizing: "border-box", minWidth: 0, ...(stretto ? { padding: 14 } : {}) }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div className="card-title" style={{ margin: 0 }}>RF Riclassificato{conf ? ` · confronto con ${precStagione}` : ""}</div>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", width: stretto ? "100%" : "auto" }}>
+          <div className="tipo-switch" style={{ flex: stretto ? 1 : "none" }}>
+            {btnLiv("sintesi", "Sintesi")}{btnLiv("macro", stretto ? "Macro" : "Macro voci")}{btnLiv("conti", "Conti")}
+          </div>
+          <label style={{ fontSize: 12.5, display: "flex", gap: 6, alignItems: "center", color: "var(--ink-2)", whiteSpace: "nowrap" }}>
+            <input type="checkbox" checked={perc} onChange={e => setPerc(e.target.checked)} />
+            % ricavi
+          </label>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--ink-3)", margin: "6px 0 10px", lineHeight: 1.5 }}>
+        Dall'EBITDA al free cash flow. Legge le voci del conto economico dallo schema e le variazioni
+        patrimoniali tra apertura e chiusura, classificate secondo la natura dei conti impostata in Struttura RF.
+        {livello === "macro" && nApribili > 0 && <> Tocca una macro voce per vederne i conti.</>}
+      </div>
+      {livello === "macro" && nApribili > 0 && (
+        <div style={{ textAlign: "right", marginBottom: 6 }}>
+          <button type="button" className="btn ghost" onClick={apriTutti} style={{ fontSize: 12, padding: "4px 10px" }}>
+            {tuttiAperti ? "Chiudi tutte" : "Apri tutte"}
+          </button>
+        </div>
+      )}
+      {stretto ? elenco : tabella}
       {scartiDiArrotondamento(righe) && (
         <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--ink-3)", fontStyle: "italic", lineHeight: 1.5 }}>
           Importi in unità di euro: ogni riga è arrotondata singolarmente, quindi una somma può differire
@@ -18086,7 +18229,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       )}
 
       {tab === "rfr" && (
-        <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "grid", gap: 10, gridTemplateColumns: "minmax(0, 1fr)" }}>
           <SBRettifiche onToast={onToast} stagioni={[
             { stagione, movimenti, flags: flagsAdj, contiMap },
             ...(calcPrec ? [{ stagione: calcPrec.stagione, movimenti: calcPrec.movimenti, flags: flagsAdjPrec, contiMap: calcPrec.contiMap }] : []),
