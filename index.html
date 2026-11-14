@@ -1164,7 +1164,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.72.0";
+const APP_VERSION = "3.73.0";
 const APP_PASSWORD = "futsal26"; // password di accesso all'app
 const SESSION_KEY = "ffabb_contab_session";
 
@@ -17495,6 +17495,14 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
   const [caricato, setCaricato] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const [espansi, setEspansi] = useState({});
+  // Prospetti: livello di dettaglio (sintesi = solo macro voci · voci · conti = tutto aperto)
+  // e macro voci aperte/chiuse a mano (sovrascrivono il livello finché non lo cambi)
+  const [livProsp, setLivProspS] = useState(() => { try { return localStorage.getItem("sb_liv_prospetti") || "voci"; } catch (e) { return "voci"; } });
+  const [chiuse, setChiuse] = useState({});
+  const setLivProsp = (v) => { setLivProspS(v); setChiuse({}); setEspansi({}); try { localStorage.setItem("sb_liv_prospetti", v); } catch (e) {} };
+  const macroAperta = (k) => chiuse[k] !== undefined ? !chiuse[k] : livProsp !== "sintesi";
+  const toggleMacro = (k) => setChiuse(p => ({ ...p, [k]: macroAperta(k) }));
+  const voceEspansa = (id) => espansi[id] !== undefined ? espansi[id] : livProsp === "conti";
 
   const statoRef = useRef({ schema: null, esclusi: [] });
   const timerRef = useRef(null);
@@ -17960,8 +17968,8 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
       <React.Fragment key={v.id}>
         <tr>
           <td style={{ paddingLeft: 26, cursor: apribile ? "pointer" : "default" }}
-              onClick={() => apribile && setEspansi(p => ({ ...p, [v.id]: !p[v.id] }))}>
-            {apribile && <span style={{ color: "var(--ink-3)", marginRight: 6 }}>{espansi[v.id] ? "▾" : "▸"}</span>}
+              onClick={() => apribile && setEspansi(p => ({ ...p, [v.id]: !voceEspansa(v.id) }))}>
+            {apribile && <span style={{ color: "var(--ink-3)", marginRight: 6 }}>{voceEspansa(v.id) ? "▾" : "▸"}</span>}
             {v.codice ? v.codice + ". " : ""}{v.nome}
             {v.speciale === "risultato" && <span style={{ color: "var(--ink-3)", fontSize: 11 }}> (da CE)</span>}
           </td>
@@ -17980,16 +17988,33 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
               <td className="num" style={{ color: "var(--ink-2)" }}>{fmtP(x.valore, 0)}</td>
               {cp(x.valore, "sv:" + x.id)}
             </tr>
-            {espansi[v.id] && (x.dettaglio || []).map(d => rigaConto(d, 68, x.id))}
+            {voceEspansa(v.id) && (x.dettaglio || []).map(d => rigaConto(d, 68, x.id))}
           </React.Fragment>
         ))}
-        {espansi[v.id] && v.dettaglio.map(d => rigaConto(d, 52, v.id))}
+        {voceEspansa(v.id) && v.dettaglio.map(d => rigaConto(d, 52, v.id))}
       </React.Fragment>
     );
   };
   // le "sotto-sezioni" sono voci marcatore (v.tipo === "sottosezione"): compaiono come
   // sottotitolo nell'elenco, senza importo, e non entrano nei totali (calcolaProspetti
   // restituisce loro valore 0 / dettaglio vuoto).
+  // intestazione cliccabile di una macro voce (classe dello schema o area del rendiconto)
+  const cellaMacro = (k, testo, extra) => (
+    <td style={{ fontWeight: 700, cursor: "pointer", userSelect: "none" }} onClick={() => toggleMacro(k)} title={macroAperta(k) ? "Chiudi" : "Apri"}>
+      <span style={{ display: "inline-block", width: 14, color: "var(--ink-3)", transform: macroAperta(k) ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
+      {testo}{extra}
+    </td>
+  );
+  const barraLivelli = (
+    <div className="card" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 14px" }}>
+      <span style={{ fontSize: 12.5, color: "var(--ink-3)" }}>Dettaglio</span>
+      <div className="tes-chips" style={{ margin: 0 }}>
+        {[["sintesi", "Sintesi"], ["voci", "Voci"], ["conti", "Conti"]].map(([k, l]) =>
+          <button key={k} className={"tes-chip" + (livProsp === k ? " on" : "")} onClick={() => setLivProsp(k)}>{l}</button>)}
+      </div>
+      <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Sintesi: solo le macro voci · Voci: macro voci aperte · Conti: tutto aperto. Tocca una macro voce o una voce per aprirla o chiuderla.</span>
+    </div>
+  );
   const righeVociConSottosezioni = (voci) => (voci || []).map(v => (
     v.tipo === "sottosezione" ? (
       <tr key={v.id}>
@@ -18240,6 +18265,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
 
       {tab === "prospetti" && (
         <div style={{ display: "grid", gap: 18 }}>
+          {barraLivelli}
           {conf && calcPrec.mancanti.length > 0 && (
             <div style={{ padding: "10px 14px", borderRadius: 8, background: "#fff8e7", border: "1px solid #f0d860", color: "#7a5d00", fontSize: 12.5 }}>
               <b>Colonna {calcPrec.stagione} incompleta:</b> {calcPrec.mancanti.length} cont{calcPrec.mancanti.length === 1 ? "o movimentato" : "i movimentati"} in {calcPrec.stagione} non {calcPrec.mancanti.length === 1 ? "è" : "sono"} nello schema di {stagione}:{" "}
@@ -18259,11 +18285,11 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                     {prospetti.sp.filter(c => c.lato === lato).map(cl => (
                       <React.Fragment key={cl.id}>
                         <tr style={{ background: "var(--panel-2)" }}>
-                          <td style={{ fontWeight: 700 }}>{cl.codice ? cl.codice + ") " : ""}{cl.nome}</td>
+                          {cellaMacro("sp:" + cl.id, (cl.codice ? cl.codice + ") " : "") + cl.nome)}
                           <td className="num" style={{ fontWeight: 700 }}>{fmtP(cl.totale, 0)}</td>
                           {cp(cl.totale, "cl:" + cl.id, { fontWeight: 700 })}
                         </tr>
-                        {righeVociConSottosezioni(cl.voci)}
+                        {macroAperta("sp:" + cl.id) && righeVociConSottosezioni(cl.voci)}
                       </React.Fragment>
                     ))}
                     <tr style={{ borderTop: "2px solid var(--ink)" }}>
@@ -18294,14 +18320,12 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 {prospetti.ce.map(cl => (
                   <React.Fragment key={cl.id}>
                     <tr style={{ background: "var(--panel-2)" }}>
-                      <td style={{ fontWeight: 700 }}>
-                        {cl.codice ? cl.codice + ") " : ""}{cl.nome}
-                        <span style={{ color: "var(--ink-3)", fontWeight: 400, fontSize: 11 }}> {cl.segno >= 0 ? "(+)" : "(−)"}</span>
-                      </td>
+                      {cellaMacro("ce:" + cl.id, (cl.codice ? cl.codice + ") " : "") + cl.nome,
+                        <span style={{ color: "var(--ink-3)", fontWeight: 400, fontSize: 11 }}> {cl.segno >= 0 ? "(+)" : "(−)"}</span>)}
                       <td className="num" style={{ fontWeight: 700 }}>{fmtP(cl.totale, 0)}</td>
                       {cp(cl.totale, "cl:" + cl.id, { fontWeight: 700 })}
                     </tr>
-                    {righeVociConSottosezioni(cl.voci)}
+                    {macroAperta("ce:" + cl.id) && righeVociConSottosezioni(cl.voci)}
                   </React.Fragment>
                 ))}
                 <tr style={{ borderTop: "2px solid var(--ink)" }}>
@@ -18323,21 +18347,23 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                 {rfDir.aree.map(a => (
                   <React.Fragment key={a.id}>
                     <tr style={{ background: "var(--panel-2)" }}>
-                      <td style={{ fontWeight: 700 }}>{a.codice ? a.codice + ") " : ""}{a.nome}</td>
+                      {cellaMacro("rf:" + a.id, (a.codice ? a.codice + ") " : "") + a.nome)}
                       <td className="num" style={{ fontWeight: 700 }}>{fmtP(a.totale, 0)}</td>
                       {cp(a.totale, "a:" + a.id, { fontWeight: 700 })}
                     </tr>
-                    {(a.voci || []).map(v => (
+                    {macroAperta("rf:" + a.id) && (a.voci || []).map(v => (
                       <React.Fragment key={v.id}>
                         <tr>
                           <td style={{ paddingLeft: 18, fontWeight: 600, fontStyle: v.virtuale ? "italic" : "normal",
-                                       color: v.virtuale ? "var(--danger)" : "inherit" }}>
+                                       color: v.virtuale ? "var(--danger)" : "inherit", cursor: (v.righe || []).length ? "pointer" : "default" }}
+                              onClick={() => (v.righe || []).length && setEspansi(p => ({ ...p, ["rf" + v.id]: !voceEspansa("rf" + v.id) }))}>
+                            {(v.righe || []).length > 0 && <span style={{ color: "var(--ink-3)", marginRight: 6 }}>{voceEspansa("rf" + v.id) ? "▾" : "▸"}</span>}
                             {v.codice ? v.codice + ". " : ""}{v.nome}
                           </td>
                           <td className="num" style={{ fontWeight: 600 }}>{fmtP(v.totale, 0)}</td>
                           {cp(v.totale, "rv:" + v.id, { fontWeight: 600 })}
                         </tr>
-                        {(v.righe || []).map(r => (
+                        {voceEspansa("rf" + v.id) && (v.righe || []).map(r => (
                           <tr key={r.cat}>
                             <td style={{ paddingLeft: 34, fontSize: 12.5, color: "var(--ink-2)" }}>{r.cat}</td>
                             <td className="num" style={{ fontSize: 12.5, color: r.val < 0 ? "var(--danger)" : "var(--ink-2)" }}>{fmtP(r.val, 0)}</td>
@@ -18346,7 +18372,7 @@ function PageSchemaBilancio({ conti, movimenti, saldiIniziali, stagione, onToast
                         ))}
                       </React.Fragment>
                     ))}
-                    {(a.voci || []).length === 0 && (
+                    {macroAperta("rf:" + a.id) && (a.voci || []).length === 0 && (
                       <tr><td style={{ paddingLeft: 26, color: "var(--ink-3)", fontSize: 12 }}>Nessuna sottovoce</td><td className="num">—</td>{conf && <><td></td><td></td>{variazioni && <td></td>}</>}</tr>
                     )}
                   </React.Fragment>
