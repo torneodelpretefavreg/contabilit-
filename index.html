@@ -23,6 +23,7 @@
 <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
@@ -1164,8 +1165,19 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.73.0";
-const APP_PASSWORD = "futsal26"; // password di accesso all'app
+const APP_VERSION = "3.74.0";
+const ACCOUNT_EMAIL = "torneodelpretefavreg@gmail.com"; // account Firebase dell'app: la password NON sta nel codice, la verifica Firebase
+// Messaggi di errore dell'accesso Firebase, in italiano
+function msgAccesso(e) {
+  const c = (e && e.code) || "";
+  if (/invalid-credential|wrong-password|invalid-login-credentials|missing-password/.test(c)) return "Password errata.";
+  if (/user-not-found/.test(c)) return "Account non ancora creato su Firebase.";
+  if (/too-many-requests/.test(c)) return "Troppi tentativi: riprova tra qualche minuto.";
+  if (/network-request-failed/.test(c)) return "Nessuna connessione a internet.";
+  if (/operation-not-allowed|configuration-not-found/.test(c)) return "Accesso con email non attivo nel progetto Firebase.";
+  return "Accesso non riuscito" + (c ? " (" + c + ")" : "") + ".";
+}
+
 const SESSION_KEY = "ffabb_contab_session";
 
 // Config Firebase progetto contfutsal
@@ -1542,15 +1554,18 @@ function Login({ onLogin }) {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [ricorda, setRicorda] = useState(true);
-  const submit = (e) => {
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
     e.preventDefault();
-    if (pw === APP_PASSWORD) {
-      sessionStorage.setItem(SESSION_KEY, "1");
-      try { if (ricorda) localStorage.setItem(SESSION_KEY, "1"); else localStorage.removeItem(SESSION_KEY); } catch (er) {}
+    if (!firebaseReady || busy) return;
+    setErr(""); setBusy(true);
+    try {
+      const P = firebase.auth.Auth.Persistence;
+      await firebase.auth().setPersistence(ricorda ? P.LOCAL : P.SESSION);
+      await firebase.auth().signInWithEmailAndPassword(ACCOUNT_EMAIL, pw);
       onLogin();
-    } else {
-      setErr("Password errata.");
-    }
+    } catch (er) { setErr(msgAccesso(er)); setPw(""); }
+    finally { setBusy(false); }
   };
   return (
     <div className="login-shell">
@@ -1566,7 +1581,7 @@ function Login({ onLogin }) {
           <input type="checkbox" style={{width:"auto"}} checked={ricorda} onChange={e => setRicorda(e.target.checked)} />
           Resta connesso su questo dispositivo
         </label>
-        <button className="btn accent" type="submit">Entra</button>
+        <button className="btn accent" type="submit" disabled={busy}>{busy ? "Accesso…" : "Entra"}</button>
         {!firebaseReady && (
           <div style={{marginTop:18, fontSize:11.5, color:"var(--warn)", lineHeight:1.5}}>
             ⚠ Firebase non configurato. Apri <span className="mono">index.html</span> e incolla la config nel blocco <span className="mono">FIREBASE_CONFIG</span>.
@@ -20448,7 +20463,7 @@ function AppLock({ onEsci }) {
   }
   // PIN dimenticato: con la password dell'app si azzera il PIN e se ne imposta uno nuovo
   async function recuperaPin() {
-    if (pw !== APP_PASSWORD) { setErr("Password errata"); setPw(""); return; }
+    try { const u = firebase.auth().currentUser; await u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(ACCOUNT_EMAIL, pw)); } catch (er) { setErr(msgAccesso(er)); setPw(""); return; }
     try { await db.ref(LOCK_PATH).update({ hash: null, salt: null }); } catch (e) { setErr("Non riuscito: " + ((e && e.message) || e)); return; }
     lkDel("ffabb_lock_skip"); setSaltaSetup(false); setRecupero(false); setPw(""); setPin(""); setPin2(""); setErr("");
   }
@@ -20627,10 +20642,7 @@ function useAggiornamento() {
 function App() {
   const agg = useAggiornamento();
   const [pannelloSicurezza, setPannelloSicurezza] = useState(false);
-  const [logged, setLogged] = useState(() => {
-    if (sessionStorage.getItem(SESSION_KEY) === "1") return true;
-    try { return localStorage.getItem(SESSION_KEY) === "1"; } catch (e) { return false; }
-  });
+  const [logged, setLogged] = useState(true); // l'accesso lo gestisce AuthGate (Firebase)
   // La stagione attiva viene ricordata sul dispositivo. Se non c'e' una scelta
   // salvata, si parte da quella suggerita dalla data, ma NON si salta mai da soli
   // a una stagione che su Firebase non esiste ancora: al 1 settembre la stagione
@@ -20925,7 +20937,7 @@ function App() {
         <span className="desktop-only" style={{ fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{diagStagione}</span>
         <button className="icon-btn" onClick={() => setPannelloStagioni(true)} title="Mostra tutte le stagioni presenti su Firebase">Stagioni</button>
         <button className="icon-btn desktop-only" onClick={newStagione}>+ Nuova stagione</button>
-        <button className="icon-btn" onClick={() => { sessionStorage.removeItem(SESSION_KEY); try { localStorage.removeItem(SESSION_KEY); } catch (e) {} setLogged(false); }}>Esci</button>
+        <button className="icon-btn" onClick={() => { firebase.auth().signOut(); }}>Esci</button>
       </div>
 
       <div className="layout">
@@ -21171,12 +21183,24 @@ function App() {
 
       {toast && <div className={"toast " + (toast.type || "")}>{toast.msg}</div>}
       {pannelloSicurezza && <SicurezzaModal onClose={() => setPannelloSicurezza(false)} onToast={showToast} />}
-      <AppLock onEsci={() => { sessionStorage.removeItem(SESSION_KEY); try { localStorage.removeItem(SESSION_KEY); } catch (e) {} setLogged(false); }} />
+      <AppLock onEsci={() => { firebase.auth().signOut(); }} />
     </div>
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+// Mostra l'app solo a chi ha fatto l'accesso con l'account Firebase
+function AuthGate() {
+  const [user, setUser] = useState(undefined);
+  useEffect(() => {
+    if (!firebaseReady || !firebase.auth) { setUser(null); return; }
+    return firebase.auth().onAuthStateChanged(u => setUser(u || null));
+  }, []);
+  if (user === undefined) return <div className="login-shell"><div className="login-card"><div className="tag">Caricamento…</div></div></div>;
+  if (!user) return <Login onLogin={() => {}} />;
+  return <App />;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<AuthGate />);
 </script>
 </body>
 </html>
