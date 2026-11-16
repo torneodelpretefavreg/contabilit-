@@ -1165,7 +1165,9 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.74.0";
+const APP_VERSION = "3.75.0";
+// Nome file sicuro anche per le stagioni "situazione al gg-mm-aaaa"
+const nomeFileStag = (x) => String(x || "").replace(/\s*·\s*situazione al\s*/, "_al_").replace(/[^\w.-]+/g, "_");
 const ACCOUNT_EMAIL = "torneodelpretefavreg@gmail.com"; // account Firebase dell'app: la password NON sta nel codice, la verifica Firebase
 // Messaggi di errore dell'accesso Firebase, in italiano
 function msgAccesso(e) {
@@ -6034,7 +6036,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
       }
     });
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Rendiconto");
-    XLSX.writeFile(wb, `Rendiconto_${stagione}${filterBu ? "_" + filterBu : ""}.xlsx`);
+    XLSX.writeFile(wb, `Rendiconto_${nomeFileStag(stagione)}${filterBu ? "_" + filterBu : ""}.xlsx`);
     setExpOpen(false); onToast("Rendiconto esportato");
   };
   const esportaRFPdf = () => {
@@ -6062,7 +6064,7 @@ function PageRendiconto({ conti, movimenti, saldiIniziali, stagione, categorieRF
         else if (k === "final") { d.cell.styles.fontStyle = "bold"; d.cell.styles.fillColor = [26, 26, 26]; d.cell.styles.textColor = [255, 255, 255]; }
       },
     });
-    doc.save(`Rendiconto_${stagione}${filterBu ? "_" + filterBu : ""}.pdf`);
+    doc.save(`Rendiconto_${nomeFileStag(stagione)}${filterBu ? "_" + filterBu : ""}.pdf`);
     setExpOpen(false); onToast("Rendiconto esportato in PDF");
   };
 
@@ -7111,8 +7113,14 @@ function PageController({ conti, movimenti, saldiIniziali, stagione, onToast, on
 // ============================================================
 // PAGINA: EXPORT
 // ============================================================
-function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, categorieRF, bu, stagioniDisponibili }) {
+function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, stagione: stagioneKey, categorieRF, bu, stagioniDisponibili }) {
   const [busy, setBusy] = useState(false);
+  // Situazione a una data: i prospetti considerano solo le registrazioni fino a quel giorno (aperture sempre incluse)
+  const [alData, setAlData] = useState("");
+  const movimenti = useMemo(() => !alData ? movimentiTutti
+    : (movimentiTutti || []).filter(m => isAperturaMov(m) || !m.data || m.data <= alData), [movimentiTutti, alData]);
+  const stagioneFile = alData ? `${stagioneKey}_al_${alData}` : stagioneKey;
+  const stagione = alData ? `${stagioneKey} · situazione al ${alData.split("-").reverse().join("-")}` : stagioneKey;
   const [lastAction, setLastAction] = useState(null);
 
   const contiMap = useMemo(() => {
@@ -7151,8 +7159,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   // === Schema di Bilancio (sola lettura): stessi prospetti personalizzati della pagina "Schema di Bilancio" ===
   const [schemaBilancio, setSchemaBilancio] = useState(null);
   useEffect(() => {
-    if (!firebaseReady || !stagione) { setSchemaBilancio(schemaDefault()); return; }
-    const ref = db.ref(SB_PATH(stagione));
+    if (!firebaseReady || !stagioneKey) { setSchemaBilancio(schemaDefault()); return; }
+    const ref = db.ref(SB_PATH(stagioneKey));
     const cb = ref.on("value", snap => {
       const v = snap.val();
       if (v && v.json) {
@@ -7163,7 +7171,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       }
     });
     return () => ref.off("value", cb);
-  }, [stagione]);
+  }, [stagioneKey, alData]);
 
   const mastriniIniziali = useMemo(() => {
     const soloAperture = (movimenti || []).filter(isAperturaMov);
@@ -7176,8 +7184,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     [schemaBilancio, movimenti, saldiIniziali]);
   const rfIndSchema = useMemo(() => schemaBilancio ? rendicontoIndiretto(schemaBilancio, dati.mastrini, mastriniIniziali, contiMap) : null,
     [schemaBilancio, dati.mastrini, mastriniIniziali, contiMap]);
-  const flagsAdjEx = useRettificheEbitda(stagione);
-  const flagsAdjExPrec = useRettificheEbitda(stagionePrecedenteDi(stagione));
+  const flagsAdjEx = useRettificheEbitda(stagioneKey);
+  const flagsAdjExPrec = useRettificheEbitda(stagionePrecedenteDi(stagioneKey));
   const rfRiclSchema = useMemo(() => (schemaBilancio && prospettiSchema)
     ? applicaAdjusted(rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap), movimenti, flagsAdjEx) : null,
     [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap, movimenti, flagsAdjEx]);
@@ -7190,7 +7198,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
   const [variazioniEx, setVariazioniEx] = useState(false);
   useEffect(() => {
     setDatiPrecEx(null);
-    const prec = stagionePrecedenteDi(stagione);
+    const prec = stagionePrecedenteDi(stagioneKey);
     if (!firebaseReady || !prec) return;
     let vivo = true;
     (async () => {
@@ -7203,12 +7211,13 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         if (!vivo || !mv.exists()) return;
         const r = intervalloStagione(prec);
         const movs = Object.entries(mv.val() || {}).map(([k, m]) => ({ ...m, _id: k }))
-          .filter(m => !r || !m.data || (m.data >= r.da && m.data <= r.a));
-        setDatiPrecEx({ stagione: prec, movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}) });
+          .filter(m => !r || !m.data || (m.data >= r.da && m.data <= r.a))
+          .filter(m => !alData || isAperturaMov(m) || !m.data || m.data <= (parseInt(alData.slice(0,4)) - 1) + alData.slice(4));
+        setDatiPrecEx({ stagione: alData ? `${prec} al ${(parseInt(alData.slice(0,4)) - 1) + alData.slice(4)}`.replace(/(\d{4})-(\d{2})-(\d{2})$/, "$3-$2-$1") : prec, movimenti: movs, saldiIniziali: si.val() || {}, conti: Object.values(ct.val() || {}) });
       } catch (e) { /* stagione precedente assente: niente confronto */ }
     })();
     return () => { vivo = false; };
-  }, [stagione]);
+  }, [stagioneKey, alData]);
   const calcPrecEx = useMemo(() => {
     if (!datiPrecEx || !schemaBilancio) return null;
     const cm = {};
@@ -7263,18 +7272,18 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
       generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, `Rendiconto Riclassificato · ${stagione}${precAttivo ? " vs " + precAttivo.stagione : ""}`, conDettaglio,
         precAttivo ? { R: precAttivo.rfRicl, stagione: precAttivo.stagione, variazioni: precAttivo.variazioni } : null);
-      doc.save(`Rendiconto_Riclassificato_${stagione}${precAttivo ? "_vs_" + precAttivo.stagione + (precAttivo.variazioni ? "_variazioni" : "") : ""}${conDettaglio ? "_conti" : ""}.pdf`);
+      doc.save(`Rendiconto_Riclassificato_${stagioneFile}${precAttivo ? "_vs_" + nomeFileStag(precAttivo.stagione) + (precAttivo.variazioni ? "_variazioni" : "") : ""}${conDettaglio ? "_conti" : ""}.pdf`);
       setLastAction("Rendiconto Riclassificato generato" + suffConfronto);
     } catch (e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
   };
   // ---------- indici di bilancio: stesse scelte e commento della scheda "Indici" ----------
-  const [impIdx] = useImpostazioniIndici(stagione);
+  const [impIdx] = useImpostazioniIndici(stagioneKey);
   const confrontoIdx = useMemo(() => {
-    const altre = (stagioniDisponibili || []).filter(s => s !== stagione);
-    const p = stagionePrecedenteDi(stagione);
+    const altre = (stagioniDisponibili || []).filter(s => s !== stagioneKey);
+    const p = stagionePrecedenteDi(stagioneKey);
     return impIdx && Array.isArray(impIdx.confronto) ? impIdx.confronto.filter(s => altre.includes(s)) : (altre.includes(p) ? [p] : []);
-  }, [impIdx, stagioniDisponibili, stagione]);
+  }, [impIdx, stagioniDisponibili, stagioneKey]);
   const { calcolate: calcIdx, inCaricamento: caricIdx } = useStagioniCalcolate(confrontoIdx, schemaBilancio, contiMap);
   const datiIndici = () => {
     const colonne = [{ label: stagione, g: grandezzeBilancio({ prospetti: prospettiSchema, rfDir: rfDirSchema, rfRicl: rfRiclSchema }) },
@@ -7287,7 +7296,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
     try {
       const d = datiIndici();
       const doc = generaPdfIndici({ stagione, ...d });
-      doc.save(`Indici_di_bilancio_${stagione}${confrontoIdx.length ? "_vs_" + confrontoIdx.join("_") : ""}.pdf`);
+      doc.save(`Indici_di_bilancio_${stagioneFile}${confrontoIdx.length ? "_vs_" + confrontoIdx.join("_") : ""}.pdf`);
       setLastAction("Indici di bilancio generati");
     } catch (e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7366,7 +7375,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         columnStyles: { 0: { cellWidth: 12, halign: "center" }, 3: { cellWidth: 24, halign: "right" }, 4: { cellWidth: 24, halign: "right" }, 5: { cellWidth: 26, halign: "right" } },
       });
 
-      doc.save(`Bilancio_Verifica_${stagione}.pdf`);
+      doc.save(`Bilancio_Verifica_${stagioneFile}.pdf`);
       setLastAction("Bilancio di Verifica esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7384,7 +7393,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFontSize(11); doc.setFont("helvetica", "normal");
       doc.text(`Conto Economico · Stagione ${stagione}`, 105, 25, { align: "center" });
       doc.setFontSize(9); doc.setTextColor(100);
-      doc.text(`Al ${new Date().toLocaleDateString("it-IT")}`, 105, 31, { align: "center" });
+      doc.text(alData ? `Registrazioni fino al ${alData.split("-").reverse().join("/")}` : `Al ${new Date().toLocaleDateString("it-IT")}`, 105, 31, { align: "center" });
       doc.setTextColor(0);
 
       const ricaviRows = dati.ceVoci.filter(m => m.categoria === "RICAVI").map(m => [
@@ -7425,7 +7434,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.text(`€ ${pdfNum(dati.utile)}  (${dati.utile >= 0 ? "Utile" : "Perdita"})`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
       doc.setTextColor(0);
 
-      doc.save(`Conto_Economico_${stagione}.pdf`);
+      doc.save(`Conto_Economico_${stagioneFile}.pdf`);
       setLastAction("Conto Economico esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7443,7 +7452,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.setFontSize(11); doc.setFont("helvetica", "normal");
       doc.text(`Stato Patrimoniale · Stagione ${stagione}`, 105, 25, { align: "center" });
       doc.setFontSize(9); doc.setTextColor(100);
-      doc.text(`Al ${new Date().toLocaleDateString("it-IT")}`, 105, 31, { align: "center" });
+      doc.text(alData ? `Registrazioni fino al ${alData.split("-").reverse().join("/")}` : `Al ${new Date().toLocaleDateString("it-IT")}`, 105, 31, { align: "center" });
       doc.setTextColor(0);
 
       const attive = dati.spVoci.filter(m => m.saldo > 0).map(m => [
@@ -7484,7 +7493,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       doc.text(`€ ${pdfNum(dati.attivo - dati.passivo)}`, doc.internal.pageSize.width - 16, y3 + 2, { align: "right" });
       doc.setTextColor(0);
 
-      doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
+      doc.save(`Stato_Patrimoniale_${stagioneFile}.pdf`);
       setLastAction("Stato Patrimoniale esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7540,7 +7549,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         columnStyles: { 0: { cellWidth: 42, halign: "left" } },
       });
 
-      doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
+      doc.save(`Rendiconto_Finanziario_${stagioneFile}.pdf`);
       setLastAction("Rendiconto Finanziario esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7618,7 +7627,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
       });
       tabellaDismessi(doc, doc.lastAutoTable.finalY + 10);
 
-      doc.save(`Cespiti_${stagione}.pdf`);
+      doc.save(`Cespiti_${stagioneFile}.pdf`);
       setLastAction("Cespiti esportati");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -7920,7 +7929,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         }
       }
 
-      doc.save(`Bilancio_Completo_FutsalFabbrico_${stagione}${cfEx ? "_vs_" + cfEx.precStagione + (cfEx.var ? "_variazioni" : "") : ""}.pdf`);
+      doc.save(`Bilancio_Completo_FutsalFabbrico_${stagioneFile}${cfEx ? "_vs_" + nomeFileStag(cfEx.precStagione) + (cfEx.var ? "_variazioni" : "") : ""}.pdf`);
       setLastAction("📦 Pacchetto completo PDF esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -8384,7 +8393,7 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         }))
       ), "Piano dei Conti");
 
-      XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagione}${cfEx ? "_vs_" + cfEx.precStagione + (cfEx.var ? "_variazioni" : "") : ""}.xlsx`);
+      XLSX.writeFile(wb, `Contabilita_FutsalFabbrico_${stagioneFile}${cfEx ? "_vs_" + nomeFileStag(cfEx.precStagione) + (cfEx.var ? "_variazioni" : "") : ""}.xlsx`);
       setLastAction("Excel completo esportato — prospetti di bilancio e riepilogo BU inclusi");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -8399,6 +8408,18 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
         </div>
       </div>
 
+      {/* SITUAZIONE A UNA DATA: vale per tutti gli export */}
+      <div className="card" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px" }}>
+          <h3 className="card-title" style={{ margin: 0 }}>📅 Situazione al</h3>
+          <div className="sub" style={{ fontSize: 12, marginTop: 4 }}>
+            {alData ? `Tutti i documenti considerano solo le registrazioni fino al ${alData.split("-").reverse().join("/")} (il confronto usa la stessa data dell'anno prima).` : "Vuoto = intero esercizio. Scegli una data per bilanci intermedi."}
+          </div>
+        </div>
+        <input type="date" value={alData} onChange={e => setAlData(e.target.value)} style={{ padding: "6px 8px" }} />
+        {alData && <button className="btn sm" onClick={() => setAlData("")}>Intero esercizio</button>}
+      </div>
+
       {/* BILANCIO COMPARATIVO: vale per pacchetto completo, SP, CE, RF ed Excel */}
       <div className="card" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 260px" }}>
@@ -8406,8 +8427,8 @@ function PageExport({ conti, movimenti, cespiti, saldiIniziali, stagione, catego
           <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 4 }}>
             {calcPrecEx
               ? <>Stato Patrimoniale, Conto Economico e Rendiconto escono con la colonna <b>{calcPrecEx.stagione}</b> accanto a {stagione}, ricalcolata con lo schema di bilancio di questa stagione. Vale per il pacchetto completo, i documenti singoli e l'Excel.</>
-              : stagionePrecedenteDi(stagione)
-                ? <>Carico i dati di {stagionePrecedenteDi(stagione)}… (se la stagione precedente non esiste, gli export restano a una colonna)</>
+              : stagionePrecedenteDi(stagioneKey)
+                ? <>Carico i dati di {stagionePrecedenteDi(stagioneKey)}… (se la stagione precedente non esiste, gli export restano a una colonna)</>
                 : <>Nessuna stagione precedente: gli export restano a una colonna.</>}
           </div>
         </div>
@@ -12201,7 +12222,7 @@ function PageImportMovimenti({ conti, bu, movimenti, stagione, onToast, onDone }
     legLiq.push([]); legLiq.push(["CONTI PIANO DEI CONTI (colonna \"Contropartita\": codice o nome)"],["Codice","Nome","Tipo"]);
     conti.filter(c=>c.categoria!=="DISP. LIQUIDE").sort((a,b)=>a.codice-b.codice).forEach(c=>legLiq.push([c.codice,c.nome,c.categoria]));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(legLiq), "Legenda");
-    XLSX.writeFile(wb, `Modello_import_movimenti_${stagione}.xlsx`);
+    XLSX.writeFile(wb, `Modello_import_movimenti_${nomeFileStag(stagione)}.xlsx`);
   }
 
   return (
@@ -13429,7 +13450,7 @@ function PageCrediti({ conti, movimenti, saldiIniziali, stagione, bu, onToast })
     ws["!cols"] = [{ wch: 26 }, { wch: 34 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 9 }, { wch: 14 }, { wch: 12 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Crediti");
-    XLSX.writeFile(wb, `Crediti_${stagione}.xlsx`);
+    XLSX.writeFile(wb, `Crediti_${nomeFileStag(stagione)}.xlsx`);
     onToast("Registro crediti esportato");
   }
 
@@ -15976,7 +15997,7 @@ function creaPdfBuilder(stagione, orientamento, docEsistente) {
     doc.setFont("helvetica", "normal"); doc.setFontSize(11);
     doc.text(`${titolo} · Stagione ${stagione}`, 105, 25, { align: "center" });
     doc.setFontSize(9); doc.setTextColor(100);
-    doc.text(`Al ${oggi}`, 105, 31, { align: "center" });
+    doc.text(/situazione al/.test(String(stagione)) ? `Generato il ${oggi}` : `Al ${oggi}`, 105, 31, { align: "center" });
     doc.setTextColor(0);
   };
   const intestazioneL = (titolo) => {
@@ -16052,7 +16073,7 @@ function generaPdfSP(prospetti, stagione) {
   if (Math.abs(prospetti.sbilancio) >= 0.01) {
     b.barraFinale(y + 6, "SBILANCIO ATTIVO / PASSIVO", b.money(prospetti.sbilancio), b.ROSSO);
   }
-  b.doc.save(`Stato_Patrimoniale_${stagione}.pdf`);
+  b.doc.save(`Stato_Patrimoniale_${nomeFileStag(stagione)}.pdf`);
 }
 
 // --- Conto Economico (documento singolo) ---
@@ -16076,7 +16097,7 @@ function generaPdfCE(prospetti, stagione) {
   }
   b.barraFinale(y, "RISULTATO D'ESERCIZIO",
                 `${b.money(prospetti.risultato)}  (${prospetti.risultato >= 0 ? "Utile" : "Perdita"})`, b.NERO);
-  b.doc.save(`Conto_Economico_${stagione}.pdf`);
+  b.doc.save(`Conto_Economico_${nomeFileStag(stagione)}.pdf`);
 }
 
 // --- Rendiconto Finanziario, metodo diretto (documento singolo) ---
@@ -16110,7 +16131,7 @@ function generaPdfRF(rfDir, stagione) {
     // tabella stretta: la centro nella pagina invece di lasciarla appoggiata a sinistra
     margin: { left: (b.doc.internal.pageSize.width - 140) / 2 },
   });
-  b.doc.save(`Rendiconto_Finanziario_${stagione}.pdf`);
+  b.doc.save(`Rendiconto_Finanziario_${nomeFileStag(stagione)}.pdf`);
 }
 
 // --- Riepilogo per Business Unit (documento singolo o pagina del pacchetto) ---
@@ -16278,7 +16299,7 @@ function generaPdfRiepilogoBU(datiBU, stagione, docEsistente, titoloSezione) {
     }
   });
 
-  if (!docEsistente) doc.save(`Riepilogo_BU_${stagione}.pdf`);
+  if (!docEsistente) doc.save(`Riepilogo_BU_${nomeFileStag(stagione)}.pdf`);
   return doc;
 }
 
@@ -16432,7 +16453,7 @@ function generaPdfProspettiSchema(prospetti, rfDir, rfInd, stagione, prec, solo)
   // Metodo indiretto: tolto per ora (vedi commento sopra la funzione).
 
   const nomeDoc = { sp: "Stato_Patrimoniale", ce: "Conto_Economico", rf: "Rendiconto_Finanziario" }[solo] || "Prospetti_Civilistici";
-  b.doc.save(`${nomeDoc}_${stagione}${cf ? "_vs_" + cf.precStagione + (cf.var ? "_variazioni" : "") : ""}.pdf`);
+  b.doc.save(`${nomeDoc}_${nomeFileStag(stagione)}${cf ? "_vs_" + nomeFileStag(cf.precStagione) + (cf.var ? "_variazioni" : "") : ""}.pdf`);
 }
 
 function SBEditorVoce({ p, cl, v, api, contiMap, contiOrdinati, assegnati }) {
@@ -17075,7 +17096,7 @@ function SBIndici({ schema, stagione, stagioniDisponibili, corrente, contiMap, o
   const setPers = (arr) => salva({ personalizzati: arr });
   const pdf = () => {
     const doc = generaPdfIndici({ stagione, colonne, gruppi, commento: imp.commento || "" });
-    doc.save(`Indici_di_bilancio_${stagione}${confronto.length ? "_vs_" + confronto.join("_") : ""}.pdf`);
+    doc.save(`Indici_di_bilancio_${nomeFileStag(stagione)}${confronto.length ? "_vs_" + confronto.join("_") : ""}.pdf`);
   };
   const cellaCls = (r, i) => {
     if (i !== 0 || !r.meglio || r.valori.length < 2) return "";
@@ -17398,7 +17419,7 @@ function SBEsplora({ stagione, prospetti, rfDir, movimenti, saldiIniziali, conti
     ws["!rows"] = rows; ws["!outline"] = { above: true };
     Object.assign(ws["A1"], { s: { font: { bold: true, sz: 14 } } });
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, tipo.toUpperCase());
-    XLSX.writeFile(wb, `Esplora_${tipo.toUpperCase()}_${stagione}${conf ? "_vs_" + prec.stagione : ""}.xlsx`);
+    XLSX.writeFile(wb, `Esplora_${tipo.toUpperCase()}_${nomeFileStag(stagione)}${conf ? "_vs_" + prec.stagione : ""}.xlsx`);
   };
 
   const pesi = { sez: 700, classe: 700, voce: 600, sottovoce: 500, conto: 400 };
