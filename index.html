@@ -1173,7 +1173,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.76.1";
+const APP_VERSION = "3.76.2";
 // Nome file sicuro anche per le stagioni "situazione al gg-mm-aaaa"
 const nomeFileStag = (x) => String(x || "").replace(/\s*·\s*situazione al\s*/, "_al_").replace(/[^\w.-]+/g, "_");
 const ACCOUNT_EMAIL = "torneodelpretefavreg@gmail.com"; // account Firebase dell'app: la password NON sta nel codice, la verifica Firebase
@@ -7835,7 +7835,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       doc.addPage("a4", "landscape");
       
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text(`${num.rf}.. Rendiconto Finanziario`, 14, 14);
+      doc.text(`${num.rf}. Rendiconto Finanziario`, 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const bRF = creaPdfBuilder(stagione, "landscape", doc);
