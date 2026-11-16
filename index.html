@@ -1173,7 +1173,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.76.2";
+const APP_VERSION = "3.77.0";
 // Nome file sicuro anche per le stagioni "situazione al gg-mm-aaaa"
 const nomeFileStag = (x) => String(x || "").replace(/\s*·\s*situazione al\s*/, "_al_").replace(/[^\w.-]+/g, "_");
 const ACCOUNT_EMAIL = "torneodelpretefavreg@gmail.com"; // account Firebase dell'app: la password NON sta nel codice, la verifica Firebase
@@ -7139,8 +7139,16 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
   const [alData, setAlData] = useState("");
   const movimenti = useMemo(() => !alData ? movimentiTutti
     : (movimentiTutti || []).filter(m => isAperturaMov(m) || !m.data || m.data <= alData), [movimentiTutti, alData]);
-  const stagioneFile = alData ? `${stagioneKey}_al_${alData}` : stagioneKey;
-  const stagione = alData ? `${stagioneKey} · situazione al ${alData.split("-").reverse().join("-")}` : stagioneKey;
+  // Periodo: con "Dal" il conto economico, il rendiconto e l'elenco movimenti riguardano solo
+  // le registrazioni dal giorno scelto; lo stato patrimoniale resta la situazione alla data finale.
+  const [dalData, setDalData] = useState("");
+  const periodo = !!dalData;
+  const movPre = useMemo(() => periodo ? (movimenti || []).filter(m => isAperturaMov(m) || (m.data && m.data < dalData)) : [], [movimenti, dalData, periodo]);
+  const movPer = useMemo(() => periodo ? (movimenti || []).filter(m => !isAperturaMov(m) && (!m.data || m.data >= dalData)) : movimenti, [movimenti, dalData, periodo]);
+  const gma = (d) => d.split("-").reverse().join("-");
+  const stagione = periodo ? `${stagioneKey} · periodo dal ${gma(dalData)}${alData ? " al " + gma(alData) : ""}`
+    : alData ? `${stagioneKey} · situazione al ${gma(alData)}` : stagioneKey;
+  const stagioneFile = (dalData ? `${stagioneKey}_dal_${dalData}` : stagioneKey) + (alData ? `_al_${alData}` : "");
   const [lastAction, setLastAction] = useState(null);
 
   const contiMap = useMemo(() => {
@@ -7194,21 +7202,34 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
   }, [stagioneKey, alData]);
 
   const mastriniIniziali = useMemo(() => {
-    const soloAperture = (movimenti || []).filter(isAperturaMov);
-    return calcolaMastrini(generaLibroGiornale(soloAperture, saldiIniziali, contiMap));
-  }, [movimenti, saldiIniziali, contiMap]);
+    // in un periodo la situazione "iniziale" e' quella al giorno prima dell'inizio
+    const base = periodo ? movPre : (movimenti || []).filter(isAperturaMov);
+    return calcolaMastrini(generaLibroGiornale(base, saldiIniziali, contiMap));
+  }, [movimenti, movPre, periodo, saldiIniziali, contiMap]);
 
-  const prospettiSchema = useMemo(() => schemaBilancio ? calcolaProspetti(schemaBilancio, dati.mastrini) : null,
-    [schemaBilancio, dati.mastrini]);
-  const rfDirSchema = useMemo(() => schemaBilancio ? rendicontoDiretto(schemaBilancio, movimenti, saldiIniziali) : null,
-    [schemaBilancio, movimenti, saldiIniziali]);
+  const prospettiSchema = useMemo(() => {
+    if (!schemaBilancio) return null;
+    const cum = calcolaProspetti(schemaBilancio, dati.mastrini);
+    if (!periodo) return cum;
+    // CE del solo periodo; SP (con il risultato progressivo dall'inizio esercizio) alla data finale
+    const per = calcolaProspetti(schemaBilancio, calcolaMastrini(generaLibroGiornale(movPer, {}, contiMap)));
+    return { ...cum, ce: per.ce, risultato: per.risultato, risultatoProgressivo: cum.risultato };
+  }, [schemaBilancio, dati.mastrini, periodo, movPer, contiMap]);
+  const rfDirSchema = useMemo(() => {
+    if (!schemaBilancio) return null;
+    if (!periodo) return rendicontoDiretto(schemaBilancio, movimenti, saldiIniziali);
+    // liquidita' iniziale = saldi dei conti di liquidita' al giorno prima dell'inizio del periodo
+    const siDal = {};
+    disponibilitaLiquidePerConto(movPre, saldiIniziali).forEach(p => { siDal[p.codice] = p.chiusura; });
+    return rendicontoDiretto(schemaBilancio, movPer, siDal);
+  }, [schemaBilancio, movimenti, saldiIniziali, periodo, movPre, movPer]);
   const rfIndSchema = useMemo(() => schemaBilancio ? rendicontoIndiretto(schemaBilancio, dati.mastrini, mastriniIniziali, contiMap) : null,
     [schemaBilancio, dati.mastrini, mastriniIniziali, contiMap]);
   const flagsAdjEx = useRettificheEbitda(stagioneKey);
   const flagsAdjExPrec = useRettificheEbitda(stagionePrecedenteDi(stagioneKey));
   const rfRiclSchema = useMemo(() => (schemaBilancio && prospettiSchema)
-    ? applicaAdjusted(rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap), movimenti, flagsAdjEx) : null,
-    [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap, movimenti, flagsAdjEx]);
+    ? applicaAdjusted(rendicontoRiclassificato(schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap), movPer, flagsAdjEx) : null,
+    [schemaBilancio, prospettiSchema, dati.mastrini, mastriniIniziali, contiMap, movPer, flagsAdjEx]);
 
   // ---------- esercizio precedente: bilancio comparativo anche negli export ----------
   // Stessa logica della pagina Schema di Bilancio: la stagione precedente si ricalcola
@@ -7250,7 +7271,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
     const rfRicl = applicaAdjusted(rendicontoRiclassificato(schemaBilancio, pr, mastPrec, mastIniPrec, cm), datiPrecEx.movimenti, flagsAdjExPrec);
     return { stagione: datiPrecEx.stagione, prospetti: pr, rfDir: rf, rfRicl, mappa: mappaValoriProspetti(pr, rf) };
   }, [datiPrecEx, schemaBilancio, contiMap, flagsAdjExPrec]);
-  const precAttivo = (confrontoEx && calcPrecEx) ? { ...calcPrecEx, variazioni: variazioniEx } : null;
+  const precAttivo = (confrontoEx && calcPrecEx && !periodo) ? { ...calcPrecEx, variazioni: variazioniEx } : null;
   // cf: stesso oggetto usato dal PDF comparativo (colonna anno precedente, Var. €, Var. %)
   const cfEx = precAttivo ? { stagione, precStagione: precAttivo.stagione, get: (k) => precAttivo.mappa[k] || 0, var: !!precAttivo.variazioni } : null;
   const suffConfronto = precAttivo ? ` (confronto con ${precAttivo.stagione}${precAttivo.variazioni ? ", variazioni %" : ""})` : "";
@@ -7713,11 +7734,12 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       const kpi = [
         ["Valore della produzione e altri proventi", int0(ricaviCE)],
         ["Costi e oneri", int0(costiCE)],
-        ["Risultato d'esercizio", int0(P.risultato)],
+        [periodo ? "Risultato del periodo" : "Risultato d'esercizio", int0(P.risultato)],
+        ...(periodo ? [["Risultato progressivo dall'inizio esercizio", int0(P.risultatoProgressivo)]] : []),
         ["Totale attivo", int0(P.totAttivo)],
         ["Patrimonio netto", int0(pn)],
         ["Debiti e altre passività", int0(P.totPassivo - pn)],
-        ["N. movimenti registrati", `${movimenti.length}`],
+        ["N. movimenti registrati", `${movPer.length}`],
         ["N. conti movimentati", `${dati.mastrini.filter(m => m.dare > 0 || m.avere > 0).length}`],
       ];
       kpi.forEach(([k,v], i) => {
@@ -7933,7 +7955,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       doc.text(`${num.mov}. Elenco Movimenti`, 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
-      const movRows = movimenti
+      const movRows = [...movPer]
         .sort((a,b) => (a.data || "").localeCompare(b.data || ""))
         .map(m => [
           m.tipo ? m.tipo.charAt(0).toUpperCase() + m.tipo.slice(1) : "",
@@ -7992,18 +8014,18 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
   // ============================================================
   const datiBU = useMemo(() => {
     const investSet = new Set((categorieRF && categorieRF.investimenti) || []);
-    const ledger = generaLibroGiornale(movimenti || [], {}, contiMap);
+    const ledger = generaLibroGiornale(movPer || [], {}, contiMap);
 
     // stessa chiave usata dal libro giornale: i movimenti senza BU confluiscono in GENERAL,
     // così conteggi, conti e flussi di cassa della stessa BU parlano sempre degli stessi movimenti
     const keyBU = (m) => m.bu || "GENERAL";
     const counts = {};
-    (movimenti || []).forEach(m => { const b = keyBU(m); counts[b] = (counts[b] || 0) + 1; });
+    (movPer || []).forEach(m => { const b = keyBU(m); counts[b] = (counts[b] || 0) + 1; });
 
     // Un'apertura è tale se lo dice il movimento che l'ha generata: così le
     // immobilizzazioni già presenti al 01/09 non risultano investimenti del periodo
     // anche quando la scrittura non porta il flag.
-    const idsApertura = new Set((movimenti || []).filter(isAperturaMov).map(m => m._id));
+    const idsApertura = new Set((movPer || []).filter(isAperturaMov).map(m => m._id));
     const scritturaDiApertura = (scr) =>
       scr.apertura === true || scr.origine === "apertura" || idsApertura.has(scr.movId);
 
@@ -8058,7 +8080,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
         return cat.startsWith("IMM.") ? s + (c.dare - c.avere) : s;
       }, 0);
 
-      const movs = (movimenti || []).filter(m => keyBU(m) === nome);
+      const movs = (movPer || []).filter(m => keyBU(m) === nome);
       const rf = buildRendiconto(movs, conti, {}, investSet);
 
       return {
@@ -8071,7 +8093,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
         rf,
       };
     });
-  }, [movimenti, contiMap, conti, categorieRF, bu]);
+  }, [movPer, contiMap, conti, categorieRF, bu]);
 
   // ============================================================
   // HELPER EXCEL — fogli impaginati come prospetto
@@ -8459,13 +8481,19 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       {/* SITUAZIONE A UNA DATA: vale per tutti gli export */}
       <div className="card" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 260px" }}>
-          <h3 className="card-title" style={{ margin: 0 }}>📅 Situazione al</h3>
+          <h3 className="card-title" style={{ margin: 0 }}>📅 Periodo</h3>
           <div className="sub" style={{ fontSize: 12, marginTop: 4 }}>
-            {alData ? `Tutti i documenti considerano solo le registrazioni fino al ${alData.split("-").reverse().join("/")} (il confronto usa la stessa data dell'anno prima).` : "Vuoto = intero esercizio. Scegli una data per bilanci intermedi."}
+            {periodo
+              ? `Conto economico, rendiconto, Business Unit ed elenco movimenti: solo dal ${dalData.split("-").reverse().join("/")}${alData ? " al " + alData.split("-").reverse().join("/") : ""}. Stato patrimoniale e verifica: situazione ${alData ? "al " + alData.split("-").reverse().join("/") : "a oggi"}. Il confronto con l'anno prima è spento.`
+              : alData ? `Tutti i documenti considerano solo le registrazioni fino al ${alData.split("-").reverse().join("/")} (il confronto usa la stessa data dell'anno prima).`
+              : "Vuoto = intero esercizio. Scegli \"Dal\" e/o \"Al\" per un periodo o un bilancio intermedio."}
           </div>
         </div>
-        <input type="date" value={alData} onChange={e => setAlData(e.target.value)} style={{ padding: "6px 8px" }} />
-        {alData && <button className="btn sm" onClick={() => setAlData("")}>Intero esercizio</button>}
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}>Dal
+          <input type="date" value={dalData} max={alData || undefined} onChange={e => setDalData(e.target.value)} style={{ padding: "6px 8px" }} /></label>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}>Al
+          <input type="date" value={alData} min={dalData || undefined} onChange={e => setAlData(e.target.value)} style={{ padding: "6px 8px" }} /></label>
+        {(alData || dalData) && <button className="btn sm" onClick={() => { setAlData(""); setDalData(""); }}>Intero esercizio</button>}
       </div>
 
       {/* BILANCIO COMPARATIVO: vale per pacchetto completo, SP, CE, RF ed Excel */}
