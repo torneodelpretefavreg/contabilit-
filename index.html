@@ -1165,7 +1165,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION = "3.75.0";
+const APP_VERSION = "3.76.0";
 // Nome file sicuro anche per le stagioni "situazione al gg-mm-aaaa"
 const nomeFileStag = (x) => String(x || "").replace(/\s*·\s*situazione al\s*/, "_al_").replace(/[^\w.-]+/g, "_");
 const ACCOUNT_EMAIL = "torneodelpretefavreg@gmail.com"; // account Firebase dell'app: la password NON sta nel codice, la verifica Firebase
@@ -7634,13 +7634,25 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
   };
 
   // === EXPORT: PACCHETTO COMPLETO PDF ===
+  const PK_DOCS = [
+    { k: "ver", t: "Bilancio di Verifica" }, { k: "sp", t: "Stato Patrimoniale" }, { k: "ce", t: "Conto Economico" },
+    { k: "rf", t: "Rendiconto Finanziario" }, { k: "ricl", t: "Rendiconto Riclassificato" }, { k: "bu", t: "Riepilogo per Business Unit" },
+    { k: "cesp", t: "Libro Cespiti" }, { k: "mov", t: "Elenco Movimenti" }, { k: "idx", t: "Indici di bilancio" },
+  ];
+  const [selPk, setSelPk] = useState(() => PK_DOCS.map(d => d.k));
+  const togglePk = (k) => setSelPk(v => v.includes(k) ? v.filter(x => x !== k) : PK_DOCS.map(d => d.k).filter(x => x === k || v.includes(x)));
   const exportPacchettoCompleto = () => {
-    if (!prospettiSchema || !rfDirSchema) return;
+    if (!prospettiSchema || !rfDirSchema || !selPk.length) return;
     setBusy(true);
     try {
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
       const W = doc.internal.pageSize.width;
+      const Wl = 297; // larghezza A4 orizzontale
+      const inc = (k) => selPk.includes(k);
+      const cfPk = cfEx;
+      const tutti = PK_DOCS.every(d => inc(d.k));
+      const num = {}; PK_DOCS.filter(d => inc(d.k)).forEach((d, i) => { num[d.k] = i + 1; });
       const H = doc.internal.pageSize.height;
 
       // === FRONTESPIZIO ===
@@ -7648,7 +7660,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(22);
       doc.text("FUTSAL FABBRICO ASD", W/2, 28, { align: "center" });
       doc.setFontSize(13); doc.setFont("helvetica", "normal");
-      doc.text("Bilancio Contabile Completo", W/2, 40, { align: "center" });
+      doc.text(tutti ? "Bilancio Contabile Completo" : "Prospetti di bilancio", W/2, 40, { align: "center" });
       doc.setFontSize(11); doc.setTextColor(180);
       doc.text(`Stagione ${stagione}`, W/2, 50, { align: "center" });
       doc.setTextColor(0);
@@ -7661,17 +7673,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       doc.setFontSize(12); doc.setFont("helvetica","bold");
       doc.text("Indice del documento", 30, 115);
       doc.setFontSize(10); doc.setFont("helvetica","normal");
-      const indice = [
-        "1.  Bilancio di Verifica",
-        "2.  Stato Patrimoniale",
-        "3.  Conto Economico",
-        "4.  Rendiconto Finanziario",
-        "5.  Rendiconto Riclassificato",
-        "6.  Riepilogo per Business Unit",
-        "7.  Libro Cespiti",
-        "8.  Elenco Movimenti",
-        "9.  Indici di bilancio",
-      ];
+      const indice = PK_DOCS.filter(d => inc(d.k)).map((d, i) => `${i + 1}.  ${d.t}`);
       indice.forEach((s, i) => doc.text(s, 35, 125 + i * 6.5));
 
       // KPI di sintesi nel frontespizio
@@ -7707,10 +7709,11 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       doc.text("Generato da App Contabilità Futsal Fabbrico ASD", W/2, H - 12, { align: "center" });
       doc.setTextColor(0);
 
+      if (inc("ver")) {
       // === 1. BILANCIO DI VERIFICA ===
       doc.addPage();
       doc.setFont("helvetica", "bold"); doc.setFontSize(14);
-      doc.text("1. Bilancio di Verifica", 14, 18);
+      doc.text(`${num.ver}. Bilancio di Verifica`, 14, 18);
       doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
 
       const mastriniAttivi = dati.mastrini.filter(m => m.dare > 0 || m.avere > 0);
@@ -7738,14 +7741,16 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
         columnStyles: { 0:{cellWidth:12, halign:"center"}, 3:{cellWidth:24, halign:"right"}, 4:{cellWidth:24, halign:"right"}, 5:{cellWidth:26, halign:"right"} },
       });
 
+      }
+
+      if (inc("sp")) {
       // === 2. STATO PATRIMONIALE (identico ai Prospetti Ufficiali / Schema di Bilancio) ===
       doc.addPage();
       doc.setFont("helvetica", "bold"); doc.setFontSize(14);
-      doc.text("2. Stato Patrimoniale", 14, 18);
+      doc.text(`${num.sp}. Stato Patrimoniale`, 14, 18);
       doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
 
       const bSP = creaPdfBuilder(stagione, "portrait", doc);
-      const cfPk = cfEx;
       const pcPk = (k, stile, cur) => celleConfrontoPdf(cfPk, k, stile, cur, bSP.money);
       if (cfPk) { doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(110); doc.text(`Confronto con ${cfPk.precStagione}`, W - 14, 18, { align: "right" }); doc.setTextColor(0); }
       const attivoRowsPk = prospettiSchema.sp.filter(c => c.lato === "attivo").flatMap(cl => bSP.righeClasse(cl, ". ", cfPk));
@@ -7766,10 +7771,13 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
                          bSP.money(prospettiSchema.sbilancio), bSP.ROSSO);
       }
 
+      }
+
+      if (inc("ce")) {
       // === 3. CONTO ECONOMICO ===
       doc.addPage();
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("3. Conto Economico", 14, 18);
+      doc.text(`${num.ce}. Conto Economico`, 14, 18);
       doc.setDrawColor(26,26,26); doc.line(14, 21, W - 14, 21);
 
       const bCE = creaPdfBuilder(stagione, "portrait", doc);
@@ -7800,11 +7808,14 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
                        (cfPk ? `     ${cfPk.precStagione}: ${bCE.money(rPrec)}` +
                          (cfPk.var && Math.abs(rPrec) > 0.004 ? `  (${prospettiSchema.risultato - rPrec >= 0 ? "+" : ""}${numIT((prospettiSchema.risultato - rPrec) / Math.abs(rPrec) * 100, 1)}%)` : "") : ""), bCE.NERO);
 
+      }
+
+      if (inc("rf")) {
       // === 4. RENDICONTO FINANZIARIO — metodo diretto (landscape) ===
       doc.addPage("a4", "landscape");
-      const Wl = doc.internal.pageSize.width;
+      
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("4. Rendiconto Finanziario", 14, 14);
+      doc.text(`${num.rf}.. Rendiconto Finanziario`, 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const bRF = creaPdfBuilder(stagione, "landscape", doc);
@@ -7839,21 +7850,30 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       });
 
 
+      }
+
+      if (inc("ricl")) {
       // === 5. RENDICONTO RICLASSIFICATO (portrait) ===
       // Stesso prospetto della pagina Schema di Bilancio, tab "RF Riclassificato".
       if (rfRiclSchema) {
         doc.addPage("a4", "portrait");
-        generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, "5. Rendiconto Riclassificato", false,
+        generaPdfRfRiclassificato(rfRiclSchema, stagione, doc, `${num.ricl}. Rendiconto Riclassificato`, false,
           precAttivo ? { R: precAttivo.rfRicl, stagione: precAttivo.stagione, variazioni: precAttivo.variazioni } : null);
       }
 
-      // === 6. RIEPILOGO PER BUSINESS UNIT (landscape) ===
-      generaPdfRiepilogoBU(datiBU, stagione, doc, "6. Riepilogo per Business Unit");
+      }
 
+      if (inc("bu")) {
+      // === 6. RIEPILOGO PER BUSINESS UNIT (landscape) ===
+      generaPdfRiepilogoBU(datiBU, stagione, doc, `${num.bu}. Riepilogo per Business Unit`);
+
+      }
+
+      if (inc("cesp")) {
       // === 7. CESPITI (landscape) ===
       doc.addPage("a4", "landscape");
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("7. Libro Cespiti", 14, 14);
+      doc.text(`${num.cesp}. Libro Cespiti`, 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const totCosto = cespitiInCarico.reduce((s,c) => s + (c.costo_storico || 0), 0);
@@ -7884,10 +7904,13 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
       });
       tabellaDismessi(doc, doc.lastAutoTable.finalY + 10);
 
+      }
+
+      if (inc("mov")) {
       // === 8. ELENCO MOVIMENTI ===
       doc.addPage("a4", "landscape");
       doc.setFont("helvetica","bold"); doc.setFontSize(14);
-      doc.text("8. Elenco Movimenti", 14, 14);
+      doc.text(`${num.mov}. Elenco Movimenti`, 14, 14);
       doc.setDrawColor(26,26,26); doc.line(14, 17, Wl - 14, 17);
 
       const movRows = movimenti
@@ -7911,11 +7934,16 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
         columnStyles: { 6: { halign: "right" } },
       });
 
+      }
+
+      if (inc("idx")) {
       // === 9. INDICI DI BILANCIO (con il commento scritto nell'app) ===
       if (rfRiclSchema) {
         doc.addPage("a4", "portrait");
         const di = datiIndici();
-        generaPdfIndici({ stagione, ...di, doc, titolo: "9. Indici di bilancio" });
+        generaPdfIndici({ stagione, ...di, doc, titolo: `${num.idx}. Indici di bilancio` });
+      }
+
       }
 
       // === FOOTER su tutte le pagine ===
@@ -7929,7 +7957,7 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
         }
       }
 
-      doc.save(`Bilancio_Completo_FutsalFabbrico_${stagioneFile}${cfEx ? "_vs_" + nomeFileStag(cfEx.precStagione) + (cfEx.var ? "_variazioni" : "") : ""}.pdf`);
+      doc.save(`${tutti ? "Bilancio_Completo" : "Bilancio"}_FutsalFabbrico_${stagioneFile}${cfEx ? "_vs_" + nomeFileStag(cfEx.precStagione) + (cfEx.var ? "_variazioni" : "") : ""}.pdf`);
       setLastAction("📦 Pacchetto completo PDF esportato");
     } catch(e) { alert("Errore: " + e.message); }
     finally { setBusy(false); }
@@ -8453,8 +8481,17 @@ function PageExport({ conti, movimenti: movimentiTutti, cespiti, saldiIniziali, 
           <br/>
           <strong>Ideale per la chiusura annuale e la presentazione al direttivo.</strong>
         </p>
-        <button className="btn accent" onClick={exportPacchettoCompleto} disabled={busy || !prospettiSchema || !rfDirSchema}>
-          {busy ? "Generando…" : (!prospettiSchema || !rfDirSchema) ? "Caricamento schema…" : "Scarica pacchetto completo"}
+        <div style={{fontSize:12, color:"var(--ink-3)", margin:"0 0 6px"}}>Cosa includere:</div>
+        <div className="tes-chips" style={{marginBottom:8}}>
+          {PK_DOCS.map(d => <button key={d.k} className={"tes-chip" + (selPk.includes(d.k) ? " on" : "")} onClick={() => togglePk(d.k)}>{selPk.includes(d.k) ? "✓ " : ""}{d.t}</button>)}
+        </div>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:12}}>
+          <button className="btn sm" onClick={() => setSelPk(PK_DOCS.map(d => d.k))}>Tutti</button>
+          <button className="btn sm" onClick={() => setSelPk(["sp", "ce", "rf"])}>Solo SP, CE e RF</button>
+          <button className="btn sm" onClick={() => setSelPk([])}>Nessuno</button>
+        </div>
+        <button className="btn accent" onClick={exportPacchettoCompleto} disabled={busy || !prospettiSchema || !rfDirSchema || !selPk.length}>
+          {busy ? "Generando…" : (!prospettiSchema || !rfDirSchema) ? "Caricamento schema…" : !selPk.length ? "Scegli almeno un documento" : selPk.length === PK_DOCS.length ? "Scarica pacchetto completo" : `Scarica PDF (${selPk.length} document${selPk.length === 1 ? "o" : "i"})`}
         </button>
       </div>
 
